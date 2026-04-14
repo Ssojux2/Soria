@@ -1,0 +1,568 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXContainerItemProxy section */
+		847E37E62F8DFFD200A8EB7B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 847E37D02F8DFFD000A8EB7B /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 847E37D72F8DFFD000A8EB7B;
+			remoteInfo = Soria;
+		};
+		847E37F02F8DFFD200A8EB7B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 847E37D02F8DFFD000A8EB7B /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 847E37D72F8DFFD000A8EB7B;
+			remoteInfo = Soria;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		847E37D82F8DFFD000A8EB7B /* Soria.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Soria.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		847E37E52F8DFFD200A8EB7B /* SoriaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SoriaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		847E37EF2F8DFFD200A8EB7B /* SoriaUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SoriaUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		847E37DA2F8DFFD000A8EB7B /* Soria */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Soria;
+			sourceTree = "<group>";
+		};
+		847E37E82F8DFFD200A8EB7B /* SoriaTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = SoriaTests;
+			sourceTree = "<group>";
+		};
+		847E37F22F8DFFD200A8EB7B /* SoriaUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = SoriaUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		847E37D52F8DFFD000A8EB7B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		847E37E22F8DFFD200A8EB7B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		847E37EC2F8DFFD200A8EB7B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		847E37CF2F8DFFD000A8EB7B = {
+			isa = PBXGroup;
+			children = (
+				847E37DA2F8DFFD000A8EB7B /* Soria */,
+				847E37E82F8DFFD200A8EB7B /* SoriaTests */,
+				847E37F22F8DFFD200A8EB7B /* SoriaUITests */,
+				847E37D92F8DFFD000A8EB7B /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		847E37D92F8DFFD000A8EB7B /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				847E37D82F8DFFD000A8EB7B /* Soria.app */,
+				847E37E52F8DFFD200A8EB7B /* SoriaTests.xctest */,
+				847E37EF2F8DFFD200A8EB7B /* SoriaUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		847E37D72F8DFFD000A8EB7B /* Soria */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 847E37F92F8DFFD200A8EB7B /* Build configuration list for PBXNativeTarget "Soria" */;
+			buildPhases = (
+				847E37D42F8DFFD000A8EB7B /* Sources */,
+				847E37D52F8DFFD000A8EB7B /* Frameworks */,
+				847E37D62F8DFFD000A8EB7B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				847E37DA2F8DFFD000A8EB7B /* Soria */,
+			);
+			name = Soria;
+			packageProductDependencies = (
+			);
+			productName = Soria;
+			productReference = 847E37D82F8DFFD000A8EB7B /* Soria.app */;
+			productType = "com.apple.product-type.application";
+		};
+		847E37E42F8DFFD200A8EB7B /* SoriaTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 847E37FC2F8DFFD200A8EB7B /* Build configuration list for PBXNativeTarget "SoriaTests" */;
+			buildPhases = (
+				847E37E12F8DFFD200A8EB7B /* Sources */,
+				847E37E22F8DFFD200A8EB7B /* Frameworks */,
+				847E37E32F8DFFD200A8EB7B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				847E37E72F8DFFD200A8EB7B /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				847E37E82F8DFFD200A8EB7B /* SoriaTests */,
+			);
+			name = SoriaTests;
+			packageProductDependencies = (
+			);
+			productName = SoriaTests;
+			productReference = 847E37E52F8DFFD200A8EB7B /* SoriaTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		847E37EE2F8DFFD200A8EB7B /* SoriaUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 847E37FF2F8DFFD200A8EB7B /* Build configuration list for PBXNativeTarget "SoriaUITests" */;
+			buildPhases = (
+				847E37EB2F8DFFD200A8EB7B /* Sources */,
+				847E37EC2F8DFFD200A8EB7B /* Frameworks */,
+				847E37ED2F8DFFD200A8EB7B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				847E37F12F8DFFD200A8EB7B /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				847E37F22F8DFFD200A8EB7B /* SoriaUITests */,
+			);
+			name = SoriaUITests;
+			packageProductDependencies = (
+			);
+			productName = SoriaUITests;
+			productReference = 847E37EF2F8DFFD200A8EB7B /* SoriaUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		847E37D02F8DFFD000A8EB7B /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2640;
+				LastUpgradeCheck = 2640;
+				TargetAttributes = {
+					847E37D72F8DFFD000A8EB7B = {
+						CreatedOnToolsVersion = 26.4;
+					};
+					847E37E42F8DFFD200A8EB7B = {
+						CreatedOnToolsVersion = 26.4;
+						TestTargetID = 847E37D72F8DFFD000A8EB7B;
+					};
+					847E37EE2F8DFFD200A8EB7B = {
+						CreatedOnToolsVersion = 26.4;
+						TestTargetID = 847E37D72F8DFFD000A8EB7B;
+					};
+				};
+			};
+			buildConfigurationList = 847E37D32F8DFFD000A8EB7B /* Build configuration list for PBXProject "Soria" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 847E37CF2F8DFFD000A8EB7B;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 847E37D92F8DFFD000A8EB7B /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				847E37D72F8DFFD000A8EB7B /* Soria */,
+				847E37E42F8DFFD200A8EB7B /* SoriaTests */,
+				847E37EE2F8DFFD200A8EB7B /* SoriaUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		847E37D62F8DFFD000A8EB7B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		847E37E32F8DFFD200A8EB7B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		847E37ED2F8DFFD200A8EB7B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		847E37D42F8DFFD000A8EB7B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		847E37E12F8DFFD200A8EB7B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		847E37EB2F8DFFD200A8EB7B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		847E37E72F8DFFD200A8EB7B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 847E37D72F8DFFD000A8EB7B /* Soria */;
+			targetProxy = 847E37E62F8DFFD200A8EB7B /* PBXContainerItemProxy */;
+		};
+		847E37F12F8DFFD200A8EB7B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 847E37D72F8DFFD000A8EB7B /* Soria */;
+			targetProxy = 847E37F02F8DFFD200A8EB7B /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		847E37F72F8DFFD200A8EB7B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.3;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		847E37F82F8DFFD200A8EB7B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.3;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		847E37FA2F8DFFD200A8EB7B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bluepenguin.Soria;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		847E37FB2F8DFFD200A8EB7B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bluepenguin.Soria;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		847E37FD2F8DFFD200A8EB7B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.3;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bluepenguin.SoriaTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Soria.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Soria";
+			};
+			name = Debug;
+		};
+		847E37FE2F8DFFD200A8EB7B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.3;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bluepenguin.SoriaTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Soria.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Soria";
+			};
+			name = Release;
+		};
+		847E38002F8DFFD200A8EB7B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bluepenguin.SoriaUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = Soria;
+			};
+			name = Debug;
+		};
+		847E38012F8DFFD200A8EB7B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bluepenguin.SoriaUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = Soria;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		847E37D32F8DFFD000A8EB7B /* Build configuration list for PBXProject "Soria" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				847E37F72F8DFFD200A8EB7B /* Debug */,
+				847E37F82F8DFFD200A8EB7B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		847E37F92F8DFFD200A8EB7B /* Build configuration list for PBXNativeTarget "Soria" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				847E37FA2F8DFFD200A8EB7B /* Debug */,
+				847E37FB2F8DFFD200A8EB7B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		847E37FC2F8DFFD200A8EB7B /* Build configuration list for PBXNativeTarget "SoriaTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				847E37FD2F8DFFD200A8EB7B /* Debug */,
+				847E37FE2F8DFFD200A8EB7B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		847E37FF2F8DFFD200A8EB7B /* Build configuration list for PBXNativeTarget "SoriaUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				847E38002F8DFFD200A8EB7B /* Debug */,
+				847E38012F8DFFD200A8EB7B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 847E37D02F8DFFD000A8EB7B /* Project object */;
+}
