@@ -114,25 +114,8 @@ struct SearchView: View {
                 TableColumn("Genre") { row in
                     Text(row.track.genre.isEmpty ? "-" : row.track.genre)
                 }
-                TableColumn("Track") { row in
-                    Text(String(format: "%.3f", row.trackScore))
-                }
-                TableColumn("Intro") { row in
-                    Text(String(format: "%.3f", row.introScore))
-                }
-                TableColumn("Middle") { row in
-                    Text(String(format: "%.3f", row.middleScore))
-                }
-                TableColumn("Outro") { row in
-                    Text(String(format: "%.3f", row.outroScore))
-                }
                 TableColumn("Best Match") { row in
                     Text(row.bestMatchedCollection)
-                }
-                TableColumn("Queue") { row in
-                    Button("+") {
-                        viewModel.appendToPlaylist(row.track)
-                    }
                 }
             }
             .frame(minHeight: 300)
