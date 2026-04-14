@@ -28,6 +28,7 @@ final class LibraryScannerService {
             var pathIndex = Dictionary(uniqueKeysWithValues: existingTracks.map { ($0.filePath, $0) })
 
             for fileURL in files {
+                let normalizedPath = TrackPathNormalizer.normalizedAbsolutePath(fileURL)
                 progress.scannedFiles += 1
                 progress.currentFile = fileURL.lastPathComponent
                 onProgress(progress)
@@ -35,7 +36,7 @@ final class LibraryScannerService {
                 do {
                     let attrs = try fm.attributesOfItem(atPath: fileURL.path)
                     let modified = (attrs[.modificationDate] as? Date) ?? .distantPast
-                    let previous = pathIndex[fileURL.path]
+                    let previous = pathIndex[normalizedPath]
                     if let previous, previous.modifiedTime >= modified {
                         progress.skippedFiles += 1
                         onProgress(progress)
@@ -43,17 +44,29 @@ final class LibraryScannerService {
                     }
 
                     let hash = FileHashingService.contentHash(for: fileURL)
-                    if let dupes = hashIndex[hash], dupes.contains(where: { $0.filePath != fileURL.path }) {
+                    if let dupes = hashIndex[hash], dupes.contains(where: { $0.filePath != normalizedPath }) {
                         progress.duplicateFiles += 1
                         onProgress(progress)
                         continue
                     }
 
                     let metadata = await AudioMetadataReader.readMetadata(for: fileURL)
-                    var track = previous ?? Track.empty(path: fileURL.path, modifiedTime: modified, hash: hash)
+                    var track = previous ?? Track.empty(path: normalizedPath, modifiedTime: modified, hash: hash)
+                    let fileChanged = previous != nil
+                    if fileChanged, let previous, previous.analyzedAt != nil {
+                        try database.clearAnalysis(trackID: previous.id)
+                        if track.bpmSource == .soriaAnalysis {
+                            track.bpm = nil
+                            track.bpmSource = nil
+                        }
+                        if track.keySource == .soriaAnalysis {
+                            track.musicalKey = nil
+                            track.keySource = nil
+                        }
+                    }
                     track = Track(
                         id: track.id,
-                        filePath: fileURL.path,
+                        filePath: normalizedPath,
                         fileName: fileURL.lastPathComponent,
                         title: metadata.title,
                         artist: metadata.artist,
@@ -65,12 +78,16 @@ final class LibraryScannerService {
                         musicalKey: metadata.musicalKey,
                         modifiedTime: modified,
                         contentHash: hash,
-                        analyzedAt: track.analyzedAt,
+                        analyzedAt: fileChanged ? nil : track.analyzedAt,
+                        embeddingProfileID: fileChanged ? nil : track.embeddingProfileID,
+                        embeddingUpdatedAt: fileChanged ? nil : track.embeddingUpdatedAt,
                         hasSeratoMetadata: track.hasSeratoMetadata,
-                        hasRekordboxMetadata: track.hasRekordboxMetadata
+                        hasRekordboxMetadata: track.hasRekordboxMetadata,
+                        bpmSource: metadata.bpm == nil ? track.bpmSource : .audioTags,
+                        keySource: metadata.musicalKey == nil ? track.keySource : .audioTags
                     )
                     try database.upsertTrack(track)
-                    pathIndex[fileURL.path] = track
+                    pathIndex[normalizedPath] = track
                     hashIndex[hash, default: []].append(track)
                     progress.indexedFiles += 1
                 } catch {

@@ -47,6 +47,9 @@ class CLAPEmbeddingClient:
                     self._write_cache(text, vector)
         return outputs
 
+    def validate(self, probe_text: str) -> list[float] | None:
+        return self._embed_texts([probe_text])[0]
+
     def _embed_texts(self, texts: list[str]) -> list[list[float] | None]:
         try:
             inputs = self._processor(text=texts, return_tensors="pt", padding=True, truncation=True)

@@ -45,6 +45,11 @@ class GeminiEmbeddingClient:
                     self._write_cache(text, vector)
         return outputs
 
+    def validate(self, probe_text: str) -> list[float] | None:
+        if not self.api_key:
+            return None
+        return self._embed_single_with_retry(probe_text)
+
     def _cache_key(self, text: str) -> str:
         return hashlib.sha256((self.api_version + "::" + self.model + "::" + text).encode("utf-8")).hexdigest()
 

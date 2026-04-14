@@ -39,7 +39,11 @@ final class ExternalMetadataService {
                 lastPlayed: parsedDate(element.attribute(forName: "DateAdded")?.stringValue),
                 playlistMemberships: playlistsByTrackID[trackID] ?? [],
                 cueCount: cueCount == 0 ? nil : cueCount,
-                comment: comment
+                comment: comment,
+                vendorTrackID: trackID,
+                analysisState: nil,
+                analysisCachePath: nil,
+                syncVersion: nil
             )
         }
     }
@@ -72,23 +76,17 @@ final class ExternalMetadataService {
                 lastPlayed: parsedDate(row["last_played"]),
                 playlistMemberships: splitPipeList(playlistText),
                 cueCount: Int(row["cue_count"] ?? ""),
-                comment: nilIfEmpty(row["comment"] ?? "")
+                comment: nilIfEmpty(row["comment"] ?? ""),
+                vendorTrackID: nilIfEmpty(row["id"] ?? row["track_id"]),
+                analysisState: nilIfEmpty(row["analysis_state"]),
+                analysisCachePath: nilIfEmpty(row["analysis_cache_path"]),
+                syncVersion: nilIfEmpty(row["sync_version"])
             )
         }
     }
 
     func normalizedTrackPath(_ input: String) -> String {
-        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "" }
-
-        if let url = URL(string: trimmed), url.isFileURL {
-            return url.path
-        }
-
-        let cleaned = trimmed
-            .replacingOccurrences(of: "file://localhost", with: "")
-            .replacingOccurrences(of: "file://", with: "")
-        return cleaned.removingPercentEncoding ?? cleaned
+        TrackPathNormalizer.normalizedAbsolutePath(input)
     }
 
     private func splitPipeList(_ input: String) -> [String] {

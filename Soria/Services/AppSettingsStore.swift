@@ -1,11 +1,15 @@
+import CryptoKit
 import Foundation
 
 enum AppSettingsStore {
     private static let pythonExecutableKey = "settings.pythonExecutablePath"
     private static let workerScriptKey = "settings.workerScriptPath"
-    private static let geminiAPIKeyAccount = "gemini_api_key"
-    private static let embeddingProviderKey = "settings.embeddingProvider"
-    private static let embeddingProviderLockedKey = "settings.embeddingProviderLocked"
+    private static let googleAIAPIKeyAccount = "google_ai_api_key"
+    private static let legacyGeminiAPIKeyAccount = "gemini_api_key"
+    private static let embeddingProfileIDKey = "settings.embeddingProfileID"
+    private static let lastValidatedKeyHashKey = "settings.lastValidatedKeyHash"
+    private static let lastValidatedProfileIDKey = "settings.lastValidatedProfileID"
+    private static let lastValidatedAtKey = "settings.lastValidatedAt"
 
     static func loadPythonExecutablePath() -> String {
         if let environmentValue = ProcessInfo.processInfo.environment["SORIA_PYTHON"], !environmentValue.isEmpty {
@@ -38,46 +42,87 @@ enum AppSettingsStore {
         UserDefaults.standard.set(path.trimmingCharacters(in: .whitespacesAndNewlines), forKey: workerScriptKey)
     }
 
-    static func loadGeminiAPIKey() -> String {
-        if let environmentValue = ProcessInfo.processInfo.environment["GEMINI_API_KEY"], !environmentValue.isEmpty {
-            return environmentValue
+    static func loadGoogleAIAPIKey() -> String {
+        let environment = ProcessInfo.processInfo.environment
+        for key in ["GOOGLE_AI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"] {
+            if let value = environment[key], !value.isEmpty {
+                return value
+            }
         }
-        return AppKeychain.load(account: geminiAPIKeyAccount) ?? ""
+        return AppKeychain.load(account: googleAIAPIKeyAccount)
+            ?? AppKeychain.load(account: legacyGeminiAPIKeyAccount)
+            ?? ""
     }
 
-    static func saveGeminiAPIKey(_ apiKey: String) throws {
+    static func saveGoogleAIAPIKey(_ apiKey: String) throws {
         let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        // 한국어: 민감한 키는 Keychain에 저장해 앱 재실행 후에도 안전하게 유지합니다.
         if trimmed.isEmpty {
-            try AppKeychain.delete(account: geminiAPIKeyAccount)
+            try AppKeychain.delete(account: googleAIAPIKeyAccount)
+            try AppKeychain.delete(account: legacyGeminiAPIKeyAccount)
         } else {
-            try AppKeychain.save(trimmed, account: geminiAPIKeyAccount)
+            try AppKeychain.save(trimmed, account: googleAIAPIKeyAccount)
         }
     }
 
-    static func loadEmbeddingProvider() -> EmbeddingProvider {
-        if
-            let rawValue = UserDefaults.standard.string(forKey: embeddingProviderKey),
-            let provider = EmbeddingProvider(rawValue: rawValue)
-        {
-            return provider
+    static func loadEmbeddingProfile() -> EmbeddingProfile {
+        EmbeddingProfile.resolve(id: UserDefaults.standard.string(forKey: embeddingProfileIDKey))
+    }
+
+    static func saveEmbeddingProfile(_ profile: EmbeddingProfile) {
+        UserDefaults.standard.set(profile.id, forKey: embeddingProfileIDKey)
+    }
+
+    static func currentValidationStatus(apiKey: String, profile: EmbeddingProfile) -> ValidationStatus {
+        computeValidationStatus(
+            apiKey: apiKey,
+            profile: profile,
+            storedKeyHash: UserDefaults.standard.string(forKey: lastValidatedKeyHashKey),
+            storedProfileID: UserDefaults.standard.string(forKey: lastValidatedProfileIDKey),
+            storedAt: lastValidatedAt()
+        )
+    }
+
+    static func computeValidationStatus(
+        apiKey: String,
+        profile: EmbeddingProfile,
+        storedKeyHash: String?,
+        storedProfileID: String?,
+        storedAt: Date?
+    ) -> ValidationStatus {
+        guard
+            let storedKeyHash,
+            let storedProfileID,
+            let storedAt
+        else {
+            return .unvalidated
         }
-        return .googleEmbedding2
-    }
 
-    static func loadEmbeddingProviderLocked() -> Bool {
-        UserDefaults.standard.bool(forKey: embeddingProviderLockedKey)
-    }
-
-    static func saveEmbeddingProvider(_ provider: EmbeddingProvider) {
-        UserDefaults.standard.set(provider.rawValue, forKey: embeddingProviderKey)
-    }
-
-    static func lockEmbeddingProviderIfNeeded(_ provider: EmbeddingProvider) {
-        if !loadEmbeddingProviderLocked() {
-            saveEmbeddingProvider(provider)
-            UserDefaults.standard.set(true, forKey: embeddingProviderLockedKey)
+        guard storedProfileID == profile.id else {
+            return .unvalidated
         }
+
+        guard storedKeyHash == hashAPIKey(apiKey) else {
+            return .unvalidated
+        }
+
+        return .validated(storedAt)
+    }
+
+    static func markValidationSuccess(apiKey: String, profile: EmbeddingProfile, date: Date = Date()) {
+        UserDefaults.standard.set(hashAPIKey(apiKey), forKey: lastValidatedKeyHashKey)
+        UserDefaults.standard.set(profile.id, forKey: lastValidatedProfileIDKey)
+        UserDefaults.standard.set(LibraryDatabase.iso8601.string(from: date), forKey: lastValidatedAtKey)
+    }
+
+    static func clearValidationMetadata() {
+        UserDefaults.standard.removeObject(forKey: lastValidatedKeyHashKey)
+        UserDefaults.standard.removeObject(forKey: lastValidatedProfileIDKey)
+        UserDefaults.standard.removeObject(forKey: lastValidatedAtKey)
+    }
+
+    static func hashAPIKey(_ apiKey: String) -> String {
+        let digest = SHA256.hash(data: Data(apiKey.trimmingCharacters(in: .whitespacesAndNewlines).utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     static func detectedPythonExecutablePath() -> String? {
@@ -110,5 +155,12 @@ enum AppSettingsStore {
             }
         }
         return nil
+    }
+
+    private static func lastValidatedAt() -> Date? {
+        guard let raw = UserDefaults.standard.string(forKey: lastValidatedAtKey) else {
+            return nil
+        }
+        return LibraryDatabase.iso8601.date(from: raw)
     }
 }

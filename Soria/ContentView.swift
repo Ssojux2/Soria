@@ -32,6 +32,8 @@ struct ContentView: View {
                     ScanJobsView(viewModel: viewModel)
                 case .analysis:
                     AnalysisView(viewModel: viewModel)
+                case .search:
+                    SearchView(viewModel: viewModel)
                 case .recommendations:
                     RecommendationsView(viewModel: viewModel)
                 case .exports:
@@ -58,6 +60,8 @@ struct ContentView: View {
             return "arrow.triangle.2.circlepath"
         case .analysis:
             return "waveform.path.ecg"
+        case .search:
+            return "magnifyingglass"
         case .recommendations:
             return "sparkles"
         case .exports:
@@ -73,47 +77,57 @@ private struct InitialSetupSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Choose Your Music Folder")
+            Text("Connect Your DJ Libraries")
                 .font(.title2.bold())
 
-            Text("Pick the folder that contains the tracks you want Soria to scan. You can optionally import existing rekordbox XML and Serato CSV metadata during the same setup flow.")
+            Text("Soria now starts from the libraries that Serato and rekordbox already know about. Use manual folder scanning only as a fallback when a DJ library is unavailable.")
                 .foregroundStyle(.secondary)
 
-            GroupBox("Music Folder") {
+            GroupBox("Auto-Detected DJ Libraries") {
                 VStack(alignment: .leading, spacing: 10) {
-                    pathLine(
-                        title: "Selected Folder",
-                        value: viewModel.initialSetupLibraryRoot,
-                        placeholder: "No music folder selected yet."
-                    )
+                    if viewModel.nativeLibrarySources.isEmpty {
+                        Text("No DJ libraries detected yet.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(viewModel.nativeLibrarySources) { source in
+                            sourceRow(source)
+                        }
+                    }
 
                     HStack {
-                        Button("Browse Folder") {
-                            viewModel.chooseInitialSetupLibraryRoot()
+                        Button("Refresh Detection") {
+                            viewModel.refreshLibrarySourceDetection()
                         }
+                        .disabled(viewModel.isRunningInitialSetup)
                         Spacer()
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            GroupBox("Optional DJ Metadata") {
+            GroupBox("Manual Folder Fallback") {
                 VStack(alignment: .leading, spacing: 14) {
-                    metadataRow(
-                        title: "rekordbox XML",
-                        value: viewModel.initialSetupRekordboxPath,
-                        placeholder: "Optional. Choose a rekordbox XML export.",
-                        browseAction: viewModel.chooseInitialSetupRekordboxFile,
-                        clearAction: { viewModel.clearInitialSetupMetadataPath(for: .rekordbox) }
+                    pathLine(
+                        title: "Selected Folder",
+                        value: viewModel.initialSetupLibraryRoot,
+                        placeholder: "Optional. Choose one folder if you want a manual fallback scan."
                     )
 
-                    metadataRow(
-                        title: "Serato CSV",
-                        value: viewModel.initialSetupSeratoPath,
-                        placeholder: "Optional. Choose a Serato CSV export.",
-                        browseAction: viewModel.chooseInitialSetupSeratoFile,
-                        clearAction: { viewModel.clearInitialSetupMetadataPath(for: .serato) }
-                    )
+                    HStack {
+                        Button("Browse Folder") {
+                            viewModel.chooseInitialSetupLibraryRoot()
+                        }
+                        .disabled(viewModel.isRunningInitialSetup)
+
+                        if !viewModel.initialSetupLibraryRoot.isEmpty {
+                            Button("Clear") {
+                                viewModel.clearInitialSetupLibraryRoot()
+                            }
+                            .disabled(viewModel.isRunningInitialSetup)
+                        }
+
+                        Spacer()
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -159,39 +173,59 @@ private struct InitialSetupSheet: View {
                     viewModel.completeInitialSetup()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(viewModel.initialSetupLibraryRoot.isEmpty || viewModel.isRunningInitialSetup)
+                .disabled(!canStartSetup || viewModel.isRunningInitialSetup)
             }
         }
         .padding(24)
-        .frame(minWidth: 620, minHeight: 430)
+        .frame(minWidth: 680, minHeight: 500)
     }
 
-    private func metadataRow(
-        title: String,
-        value: String,
-        placeholder: String,
-        browseAction: @escaping () -> Void,
-        clearAction: @escaping () -> Void
-    ) -> some View {
+    private var canStartSetup: Bool {
+        viewModel.nativeLibrarySources.contains { $0.enabled && $0.resolvedPath != nil } ||
+        !viewModel.initialSetupLibraryRoot.isEmpty
+    }
+
+    private func sourceRow(_ source: LibrarySourceRecord) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            pathLine(title: title, value: value, placeholder: placeholder)
+            HStack(alignment: .firstTextBaseline) {
+                Label(source.kind.displayName, systemImage: source.kind.iconName)
+                    .font(.headline)
+                Spacer()
+                Toggle(
+                    "Enabled",
+                    isOn: Binding(
+                        get: { source.enabled },
+                        set: { viewModel.setLibrarySourceEnabled(source.kind, enabled: $0) }
+                    )
+                )
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .disabled(source.resolvedPath == nil || viewModel.isRunningInitialSetup)
+            }
 
             HStack {
-                Button("Browse") {
-                    browseAction()
+                Text(source.status.displayText)
+                    .font(.footnote.weight(.semibold))
+                if let lastSyncAt = source.lastSyncAt {
+                    Text("Last sync \(lastSyncAt.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
-                .disabled(viewModel.isRunningInitialSetup)
+            }
 
-                if !value.isEmpty {
-                    Button("Clear") {
-                        clearAction()
-                    }
-                    .disabled(viewModel.isRunningInitialSetup)
-                }
+            Text(source.resolvedPath ?? "Not detected on this Mac.")
+                .font(.footnote)
+                .foregroundStyle(source.resolvedPath == nil ? .secondary : .primary)
+                .textSelection(.enabled)
+                .lineLimit(3)
 
-                Spacer()
+            if let lastError = source.lastError, !lastError.isEmpty {
+                Text(lastError)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
         }
+        .padding(.vertical, 4)
     }
 
     private func pathLine(title: String, value: String, placeholder: String) -> some View {

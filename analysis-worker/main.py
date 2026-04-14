@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import importlib.util
+import json
 import logging
 import os
 import sys
@@ -12,6 +12,19 @@ from typing import Any
 import numpy as np
 
 LOGGER = logging.getLogger("soria.worker")
+VALIDATION_PROBE_TEXT = "Soria validation probe for semantic DJ track search."
+EMBEDDING_PROFILES: dict[str, dict[str, Any]] = {
+    "google/text-embedding-004": {
+        "backend": "google_ai",
+        "model": "text-embedding-004",
+        "requires_api_key": True,
+    },
+    "local/clap-htsat-unfused": {
+        "backend": "clap",
+        "model": "laion/clap-htsat-unfused",
+        "requires_api_key": False,
+    },
+}
 
 
 def main() -> int:
@@ -21,14 +34,20 @@ def main() -> int:
         _configure_logging(cache_dir)
 
         command = payload.get("command")
-        if command == "healthcheck":
-            _print_json(handle_healthcheck(payload))
+        if command == "validate_embedding_profile":
+            _print_json(handle_validate_embedding_profile(payload))
             return 0
         if command == "analyze":
             _print_json(handle_analyze(payload))
             return 0
-        if command == "query_similar":
-            _print_json(handle_query_similar(payload))
+        if command == "embed_descriptors":
+            _print_json(handle_embed_descriptors(payload))
+            return 0
+        if command == "search_tracks":
+            _print_json(handle_search_tracks(payload))
+            return 0
+        if command == "healthcheck":
+            _print_json(handle_healthcheck(payload))
             return 0
 
         _print_json({"error": f"Unsupported command: {command}"})
@@ -39,55 +58,42 @@ def main() -> int:
         return 1
 
 
+def handle_validate_embedding_profile(payload: dict[str, Any]) -> dict[str, Any]:
+    profile = _resolve_embedding_profile(payload)
+    client = _build_embedding_client(payload, profile)
+    vector = client.validate(VALIDATION_PROBE_TEXT)
+    if not vector:
+        raise ValueError("Failed to validate the active embedding profile.")
+
+    return {
+        "ok": True,
+        "profileID": profile["id"],
+        "modelName": profile["model"],
+    }
+
+
 def handle_analyze(payload: dict[str, Any]) -> dict[str, Any]:
     analyze_track = _load_analyze_track()
-    ChromaVectorStore = _load_vector_store()
 
     file_path = payload["filePath"]
     track_metadata = payload.get("trackMetadata") or {}
-    options = payload.get("options") or {}
-    cache_dir = options.get("cacheDirectory") or str(Path.home() / ".soria-cache")
-
     analysis = analyze_track(file_path=file_path, track_metadata=track_metadata)
-    segments = analysis["segments"]
+    segments = [
+        {
+            "segment_type": segment.segment_type,
+            "start_sec": segment.start_sec,
+            "end_sec": segment.end_sec,
+            "energy_score": segment.energy_score,
+            "descriptor_text": segment.descriptor_text,
+        }
+        for segment in analysis["segments"]
+    ]
 
-    api_key = options.get("geminiAPIKey") or os.environ.get("GEMINI_API_KEY")
-    vector_dir = str(Path(cache_dir) / "vectordb")
-    Path(vector_dir).mkdir(parents=True, exist_ok=True)
-    embedding_provider = _resolve_embedding_provider(payload=payload, vector_dir=vector_dir)
-    embedding_client = _load_embedding_client(embedding_provider)(
-        api_key=api_key,
-        cache_dir=cache_dir,
-    )
-    segment_texts = [segment.descriptor_text for segment in segments]
-    segment_embeddings = embedding_client.embed_batch(segment_texts)
-    weighted_track_embedding = _weighted_embedding(segment_embeddings, segments)
-
-    store = ChromaVectorStore(persist_dir=vector_dir)
-    track_id = _stable_track_id(file_path)
-    scan_version = f"{track_metadata.get('contentHash', '')}|{track_metadata.get('modifiedTime', '')}"
-    store.upsert_segments(
-        track_id=track_id,
-        scan_version=scan_version,
-        track_metadata={
-            "file_path": file_path,
-            "bpm": track_metadata.get("bpm") or analysis.get("estimated_bpm"),
-            "musical_key": track_metadata.get("musicalKey") or analysis.get("estimated_key") or "",
-            "genre": track_metadata.get("genre") or "",
-            "duration_sec": track_metadata.get("duration") or 0,
-        },
-        segments=[
-            {
-                "segment_id": str(uuid.uuid4()),
-                "segment_type": segment.segment_type,
-                "start_sec": segment.start_sec,
-                "end_sec": segment.end_sec,
-                "energy_score": segment.energy_score,
-                "descriptor_text": segment.descriptor_text,
-                "embedding": embedding,
-            }
-            for segment, embedding in zip(segments, segment_embeddings)
-        ],
+    embedding_result = _embed_and_store_track(
+        payload=payload,
+        file_path=file_path,
+        track_metadata=track_metadata,
+        normalized_segments=segments,
     )
 
     return {
@@ -98,76 +104,167 @@ def handle_analyze(payload: dict[str, Any]) -> dict[str, Any]:
         "rhythmicDensity": analysis["rhythmic_density"],
         "lowMidHighBalance": analysis["low_mid_high_balance"],
         "waveformPreview": analysis["waveform_preview"],
-        "trackEmbedding": weighted_track_embedding,
-        "segments": [
-            {
-                "segmentType": segment.segment_type,
-                "startSec": segment.start_sec,
-                "endSec": segment.end_sec,
-                "energyScore": segment.energy_score,
-                "descriptorText": segment.descriptor_text,
-                "embedding": embedding,
-            }
-            for segment, embedding in zip(segments, segment_embeddings)
-        ],
+        "trackEmbedding": embedding_result["trackEmbedding"],
+        "segments": embedding_result["segments"],
+        "embeddingProfileID": embedding_result["embeddingProfileID"],
     }
 
 
-def handle_query_similar(payload: dict[str, Any]) -> dict[str, Any]:
-    if not payload.get("queryEmbedding"):
+def handle_embed_descriptors(payload: dict[str, Any]) -> dict[str, Any]:
+    track_metadata = payload.get("trackMetadata") or {}
+    normalized_segments = _normalize_payload_segments(payload.get("segments") or [])
+    if not normalized_segments:
+        return {
+            "trackEmbedding": None,
+            "segments": [],
+            "embeddingProfileID": _resolve_embedding_profile(payload)["id"],
+        }
+
+    return _embed_and_store_track(
+        payload=payload,
+        file_path=payload["filePath"],
+        track_metadata=track_metadata,
+        normalized_segments=normalized_segments,
+    )
+
+
+def handle_search_tracks(payload: dict[str, Any]) -> dict[str, Any]:
+    profile = _resolve_embedding_profile(payload)
+    store = _vector_store(payload, profile)
+    weights = payload.get("weights") or {}
+    limit = max(1, int(payload.get("limit") or 20))
+    mode = str(payload.get("mode") or "text").strip()
+    query_embeddings = _search_query_embeddings(payload, profile, mode)
+    if not query_embeddings:
         return {"results": []}
 
-    ChromaVectorStore = _load_vector_store()
-    options = payload.get("options") or {}
-    cache_dir = options.get("cacheDirectory") or str(Path.home() / ".soria-cache")
-    vector_dir = str(Path(cache_dir) / "vectordb")
-    Path(vector_dir).mkdir(parents=True, exist_ok=True)
-    _resolve_embedding_provider(payload=payload, vector_dir=vector_dir)
-
-    store = ChromaVectorStore(persist_dir=vector_dir)
-    response = store.query(
-        embedding=payload["queryEmbedding"],
-        n_results=max(10, int(payload.get("limit") or 50) * 4),
+    results = store.search(
+        query_embeddings=query_embeddings,
+        weights=weights,
+        n_results=max(limit * 4, 20),
         where=_build_where(payload.get("filters") or {}),
     )
 
-    distances = (response.get("distances") or [[]])[0] if response.get("distances") else []
-    metadatas = (response.get("metadatas") or [[]])[0] if response.get("metadatas") else []
     excluded_paths = set(payload.get("excludeTrackPaths") or [])
-
-    results_by_track: dict[str, dict[str, Any]] = {}
-    for metadata, distance in zip(metadatas, distances):
-        file_path = str(metadata.get("file_path", ""))
-        if not file_path or file_path in excluded_paths:
-            continue
-        similarity = 1.0 / (1.0 + float(distance))
-        existing = results_by_track.get(file_path)
-        if existing is None or similarity > float(existing["vectorSimilarity"]):
-            results_by_track[file_path] = {"filePath": file_path, "vectorSimilarity": similarity}
-
-    ordered = sorted(results_by_track.values(), key=lambda item: item["vectorSimilarity"], reverse=True)
-    return {"results": ordered[: int(payload.get("limit") or 50)]}
+    filtered = [
+        item
+        for item in results
+        if item.get("filePath") and str(item["filePath"]) not in excluded_paths
+    ]
+    return {"results": filtered[:limit]}
 
 
 def handle_healthcheck(payload: dict[str, Any]) -> dict[str, Any]:
-    options = payload.get("options") or {}
-    api_key = options.get("geminiAPIKey") or os.environ.get("GEMINI_API_KEY")
-    cache_dir = options.get("cacheDirectory") or str(Path.home() / ".soria-cache")
-    vector_dir = str(Path(cache_dir) / "vectordb")
-    lock_info = _read_embedding_lock(vector_dir)
+    profile = _resolve_embedding_profile(payload)
+    api_key = _resolve_google_ai_api_key(payload.get("options") or {})
     return {
         "ok": True,
         "apiKeyConfigured": bool(api_key),
         "pythonExecutable": sys.executable,
         "workerScriptPath": str(Path(__file__).resolve()),
-        "embeddingProviderLocked": lock_info["locked"],
-        "embeddingProvider": lock_info["provider"],
+        "embeddingProfileID": profile["id"],
         "dependencies": {
             "librosa": _module_available("librosa"),
             "chromadb": _module_available("chromadb"),
             "requests": _module_available("requests"),
         },
     }
+
+
+def _embed_and_store_track(
+    payload: dict[str, Any],
+    file_path: str,
+    track_metadata: dict[str, Any],
+    normalized_segments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    profile = _resolve_embedding_profile(payload)
+    client = _build_embedding_client(payload, profile)
+    segment_texts = [segment["descriptor_text"] for segment in normalized_segments]
+    segment_embeddings = client.embed_batch(segment_texts)
+    weighted_track_embedding = _weighted_embedding(segment_embeddings, normalized_segments)
+
+    segments_with_embeddings = []
+    for segment, embedding in zip(normalized_segments, segment_embeddings):
+        segments_with_embeddings.append(
+            {
+                "segment_id": str(uuid.uuid4()),
+                "segment_type": segment["segment_type"],
+                "start_sec": float(segment["start_sec"]),
+                "end_sec": float(segment["end_sec"]),
+                "energy_score": float(segment["energy_score"]),
+                "descriptor_text": segment["descriptor_text"],
+                "embedding": embedding,
+            }
+        )
+
+    store = _vector_store(payload, profile)
+    track_id = str(track_metadata.get("trackID") or _stable_track_id(file_path))
+    scan_version = f"{track_metadata.get('contentHash', '')}|{track_metadata.get('modifiedTime', '')}"
+    store.upsert_track_embeddings(
+        track_id=track_id,
+        scan_version=scan_version,
+        track_metadata={
+            "app_track_id": track_metadata.get("trackID") or "",
+            "file_path": file_path,
+            "bpm": track_metadata.get("bpm"),
+            "musical_key": track_metadata.get("musicalKey") or "",
+            "genre": track_metadata.get("genre") or "",
+            "duration_sec": track_metadata.get("duration") or 0,
+        },
+        track_embedding=weighted_track_embedding,
+        segments=segments_with_embeddings,
+    )
+
+    return {
+        "trackEmbedding": weighted_track_embedding,
+        "segments": [
+            {
+                "segmentType": segment["segment_type"],
+                "startSec": float(segment["start_sec"]),
+                "endSec": float(segment["end_sec"]),
+                "energyScore": float(segment["energy_score"]),
+                "descriptorText": segment["descriptor_text"],
+                "embedding": embedding,
+            }
+            for segment, embedding in zip(normalized_segments, segment_embeddings)
+        ],
+        "embeddingProfileID": profile["id"],
+    }
+
+
+def _search_query_embeddings(
+    payload: dict[str, Any],
+    profile: dict[str, Any],
+    mode: str,
+) -> dict[str, list[float]]:
+    if mode == "text":
+        query_text = str(payload.get("queryText") or "").strip()
+        if not query_text:
+            return {}
+        client = _build_embedding_client(payload, profile)
+        query_vector = client.embed_batch([query_text])[0]
+        if not query_vector:
+            return {}
+        return {
+            "tracks": query_vector,
+            "intro": query_vector,
+            "middle": query_vector,
+            "outro": query_vector,
+        }
+
+    if mode == "reference":
+        output: dict[str, list[float]] = {}
+        track_embedding = payload.get("queryTrackEmbedding")
+        if isinstance(track_embedding, list) and track_embedding:
+            output["tracks"] = [float(value) for value in track_embedding]
+        for segment in payload.get("querySegments") or []:
+            segment_type = str(segment.get("segmentType") or "").strip()
+            embedding = segment.get("embedding")
+            if segment_type in {"intro", "middle", "outro"} and isinstance(embedding, list) and embedding:
+                output[segment_type] = [float(value) for value in embedding]
+        return output
+
+    raise ValueError(f"Unsupported search mode: {mode}")
 
 
 def _build_where(filters: dict[str, Any]) -> dict[str, Any] | None:
@@ -196,13 +293,16 @@ def _build_where(filters: dict[str, Any]) -> dict[str, Any] | None:
     return {"$and": clauses}
 
 
-def _weighted_embedding(embeddings: list[list[float] | None], segments: list[Any]) -> list[float] | None:
+def _weighted_embedding(
+    embeddings: list[list[float] | None],
+    segments: list[dict[str, Any]],
+) -> list[float] | None:
     weights = {"intro": 1.0, "middle": 3.0, "outro": 1.0}
     valid: list[tuple[np.ndarray, float]] = []
     for embedding, segment in zip(embeddings, segments):
         if not embedding:
             continue
-        valid.append((np.array(embedding, dtype=np.float64), weights.get(segment.segment_type, 1.0)))
+        valid.append((np.array(embedding, dtype=np.float64), weights.get(segment["segment_type"], 1.0)))
 
     if not valid:
         return None
@@ -214,8 +314,70 @@ def _weighted_embedding(embeddings: list[list[float] | None], segments: list[Any
     return [float(value) for value in aggregate.tolist()]
 
 
+def _normalize_payload_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for segment in segments:
+        descriptor_text = str(segment.get("descriptorText") or "").strip()
+        segment_type = str(segment.get("segmentType") or "").strip()
+        if not descriptor_text or segment_type not in {"intro", "middle", "outro"}:
+            continue
+        normalized.append(
+            {
+                "segment_type": segment_type,
+                "start_sec": float(segment.get("startSec") or 0),
+                "end_sec": float(segment.get("endSec") or 0),
+                "energy_score": float(segment.get("energyScore") or 0),
+                "descriptor_text": descriptor_text,
+            }
+        )
+    return normalized
+
+
 def _stable_track_id(file_path: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, file_path))
+
+
+def _resolve_embedding_profile(payload: dict[str, Any]) -> dict[str, Any]:
+    requested_profile_id = str(payload.get("options", {}).get("embeddingProfileID") or "").strip()
+    if not requested_profile_id:
+        requested_profile_id = "google/text-embedding-004"
+    profile = EMBEDDING_PROFILES.get(requested_profile_id)
+    if profile is None:
+        raise ValueError(f"Unsupported embedding profile: {requested_profile_id}")
+    return {"id": requested_profile_id, **profile}
+
+
+def _resolve_google_ai_api_key(options: dict[str, Any]) -> str | None:
+    return (
+        options.get("googleAIAPIKey")
+        or os.environ.get("GOOGLE_AI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or os.environ.get("GEMINI_API_KEY")
+    )
+
+
+def _build_embedding_client(payload: dict[str, Any], profile: dict[str, Any]):
+    cache_dir = str((payload.get("options") or {}).get("cacheDirectory") or Path.home() / ".soria-cache")
+    api_key = _resolve_google_ai_api_key(payload.get("options") or {})
+
+    if profile["backend"] == "google_ai":
+        from embedding.gemini_client import GeminiEmbeddingClient
+
+        return GeminiEmbeddingClient(api_key=api_key, cache_dir=cache_dir, model=profile["model"])
+    if profile["backend"] == "clap":
+        from embedding.clap_client import CLAPEmbeddingClient
+
+        return CLAPEmbeddingClient(api_key=api_key, cache_dir=cache_dir, model=profile["model"])
+    raise ValueError(f"Unsupported embedding backend: {profile['backend']}")
+
+
+def _vector_store(payload: dict[str, Any], profile: dict[str, Any]):
+    ChromaVectorStore = _load_vector_store()
+    options = payload.get("options") or {}
+    cache_dir = options.get("cacheDirectory") or str(Path.home() / ".soria-cache")
+    vector_dir = str(Path(cache_dir) / "vectordb")
+    Path(vector_dir).mkdir(parents=True, exist_ok=True)
+    return ChromaVectorStore(persist_dir=vector_dir, profile_id=profile["id"])
 
 
 def _configure_logging(cache_dir: str) -> None:
@@ -237,56 +399,6 @@ def _load_analyze_track():
     from audio.features import analyze_track
 
     return analyze_track
-
-
-def _load_embedding_client(provider: str):
-    if provider == "google_embedding_2":
-        from embedding.gemini_client import GeminiEmbeddingClient
-
-        return GeminiEmbeddingClient
-    if provider == "clap_embedding":
-        from embedding.clap_client import CLAPEmbeddingClient
-
-        return CLAPEmbeddingClient
-    raise ValueError(f"Unsupported embedding provider: {provider}")
-
-
-def _embedding_lock_path(vector_dir: str) -> Path:
-    return Path(vector_dir) / ".embedding_provider.lock"
-
-
-def _read_embedding_lock(vector_dir: str) -> dict[str, Any]:
-    lock_path = _embedding_lock_path(vector_dir)
-    if not lock_path.exists():
-        return {"locked": False, "provider": None}
-    try:
-        payload = json.loads(lock_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {"locked": False, "provider": None}
-    provider = str(payload.get("provider") or "").strip() or None
-    if provider is None:
-        return {"locked": False, "provider": None}
-    return {"locked": True, "provider": provider}
-
-
-def _resolve_embedding_provider(payload: dict[str, Any], vector_dir: str) -> str:
-    requested_provider = str(payload.get("options", {}).get("embeddingProvider") or "google_embedding_2").strip()
-    if not requested_provider:
-        requested_provider = "google_embedding_2"
-
-    lock_path = _embedding_lock_path(vector_dir)
-    lock_info = _read_embedding_lock(vector_dir)
-    if lock_info["locked"]:
-        locked_provider = str(lock_info["provider"])
-        if requested_provider != locked_provider:
-            raise ValueError(
-                "This project already uses a different embedding provider for vector DB. "
-                f"Locked: {locked_provider}, requested: {requested_provider}."
-            )
-        return locked_provider
-
-    lock_path.write_text(json.dumps({"provider": requested_provider}), encoding="utf-8")
-    return requested_provider
 
 
 def _load_vector_store():

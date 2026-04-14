@@ -15,8 +15,9 @@ struct RecommendationsView: View {
                     .font(.title2.bold())
                 Spacer()
                 Button("Generate") { viewModel.generateRecommendations() }
+                    .disabled(!viewModel.canRunReferenceTrackFeatures)
                 Button("Build Playlist Path") { viewModel.buildPlaylistPath() }
-                    .disabled(viewModel.selectedTrack == nil)
+                    .disabled(!viewModel.canRunReferenceTrackFeatures)
             }
 
             Text("FinalScore = w_embed * embed + w_bpm * bpm + w_key * key + w_energy * energy + w_intro_outro * transition + w_external * external")
@@ -67,6 +68,12 @@ struct RecommendationsView: View {
                     viewModel.constraints.includeTags = splitTags(includeTagsText)
                     viewModel.constraints.excludeTags = splitTags(excludeTagsText)
                 }
+            }
+
+            if !viewModel.recommendationStatusMessage.isEmpty {
+                Text(viewModel.recommendationStatusMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             Table(viewModel.recommendations, selection: $viewModel.selectedRecommendationID) {

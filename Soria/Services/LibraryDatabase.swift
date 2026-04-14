@@ -7,10 +7,14 @@ final class LibraryDatabase {
     private var db: OpaquePointer?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private let databaseURL: URL
 
-    init() throws {
+    init(databaseURL: URL = AppPaths.databaseURL) throws {
+        self.databaseURL = databaseURL
+        let parentDirectory = databaseURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: parentDirectory, withIntermediateDirectories: true)
         AppPaths.ensureDirectories()
-        if sqlite3_open(AppPaths.databaseURL.path, &db) != SQLITE_OK {
+        if sqlite3_open(databaseURL.path, &db) != SQLITE_OK {
             throw DatabaseError.openFailed
         }
         try createSchema()
@@ -22,53 +26,32 @@ final class LibraryDatabase {
 
     func fetchAllTracks() throws -> [Track] {
         let sql = """
-        SELECT id, file_path, file_name, title, artist, album, genre, duration, sample_rate, bpm, musical_key,
-               modified_time, content_hash, analyzed_at, has_serato, has_rekordbox
+        SELECT \(trackSelectColumns)
         FROM tracks
         ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE;
         """
         return try withStatement(sql) { statement in
             var tracks: [Track] = []
             while sqlite3_step(statement) == SQLITE_ROW {
-                guard
-                    let idText = sqliteString(statement, index: 0),
-                    let id = UUID(uuidString: idText),
-                    let filePath = sqliteString(statement, index: 1),
-                    let fileName = sqliteString(statement, index: 2),
-                    let title = sqliteString(statement, index: 3),
-                    let artist = sqliteString(statement, index: 4),
-                    let album = sqliteString(statement, index: 5),
-                    let genre = sqliteString(statement, index: 6),
-                    let modifiedTimeText = sqliteString(statement, index: 11),
-                    let contentHash = sqliteString(statement, index: 12)
-                else {
-                    continue
+                if let track = track(from: statement) {
+                    tracks.append(track)
                 }
-
-                let modifiedTime = Self.iso8601.date(from: modifiedTimeText) ?? .distantPast
-                let analyzedAt = sqliteString(statement, index: 13).flatMap { Self.iso8601.date(from: $0) }
-                tracks.append(
-                    Track(
-                        id: id,
-                        filePath: filePath,
-                        fileName: fileName,
-                        title: title,
-                        artist: artist,
-                        album: album,
-                        genre: genre,
-                        duration: sqlite3_column_double(statement, 7),
-                        sampleRate: sqlite3_column_double(statement, 8),
-                        bpm: sqliteOptionalDouble(statement, index: 9),
-                        musicalKey: sqliteString(statement, index: 10),
-                        modifiedTime: modifiedTime,
-                        contentHash: contentHash,
-                        analyzedAt: analyzedAt,
-                        hasSeratoMetadata: sqlite3_column_int(statement, 14) == 1,
-                        hasRekordboxMetadata: sqlite3_column_int(statement, 15) == 1
-                    )
-                )
             }
             return tracks
+        }
+    }
+
+    func fetchTrack(path: String) throws -> Track? {
+        let sql = """
+        SELECT \(trackSelectColumns)
+        FROM tracks
+        WHERE file_path = ?
+        LIMIT 1;
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, index: 1, text: path)
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+            return track(from: statement)
         }
     }
 
@@ -76,8 +59,9 @@ final class LibraryDatabase {
         let sql = """
         INSERT INTO tracks (
             id, file_path, file_name, title, artist, album, genre, duration, sample_rate, bpm, musical_key,
-            modified_time, content_hash, analyzed_at, has_serato, has_rekordbox
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            modified_time, content_hash, analyzed_at, embedding_profile_id, embedding_updated_at,
+            has_serato, has_rekordbox, bpm_source, key_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(file_path) DO UPDATE SET
             file_name = excluded.file_name,
             title = excluded.title,
@@ -91,8 +75,12 @@ final class LibraryDatabase {
             modified_time = excluded.modified_time,
             content_hash = excluded.content_hash,
             analyzed_at = excluded.analyzed_at,
+            embedding_profile_id = excluded.embedding_profile_id,
+            embedding_updated_at = excluded.embedding_updated_at,
             has_serato = excluded.has_serato,
-            has_rekordbox = excluded.has_rekordbox;
+            has_rekordbox = excluded.has_rekordbox,
+            bpm_source = excluded.bpm_source,
+            key_source = excluded.key_source;
         """
         try withStatement(sql) { statement in
             bind(statement, index: 1, text: track.id.uuidString)
@@ -109,8 +97,12 @@ final class LibraryDatabase {
             bind(statement, index: 12, text: Self.iso8601.string(from: track.modifiedTime))
             bind(statement, index: 13, text: track.contentHash)
             bind(statement, index: 14, text: track.analyzedAt.map { Self.iso8601.string(from: $0) })
-            sqlite3_bind_int(statement, 15, track.hasSeratoMetadata ? 1 : 0)
-            sqlite3_bind_int(statement, 16, track.hasRekordboxMetadata ? 1 : 0)
+            bind(statement, index: 15, text: track.embeddingProfileID)
+            bind(statement, index: 16, text: track.embeddingUpdatedAt.map { Self.iso8601.string(from: $0) })
+            sqlite3_bind_int(statement, 17, track.hasSeratoMetadata ? 1 : 0)
+            sqlite3_bind_int(statement, 18, track.hasRekordboxMetadata ? 1 : 0)
+            bind(statement, index: 19, text: track.bpmSource?.rawValue)
+            bind(statement, index: 20, text: track.keySource?.rawValue)
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 throw DatabaseError.writeFailed
             }
@@ -118,30 +110,14 @@ final class LibraryDatabase {
     }
 
     func lookupTrack(path: String) throws -> Track? {
-        let sql = "SELECT id, modified_time, content_hash FROM tracks WHERE file_path = ? LIMIT 1;"
-        return try withStatement(sql) { statement in
-            bind(statement, index: 1, text: path)
-            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
-            guard
-                let idText = sqliteString(statement, index: 0),
-                let id = UUID(uuidString: idText),
-                let modifiedTimeText = sqliteString(statement, index: 1),
-                let contentHash = sqliteString(statement, index: 2)
-            else {
-                return nil
-            }
-            return Track.empty(
-                path: path,
-                modifiedTime: Self.iso8601.date(from: modifiedTimeText) ?? .distantPast,
-                hash: contentHash
-            ).withID(id)
-        }
+        try fetchTrack(path: path)
     }
 
     func replaceSegments(
         trackID: UUID,
         segments: [TrackSegment],
-        analysisSummary: TrackAnalysisSummary
+        analysisSummary: TrackAnalysisSummary,
+        embeddingProfileID: String
     ) throws {
         try withTransaction {
             try withStatement("DELETE FROM segments WHERE track_id = ?;") { statement in
@@ -176,14 +152,73 @@ final class LibraryDatabase {
 
             let updateSQL = """
             UPDATE tracks
-            SET analyzed_at = ?, track_embedding_json = ?, analysis_summary_json = ?
+            SET analyzed_at = ?, track_embedding_json = ?, analysis_summary_json = ?,
+                embedding_profile_id = ?, embedding_updated_at = ?
             WHERE id = ?;
             """
             try withStatement(updateSQL) { statement in
                 bind(statement, index: 1, text: Self.iso8601.string(from: Date()))
                 bind(statement, index: 2, text: jsonString(analysisSummary.trackEmbedding ?? []))
                 bind(statement, index: 3, text: jsonString(analysisSummary))
-                bind(statement, index: 4, text: trackID.uuidString)
+                bind(statement, index: 4, text: embeddingProfileID)
+                bind(statement, index: 5, text: Self.iso8601.string(from: Date()))
+                bind(statement, index: 6, text: trackID.uuidString)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.writeFailed
+                }
+            }
+        }
+    }
+
+    func replaceTrackEmbeddings(
+        trackID: UUID,
+        segments: [TrackSegment],
+        trackEmbedding: [Double]?,
+        embeddingProfileID: String
+    ) throws {
+        guard let existingSummary = try fetchAnalysisSummary(trackID: trackID) else {
+            throw DatabaseError.writeFailed
+        }
+
+        let refreshedSummary = TrackAnalysisSummary(
+            trackID: trackID,
+            segments: segments,
+            trackEmbedding: trackEmbedding,
+            estimatedBPM: existingSummary.estimatedBPM,
+            estimatedKey: existingSummary.estimatedKey,
+            brightness: existingSummary.brightness,
+            onsetDensity: existingSummary.onsetDensity,
+            rhythmicDensity: existingSummary.rhythmicDensity,
+            lowMidHighBalance: existingSummary.lowMidHighBalance,
+            waveformPreview: existingSummary.waveformPreview
+        )
+
+        try withTransaction {
+            let updateSegmentSQL = "UPDATE segments SET embedding_json = ? WHERE id = ?;"
+            try withStatement(updateSegmentSQL) { statement in
+                for segment in segments {
+                    sqlite3_reset(statement)
+                    sqlite3_clear_bindings(statement)
+                    bind(statement, index: 1, text: jsonString(segment.vector ?? []))
+                    bind(statement, index: 2, text: segment.id.uuidString)
+                    guard sqlite3_step(statement) == SQLITE_DONE else {
+                        throw DatabaseError.writeFailed
+                    }
+                }
+            }
+
+            let updateTrackSQL = """
+            UPDATE tracks
+            SET track_embedding_json = ?, analysis_summary_json = ?,
+                embedding_profile_id = ?, embedding_updated_at = ?
+            WHERE id = ?;
+            """
+            try withStatement(updateTrackSQL) { statement in
+                bind(statement, index: 1, text: jsonString(trackEmbedding ?? []))
+                bind(statement, index: 2, text: jsonString(refreshedSummary))
+                bind(statement, index: 3, text: embeddingProfileID)
+                bind(statement, index: 4, text: Self.iso8601.string(from: Date()))
+                bind(statement, index: 5, text: trackID.uuidString)
                 guard sqlite3_step(statement) == SQLITE_DONE else {
                     throw DatabaseError.writeFailed
                 }
@@ -248,6 +283,31 @@ final class LibraryDatabase {
         }
     }
 
+    func clearAnalysis(trackID: UUID) throws {
+        try withTransaction {
+            try withStatement("DELETE FROM segments WHERE track_id = ?;") { statement in
+                bind(statement, index: 1, text: trackID.uuidString)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.writeFailed
+                }
+            }
+
+            try withStatement(
+                """
+                UPDATE tracks
+                SET analyzed_at = NULL, track_embedding_json = NULL, analysis_summary_json = NULL,
+                    embedding_profile_id = NULL, embedding_updated_at = NULL
+                WHERE id = ?;
+                """
+            ) { statement in
+                bind(statement, index: 1, text: trackID.uuidString)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.writeFailed
+                }
+            }
+        }
+    }
+
     func replaceExternalMetadata(
         trackID: UUID,
         source: ExternalDJMetadata.Source,
@@ -265,8 +325,9 @@ final class LibraryDatabase {
             let insertSQL = """
             INSERT INTO external_metadata (
                 id, track_id, source, track_path, bpm, musical_key, rating, color, tags_json, play_count,
-                last_played, playlist_memberships_json, cue_count, comment
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                last_played, playlist_memberships_json, cue_count, comment, vendor_track_id, analysis_state,
+                analysis_cache_path, sync_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """
             try withStatement(insertSQL) { statement in
                 for entry in entries {
@@ -286,6 +347,10 @@ final class LibraryDatabase {
                     bind(statement, index: 12, text: jsonString(entry.playlistMemberships))
                     bind(statement, index: 13, int: entry.cueCount)
                     bind(statement, index: 14, text: entry.comment)
+                    bind(statement, index: 15, text: entry.vendorTrackID)
+                    bind(statement, index: 16, text: entry.analysisState)
+                    bind(statement, index: 17, text: entry.analysisCachePath)
+                    bind(statement, index: 18, text: entry.syncVersion)
                     guard sqlite3_step(statement) == SQLITE_DONE else {
                         throw DatabaseError.writeFailed
                     }
@@ -297,7 +362,8 @@ final class LibraryDatabase {
     func fetchExternalMetadata(trackID: UUID) throws -> [ExternalDJMetadata] {
         let sql = """
         SELECT id, source, track_path, bpm, musical_key, rating, color, tags_json, play_count,
-               last_played, playlist_memberships_json, cue_count, comment
+               last_played, playlist_memberships_json, cue_count, comment, vendor_track_id, analysis_state,
+               analysis_cache_path, sync_version
         FROM external_metadata
         WHERE track_id = ?
         ORDER BY source;
@@ -330,11 +396,91 @@ final class LibraryDatabase {
                         lastPlayed: lastPlayed,
                         playlistMemberships: stringArray(from: sqliteString(statement, index: 10) ?? "[]"),
                         cueCount: sqliteOptionalInt(statement, index: 11),
-                        comment: sqliteString(statement, index: 12)
+                        comment: sqliteString(statement, index: 12),
+                        vendorTrackID: sqliteString(statement, index: 13),
+                        analysisState: sqliteString(statement, index: 14),
+                        analysisCachePath: sqliteString(statement, index: 15),
+                        syncVersion: sqliteString(statement, index: 16)
                     )
                 )
             }
             return results
+        }
+    }
+
+    func fetchLibrarySources() throws -> [LibrarySourceRecord] {
+        let sql = """
+        SELECT id, kind, enabled, resolved_path, last_sync_at, status, last_error
+        FROM library_sources
+        ORDER BY CASE kind
+            WHEN 'serato' THEN 0
+            WHEN 'rekordbox' THEN 1
+            WHEN 'folderFallback' THEN 2
+            ELSE 99
+        END;
+        """
+        var sources = try withStatement(sql) { statement in
+            var results: [LibrarySourceRecord] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let idText = sqliteString(statement, index: 0),
+                    let id = UUID(uuidString: idText),
+                    let kindText = sqliteString(statement, index: 1),
+                    let kind = LibrarySourceKind(rawValue: kindText),
+                    let statusText = sqliteString(statement, index: 5),
+                    let status = LibrarySourceStatus(rawValue: statusText)
+                else {
+                    continue
+                }
+                results.append(
+                    LibrarySourceRecord(
+                        id: id,
+                        kind: kind,
+                        enabled: sqlite3_column_int(statement, 2) == 1,
+                        resolvedPath: sqliteString(statement, index: 3),
+                        lastSyncAt: sqliteString(statement, index: 4).flatMap { Self.iso8601.date(from: $0) },
+                        status: status,
+                        lastError: sqliteString(statement, index: 6)
+                    )
+                )
+            }
+            return results
+        }
+
+        var byKind = Dictionary(uniqueKeysWithValues: sources.map { ($0.kind, $0) })
+        for kind in LibrarySourceKind.allCases where byKind[kind] == nil {
+            let record = LibrarySourceRecord.default(for: kind)
+            try upsertLibrarySource(record)
+            byKind[kind] = record
+        }
+
+        sources = LibrarySourceKind.allCases.compactMap { byKind[$0] }
+        return sources
+    }
+
+    func upsertLibrarySource(_ source: LibrarySourceRecord) throws {
+        let sql = """
+        INSERT INTO library_sources (
+            id, kind, enabled, resolved_path, last_sync_at, status, last_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(kind) DO UPDATE SET
+            enabled = excluded.enabled,
+            resolved_path = excluded.resolved_path,
+            last_sync_at = excluded.last_sync_at,
+            status = excluded.status,
+            last_error = excluded.last_error;
+        """
+        try withStatement(sql) { statement in
+            bind(statement, index: 1, text: source.id.uuidString)
+            bind(statement, index: 2, text: source.kind.rawValue)
+            sqlite3_bind_int(statement, 3, source.enabled ? 1 : 0)
+            bind(statement, index: 4, text: source.resolvedPath)
+            bind(statement, index: 5, text: source.lastSyncAt.map { Self.iso8601.string(from: $0) })
+            bind(statement, index: 6, text: source.status.rawValue)
+            bind(statement, index: 7, text: source.lastError)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
         }
     }
 
@@ -358,7 +504,11 @@ final class LibraryDatabase {
             has_serato INTEGER NOT NULL DEFAULT 0,
             has_rekordbox INTEGER NOT NULL DEFAULT 0,
             track_embedding_json TEXT,
-            analysis_summary_json TEXT
+            analysis_summary_json TEXT,
+            embedding_profile_id TEXT,
+            embedding_updated_at TEXT,
+            bpm_source TEXT,
+            key_source TEXT
         );
         """)
         try exec("""
@@ -390,7 +540,22 @@ final class LibraryDatabase {
             playlist_memberships_json TEXT NOT NULL DEFAULT '[]',
             cue_count INTEGER,
             comment TEXT,
+            vendor_track_id TEXT,
+            analysis_state TEXT,
+            analysis_cache_path TEXT,
+            sync_version TEXT,
             FOREIGN KEY(track_id) REFERENCES tracks(id)
+        );
+        """)
+        try exec("""
+        CREATE TABLE IF NOT EXISTS library_sources (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL UNIQUE,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            resolved_path TEXT,
+            last_sync_at TEXT,
+            status TEXT NOT NULL DEFAULT 'disabled',
+            last_error TEXT
         );
         """)
 
@@ -400,11 +565,79 @@ final class LibraryDatabase {
         if try !columnExists(table: "tracks", column: "analysis_summary_json") {
             try exec("ALTER TABLE tracks ADD COLUMN analysis_summary_json TEXT;")
         }
+        if try !columnExists(table: "tracks", column: "embedding_profile_id") {
+            try exec("ALTER TABLE tracks ADD COLUMN embedding_profile_id TEXT;")
+        }
+        if try !columnExists(table: "tracks", column: "embedding_updated_at") {
+            try exec("ALTER TABLE tracks ADD COLUMN embedding_updated_at TEXT;")
+        }
+        if try !columnExists(table: "tracks", column: "bpm_source") {
+            try exec("ALTER TABLE tracks ADD COLUMN bpm_source TEXT;")
+        }
+        if try !columnExists(table: "tracks", column: "key_source") {
+            try exec("ALTER TABLE tracks ADD COLUMN key_source TEXT;")
+        }
+        if try !columnExists(table: "external_metadata", column: "vendor_track_id") {
+            try exec("ALTER TABLE external_metadata ADD COLUMN vendor_track_id TEXT;")
+        }
+        if try !columnExists(table: "external_metadata", column: "analysis_state") {
+            try exec("ALTER TABLE external_metadata ADD COLUMN analysis_state TEXT;")
+        }
+        if try !columnExists(table: "external_metadata", column: "analysis_cache_path") {
+            try exec("ALTER TABLE external_metadata ADD COLUMN analysis_cache_path TEXT;")
+        }
+        if try !columnExists(table: "external_metadata", column: "sync_version") {
+            try exec("ALTER TABLE external_metadata ADD COLUMN sync_version TEXT;")
+        }
 
         try exec("CREATE INDEX IF NOT EXISTS idx_tracks_hash ON tracks(content_hash);")
         try exec("CREATE INDEX IF NOT EXISTS idx_segments_track ON segments(track_id);")
         try exec("CREATE INDEX IF NOT EXISTS idx_external_metadata_track ON external_metadata(track_id);")
         try exec("CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(file_path);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_library_sources_kind ON library_sources(kind);")
+    }
+
+    private func track(from statement: OpaquePointer?) -> Track? {
+        guard
+            let idText = sqliteString(statement, index: 0),
+            let id = UUID(uuidString: idText),
+            let filePath = sqliteString(statement, index: 1),
+            let fileName = sqliteString(statement, index: 2),
+            let title = sqliteString(statement, index: 3),
+            let artist = sqliteString(statement, index: 4),
+            let album = sqliteString(statement, index: 5),
+            let genre = sqliteString(statement, index: 6),
+            let modifiedTimeText = sqliteString(statement, index: 11),
+            let contentHash = sqliteString(statement, index: 12)
+        else {
+            return nil
+        }
+
+        let modifiedTime = Self.iso8601.date(from: modifiedTimeText) ?? .distantPast
+        let analyzedAt = sqliteString(statement, index: 13).flatMap { Self.iso8601.date(from: $0) }
+        let embeddingUpdatedAt = sqliteString(statement, index: 15).flatMap { Self.iso8601.date(from: $0) }
+        return Track(
+            id: id,
+            filePath: filePath,
+            fileName: fileName,
+            title: title,
+            artist: artist,
+            album: album,
+            genre: genre,
+            duration: sqlite3_column_double(statement, 7),
+            sampleRate: sqlite3_column_double(statement, 8),
+            bpm: sqliteOptionalDouble(statement, index: 9),
+            musicalKey: sqliteString(statement, index: 10),
+            modifiedTime: modifiedTime,
+            contentHash: contentHash,
+            analyzedAt: analyzedAt,
+            embeddingProfileID: sqliteString(statement, index: 14),
+            embeddingUpdatedAt: embeddingUpdatedAt,
+            hasSeratoMetadata: sqlite3_column_int(statement, 16) == 1,
+            hasRekordboxMetadata: sqlite3_column_int(statement, 17) == 1,
+            bpmSource: sqliteString(statement, index: 18).flatMap(TrackMetadataSource.init(rawValue:)),
+            keySource: sqliteString(statement, index: 19).flatMap(TrackMetadataSource.init(rawValue:))
+        )
     }
 
     private func exec(_ sql: String) throws {
@@ -509,6 +742,12 @@ final class LibraryDatabase {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
+
+    private let trackSelectColumns = """
+    id, file_path, file_name, title, artist, album, genre, duration, sample_rate, bpm, musical_key,
+    modified_time, content_hash, analyzed_at, embedding_profile_id, embedding_updated_at,
+    has_serato, has_rekordbox, bpm_source, key_source
+    """
 }
 
 enum DatabaseError: Error {
@@ -516,27 +755,4 @@ enum DatabaseError: Error {
     case queryFailed
     case writeFailed
     case decodeFailed
-}
-
-private extension Track {
-    func withID(_ id: UUID) -> Track {
-        Track(
-            id: id,
-            filePath: filePath,
-            fileName: fileName,
-            title: title,
-            artist: artist,
-            album: album,
-            genre: genre,
-            duration: duration,
-            sampleRate: sampleRate,
-            bpm: bpm,
-            musicalKey: musicalKey,
-            modifiedTime: modifiedTime,
-            contentHash: contentHash,
-            analyzedAt: analyzedAt,
-            hasSeratoMetadata: hasSeratoMetadata,
-            hasRekordboxMetadata: hasRekordboxMetadata
-        )
-    }
 }

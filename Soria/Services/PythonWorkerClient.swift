@@ -9,6 +9,12 @@ struct WorkerSegmentResult: Codable {
     let embedding: [Double]?
 }
 
+struct WorkerEmbeddingResult: Codable {
+    let trackEmbedding: [Double]?
+    let segments: [WorkerSegmentResult]
+    let embeddingProfileID: String
+}
+
 struct WorkerAnalysisResult: Codable {
     let estimatedBPM: Double?
     let estimatedKey: String?
@@ -19,39 +25,36 @@ struct WorkerAnalysisResult: Codable {
     let lowMidHighBalance: [Double]
     let waveformPreview: [Double]
     let segments: [WorkerSegmentResult]
+    let embeddingProfileID: String
 }
 
-struct WorkerSimilarityResult: Codable {
+struct WorkerTrackSearchResult: Codable {
+    let trackID: String
     let filePath: String
-    let vectorSimilarity: Double
+    let fusedScore: Double
+    let trackScore: Double
+    let introScore: Double
+    let middleScore: Double
+    let outroScore: Double
+    let bestMatchedCollection: String
 }
 
-struct WorkerSimilarityResponse: Codable {
-    let results: [WorkerSimilarityResult]
+struct WorkerTrackSearchResponse: Codable {
+    let results: [WorkerTrackSearchResult]
 }
 
-struct WorkerDependencyStatus: Codable {
-    let librosa: Bool
-    let chromadb: Bool
-    let requests: Bool
-}
-
-struct WorkerHealthcheckResponse: Codable {
+struct WorkerValidationResponse: Codable {
     let ok: Bool
-    let apiKeyConfigured: Bool
-    let pythonExecutable: String
-    let workerScriptPath: String
-    let embeddingProviderLocked: Bool?
-    let embeddingProvider: String?
-    let dependencies: WorkerDependencyStatus
+    let profileID: String
+    let modelName: String
 }
 
 final class PythonWorkerClient {
     struct WorkerConfig {
         var pythonExecutable: String
         var workerScriptPath: String
-        var geminiAPIKey: String?
-        var embeddingProvider: EmbeddingProvider
+        var googleAIAPIKey: String?
+        var embeddingProfile: EmbeddingProfile
     }
 
     private let configProvider: () -> WorkerConfig
@@ -65,6 +68,116 @@ final class PythonWorkerClient {
         track: Track,
         externalMetadata: [ExternalDJMetadata] = []
     ) async throws -> WorkerAnalysisResult {
+        let payload = WorkerAnalyzePayload(
+            command: "analyze",
+            filePath: filePath,
+            trackMetadata: trackMetadata(for: track, externalMetadata: externalMetadata),
+            options: workerOptions()
+        )
+        return try runGeneric(payload: payload)
+    }
+
+    func embedDescriptors(
+        track: Track,
+        segments: [TrackSegment],
+        externalMetadata: [ExternalDJMetadata] = []
+    ) async throws -> WorkerEmbeddingResult {
+        let payload = WorkerEmbedDescriptorsPayload(
+            command: "embed_descriptors",
+            filePath: track.filePath,
+            trackMetadata: trackMetadata(for: track, externalMetadata: externalMetadata),
+            segments: segments.map {
+                WorkerDescriptorSegment(
+                    segmentType: $0.type.rawValue,
+                    startSec: $0.startSec,
+                    endSec: $0.endSec,
+                    energyScore: $0.energyScore,
+                    descriptorText: $0.descriptorText
+                )
+            },
+            options: workerOptions()
+        )
+        return try runGeneric(payload: payload)
+    }
+
+    func validateEmbeddingProfile() async throws -> WorkerValidationResponse {
+        let payload = WorkerValidatePayload(
+            command: "validate_embedding_profile",
+            options: workerOptions()
+        )
+        return try runGeneric(payload: payload)
+    }
+
+    func searchTracksText(
+        query: String,
+        limit: Int,
+        excludeTrackPaths: [String],
+        filters: WorkerSimilarityFilters
+    ) async throws -> WorkerTrackSearchResponse {
+        let payload = WorkerTrackSearchPayload(
+            command: "search_tracks",
+            mode: "text",
+            queryText: query,
+            queryTrackEmbedding: nil,
+            querySegments: [],
+            limit: limit,
+            excludeTrackPaths: excludeTrackPaths,
+            filters: filters,
+            weights: [
+                "tracks": 0.45,
+                "intro": 0.15,
+                "middle": 0.25,
+                "outro": 0.15
+            ],
+            options: workerOptions()
+        )
+        return try runGeneric(payload: payload)
+    }
+
+    func searchTracksReference(
+        track: Track,
+        segments: [TrackSegment],
+        trackEmbedding: [Double],
+        limit: Int,
+        excludeTrackPaths: [String],
+        filters: WorkerSimilarityFilters
+    ) async throws -> WorkerTrackSearchResponse {
+        let payload = WorkerTrackSearchPayload(
+            command: "search_tracks",
+            mode: "reference",
+            queryText: nil,
+            queryTrackEmbedding: trackEmbedding,
+            querySegments: segments.compactMap { segment in
+                guard let vector = segment.vector else { return nil }
+                return WorkerQuerySegment(
+                    segmentType: segment.type.rawValue,
+                    embedding: vector
+                )
+            },
+            limit: limit,
+            excludeTrackPaths: excludeTrackPaths,
+            filters: filters,
+            weights: [
+                "tracks": 0.70,
+                "intro": 0.10,
+                "middle": 0.10,
+                "outro": 0.10
+            ],
+            options: workerOptions()
+        )
+        return try runGeneric(payload: payload)
+    }
+
+    private func workerOptions() -> WorkerOptionsPayload {
+        let config = configProvider()
+        return WorkerOptionsPayload(
+            googleAIAPIKey: config.googleAIAPIKey,
+            cacheDirectory: AppPaths.pythonCacheDirectory.path,
+            embeddingProfileID: config.embeddingProfile.id
+        )
+    }
+
+    private func trackMetadata(for track: Track, externalMetadata: [ExternalDJMetadata]) -> WorkerTrackMetadataPayload {
         let aggregatedTags = Array(
             Set(
                 externalMetadata
@@ -78,76 +191,29 @@ final class PythonWorkerClient {
         let playlistMemberships = Array(Set(externalMetadata.flatMap(\.playlistMemberships))).sorted()
         let cueCount = externalMetadata.compactMap(\.cueCount).max()
         let comment = externalMetadata.compactMap(\.comment).first
-        let payload = WorkerPayload(
-            command: "analyze",
-            filePath: filePath,
-            trackMetadata: WorkerPayload.TrackMetadata(
-                title: track.title,
-                artist: track.artist,
-                genre: track.genre,
-                bpm: track.bpm,
-                musicalKey: track.musicalKey,
-                duration: track.duration,
-                modifiedTime: LibraryDatabase.iso8601.string(from: track.modifiedTime),
-                contentHash: track.contentHash,
-                hasSeratoMetadata: track.hasSeratoMetadata,
-                hasRekordboxMetadata: track.hasRekordboxMetadata,
-                tags: aggregatedTags,
-                rating: rating,
-                playCount: playCount,
-                playlistMemberships: playlistMemberships,
-                cueCount: cueCount,
-                comment: comment
-            ),
-            options: WorkerPayload.WorkerOptions(
-                geminiAPIKey: configProvider().geminiAPIKey,
-                cacheDirectory: AppPaths.pythonCacheDirectory.path,
-                embeddingProvider: configProvider().embeddingProvider.rawValue
-            )
-        )
-        return try run(payload: payload)
-    }
 
-    func querySimilarTracks(
-        queryEmbedding: [Double],
-        limit: Int,
-        excludeTrackPaths: [String],
-        filters: WorkerSimilarityFilters
-    ) async throws -> WorkerSimilarityResponse {
-        let payload = WorkerSimilarityPayload(
-            command: "query_similar",
-            queryEmbedding: queryEmbedding,
-            limit: limit,
-            excludeTrackPaths: excludeTrackPaths,
-            filters: filters,
-            options: WorkerPayload.WorkerOptions(
-                geminiAPIKey: nil,
-                cacheDirectory: AppPaths.pythonCacheDirectory.path,
-                embeddingProvider: configProvider().embeddingProvider.rawValue
-            )
+        return WorkerTrackMetadataPayload(
+            trackID: track.id.uuidString,
+            title: track.title,
+            artist: track.artist,
+            genre: track.genre,
+            bpm: track.bpm,
+            musicalKey: track.musicalKey,
+            duration: track.duration,
+            modifiedTime: LibraryDatabase.iso8601.string(from: track.modifiedTime),
+            contentHash: track.contentHash,
+            hasSeratoMetadata: track.hasSeratoMetadata,
+            hasRekordboxMetadata: track.hasRekordboxMetadata,
+            tags: aggregatedTags,
+            rating: rating,
+            playCount: playCount,
+            playlistMemberships: playlistMemberships,
+            cueCount: cueCount,
+            comment: comment
         )
-        return try runGeneric(payload: payload)
-    }
-
-    func healthcheck() async throws -> WorkerHealthcheckResponse {
-        let config = configProvider()
-        let payload = WorkerHealthcheckPayload(
-            command: "healthcheck",
-            options: WorkerPayload.WorkerOptions(
-                geminiAPIKey: config.geminiAPIKey,
-                cacheDirectory: AppPaths.pythonCacheDirectory.path,
-                embeddingProvider: config.embeddingProvider.rawValue
-            )
-        )
-        return try runGeneric(payload: payload)
-    }
-
-    private func run(payload: WorkerPayload) throws -> WorkerAnalysisResult {
-        try runGeneric(payload: payload)
     }
 
     private func runGeneric<T: Encodable, U: Decodable>(payload: T) throws -> U {
-        // 한국어: 워커 프로세스를 1회 실행해 JSON 기반 IPC로 결과를 수신합니다.
         let config = configProvider()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: config.pythonExecutable)
@@ -176,6 +242,7 @@ final class PythonWorkerClient {
         if let parsedError = try? JSONDecoder().decode(WorkerErrorResponse.self, from: outputData), !parsedError.error.isEmpty {
             throw WorkerError.executionFailed(parsedError.error)
         }
+
         do {
             return try JSONDecoder().decode(U.self, from: outputData)
         } catch {
@@ -183,38 +250,6 @@ final class PythonWorkerClient {
             throw WorkerError.decodeFailed(text)
         }
     }
-}
-
-private struct WorkerPayload: Codable {
-    struct TrackMetadata: Codable {
-        let title: String
-        let artist: String
-        let genre: String
-        let bpm: Double?
-        let musicalKey: String?
-        let duration: Double
-        let modifiedTime: String
-        let contentHash: String
-        let hasSeratoMetadata: Bool
-        let hasRekordboxMetadata: Bool
-        let tags: [String]
-        let rating: Int?
-        let playCount: Int?
-        let playlistMemberships: [String]
-        let cueCount: Int?
-        let comment: String?
-    }
-
-    struct WorkerOptions: Codable {
-        let geminiAPIKey: String?
-        let cacheDirectory: String
-        let embeddingProvider: String
-    }
-
-    let command: String
-    let filePath: String
-    let trackMetadata: TrackMetadata
-    let options: WorkerOptions
 }
 
 struct WorkerSimilarityFilters: Codable {
@@ -225,18 +260,76 @@ struct WorkerSimilarityFilters: Codable {
     var genre: String?
 }
 
-private struct WorkerSimilarityPayload: Codable {
+private struct WorkerTrackMetadataPayload: Codable {
+    let trackID: String
+    let title: String
+    let artist: String
+    let genre: String
+    let bpm: Double?
+    let musicalKey: String?
+    let duration: Double
+    let modifiedTime: String
+    let contentHash: String
+    let hasSeratoMetadata: Bool
+    let hasRekordboxMetadata: Bool
+    let tags: [String]
+    let rating: Int?
+    let playCount: Int?
+    let playlistMemberships: [String]
+    let cueCount: Int?
+    let comment: String?
+}
+
+private struct WorkerOptionsPayload: Codable {
+    let googleAIAPIKey: String?
+    let cacheDirectory: String
+    let embeddingProfileID: String
+}
+
+private struct WorkerAnalyzePayload: Codable {
     let command: String
-    let queryEmbedding: [Double]
+    let filePath: String
+    let trackMetadata: WorkerTrackMetadataPayload
+    let options: WorkerOptionsPayload
+}
+
+private struct WorkerDescriptorSegment: Codable {
+    let segmentType: String
+    let startSec: Double
+    let endSec: Double
+    let energyScore: Double
+    let descriptorText: String
+}
+
+private struct WorkerEmbedDescriptorsPayload: Codable {
+    let command: String
+    let filePath: String
+    let trackMetadata: WorkerTrackMetadataPayload
+    let segments: [WorkerDescriptorSegment]
+    let options: WorkerOptionsPayload
+}
+
+private struct WorkerValidatePayload: Codable {
+    let command: String
+    let options: WorkerOptionsPayload
+}
+
+private struct WorkerQuerySegment: Codable {
+    let segmentType: String
+    let embedding: [Double]
+}
+
+private struct WorkerTrackSearchPayload: Codable {
+    let command: String
+    let mode: String
+    let queryText: String?
+    let queryTrackEmbedding: [Double]?
+    let querySegments: [WorkerQuerySegment]
     let limit: Int
     let excludeTrackPaths: [String]
     let filters: WorkerSimilarityFilters
-    let options: WorkerPayload.WorkerOptions
-}
-
-private struct WorkerHealthcheckPayload: Codable {
-    let command: String
-    let options: WorkerPayload.WorkerOptions
+    let weights: [String: Double]
+    let options: WorkerOptionsPayload
 }
 
 private struct WorkerErrorResponse: Codable {
@@ -250,11 +343,11 @@ enum WorkerError: Error {
 
 private extension PythonWorkerClient.WorkerConfig {
     static var current: PythonWorkerClient.WorkerConfig {
-        return .init(
+        .init(
             pythonExecutable: AppSettingsStore.loadPythonExecutablePath(),
             workerScriptPath: AppSettingsStore.loadWorkerScriptPath(),
-            geminiAPIKey: AppSettingsStore.loadGeminiAPIKey(),
-            embeddingProvider: AppSettingsStore.loadEmbeddingProvider()
+            googleAIAPIKey: AppSettingsStore.loadGoogleAIAPIKey(),
+            embeddingProfile: AppSettingsStore.loadEmbeddingProfile()
         )
     }
 }

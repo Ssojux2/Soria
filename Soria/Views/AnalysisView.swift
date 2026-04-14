@@ -4,41 +4,108 @@ struct AnalysisView: View {
     @ObservedObject var viewModel: AppViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Analysis").font(.title2.bold())
+        let canAnalyze = viewModel.analysisScope.canRun(
+            validationStatus: viewModel.validationStatus,
+            isBusy: viewModel.isAnalyzing,
+            tracks: viewModel.tracks,
+            selectedTrackID: viewModel.selectedTrackID,
+            activeProfileID: viewModel.embeddingProfile.id
+        )
+
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Analysis")
+                .font(.title2.bold())
+
             if let track = viewModel.selectedTrack {
                 Text("Selected: \(track.title) - \(track.artist)")
-                Button(viewModel.isAnalyzing ? "Analyzing..." : "Analyze Selected Track") {
-                    viewModel.analyzeSelectedTrack()
-                }
-                .disabled(viewModel.isAnalyzing)
-                Button("Analyze Unanalyzed Tracks") {
-                    viewModel.analyzeUnanalyzedTracks()
-                }
-                .disabled(viewModel.isAnalyzing || viewModel.tracks.isEmpty)
-                if !viewModel.analysisQueueProgressText.isEmpty {
-                    Text(viewModel.analysisQueueProgressText)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Select a track from Library to analyze or use as a reference.")
+                    .foregroundStyle(.secondary)
+            }
+
+            GroupBox("Scope") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Picker("Analysis Scope", selection: $viewModel.analysisScope) {
+                        ForEach(AnalysisScope.allCases) { scope in
+                            Text(scope.displayName).tag(scope)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    Text(viewModel.analysisScope.helperText)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                if !viewModel.analysisErrorMessage.isEmpty {
-                    Text(viewModel.analysisErrorMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            GroupBox("Profile Readiness") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Profile: \(viewModel.embeddingProfile.displayName)")
+                    Text("Validation: \(viewModel.validationStatus.summaryText)")
+                    Text("Active embeddings: \(viewModel.activeEmbeddingTrackCount) / \(viewModel.tracks.count)")
+                        .foregroundStyle(.secondary)
                 }
-                if let analysis = viewModel.selectedTrackAnalysis {
-                    Divider()
-                    Text("Latest feature summary")
-                        .font(.headline)
-                    Text("Brightness \(String(format: "%.3f", analysis.brightness)) • Onset \(String(format: "%.3f", analysis.onsetDensity)) • Rhythm \(String(format: "%.3f", analysis.rhythmicDensity))")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            HStack {
+                Button(viewModel.isAnalyzing ? "Processing..." : "Analyze") {
+                    viewModel.requestAnalysis()
+                }
+                .disabled(!canAnalyze)
+
+                if !viewModel.hasValidatedEmbeddingProfile {
+                    Text("Validate the active embedding profile in Settings before running analysis.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if !viewModel.analysisQueueProgressText.isEmpty {
+                Text(viewModel.analysisQueueProgressText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !viewModel.analysisErrorMessage.isEmpty {
+                Text(viewModel.analysisErrorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+
+            if let analysis = viewModel.selectedTrackAnalysis {
+                GroupBox("Latest Feature Summary") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(
+                            "Brightness \(String(format: "%.3f", analysis.brightness)) • " +
+                            "Onset \(String(format: "%.3f", analysis.onsetDensity)) • " +
+                            "Rhythm \(String(format: "%.3f", analysis.rhythmicDensity))"
+                        )
                         .font(.system(.body, design: .monospaced))
                         .foregroundStyle(.secondary)
+
+                        Text("Embedding Profile: \(viewModel.selectedTrack?.embeddingProfileID ?? "None")")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-            } else {
-                Text("Select a track from Library")
             }
+
             Spacer()
         }
         .padding()
+        .alert("Analyze Entire Library?", isPresented: $viewModel.isShowingAnalyzeAllConfirmation) {
+            Button("Cancel", role: .cancel) {
+                viewModel.cancelAnalyzeAllTracks()
+            }
+            Button("Analyze") {
+                viewModel.confirmAnalyzeAllTracks()
+            }
+        } message: {
+            Text(viewModel.analyzeAllConfirmationMessage)
+        }
     }
 }

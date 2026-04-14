@@ -6,11 +6,19 @@ struct LibraryView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Button("Add Folder") { viewModel.addLibraryRoot() }
-                Button("Scan") { viewModel.runScan() }
-                Button("Import DJ Metadata") { viewModel.loadExternalMetadata() }
+                Button("Sync Libraries") { viewModel.syncLibraries() }
+                Button("Rescan Fallback Folder") { viewModel.runFallbackScan() }
+                Button("Choose Fallback Folder") { viewModel.addLibraryRoot() }
                 Spacer()
+                Text("Sources: \(activeSourceCount)")
+                    .foregroundStyle(.secondary)
                 Text("Tracks: \(viewModel.tracks.count)")
+                    .foregroundStyle(.secondary)
+            }
+
+            if !viewModel.libraryStatusMessage.isEmpty {
+                Text(viewModel.libraryStatusMessage)
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
             }
 
@@ -30,6 +38,9 @@ struct LibraryView: View {
                 TableColumn("Analyzed") { track in
                     Text(track.analyzedAt == nil ? "No" : "Yes")
                 }
+                TableColumn("BPM Source") { track in
+                    Text(track.bpmSource?.displayName ?? "-")
+                }
                 TableColumn("Serato") { track in
                     Image(systemName: track.hasSeratoMetadata ? "checkmark.circle.fill" : "circle")
                 }
@@ -39,6 +50,10 @@ struct LibraryView: View {
             }
         }
         .padding()
+    }
+
+    private var activeSourceCount: Int {
+        viewModel.librarySources.filter { $0.enabled && $0.resolvedPath != nil }.count
     }
 
     private func formatDuration(_ sec: Double) -> String {

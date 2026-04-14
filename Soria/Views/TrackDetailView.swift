@@ -66,11 +66,14 @@ struct TrackDetailView: View {
                 GroupBox("Library Metadata") {
                     VStack(alignment: .leading, spacing: 6) {
                         analysisRow("BPM", track.bpm.map { String(format: "%.1f", $0) } ?? "-")
+                        analysisRow("BPM Source", track.bpmSource?.displayName ?? "-")
                         analysisRow("Key", track.musicalKey ?? "-")
+                        analysisRow("Key Source", track.keySource?.displayName ?? "-")
                         analysisRow("Genre", track.genre.isEmpty ? "-" : track.genre)
                         analysisRow("Duration", formatDuration(track.duration))
                         analysisRow("Serato", track.hasSeratoMetadata ? "Detected" : "None")
                         analysisRow("rekordbox", track.hasRekordboxMetadata ? "Detected" : "None")
+                        analysisRow("Source Provenance", provenanceText(for: track))
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -83,7 +86,7 @@ struct TrackDetailView: View {
                         VStack(alignment: .leading, spacing: 10) {
                             ForEach(viewModel.selectedTrackExternalMetadata) { metadata in
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(metadata.source.rawValue.capitalized)
+                                    Text(metadata.source.displayName)
                                         .font(.headline)
                                     analysisRow("BPM", metadata.bpm.map { String(format: "%.1f", $0) } ?? "-")
                                     analysisRow("Key", metadata.musicalKey ?? "-")
@@ -98,6 +101,10 @@ struct TrackDetailView: View {
                                         "Playlists",
                                         metadata.playlistMemberships.isEmpty ? "-" : metadata.playlistMemberships.joined(separator: ", ")
                                     )
+                                    analysisRow("Vendor Track ID", metadata.vendorTrackID ?? "-")
+                                    analysisRow("Analysis State", metadata.analysisState ?? "-")
+                                    analysisRow("Analysis Cache", metadata.analysisCachePath ?? "-")
+                                    analysisRow("Sync Version", metadata.syncVersion ?? "-")
                                     if let comment = metadata.comment, !comment.isEmpty {
                                         Text(comment)
                                             .font(.footnote)
@@ -132,6 +139,25 @@ struct TrackDetailView: View {
     private func formatDuration(_ sec: Double) -> String {
         let total = Int(sec)
         return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    private func provenanceText(for track: Track) -> String {
+        var sources: [String] = []
+        if track.hasSeratoMetadata {
+            sources.append("Serato")
+        }
+        if track.hasRekordboxMetadata {
+            sources.append("rekordbox")
+        }
+        if track.bpmSource == .audioTags || track.keySource == .audioTags {
+            sources.append("Audio Tags")
+        }
+        if track.analyzedAt != nil {
+            sources.append("Soria Analysis")
+        }
+        return Array(Set(sources)).sorted().joined(separator: ", ").isEmpty
+            ? "Manual Fallback"
+            : Array(Set(sources)).sorted().joined(separator: ", ")
     }
 }
 

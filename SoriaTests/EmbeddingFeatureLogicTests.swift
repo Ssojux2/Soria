@@ -1,0 +1,198 @@
+import Foundation
+import Testing
+@testable import Soria
+
+struct EmbeddingFeatureLogicTests {
+    @Test
+    func validationStatusResetsWhenKeyChanges() {
+        let profile = EmbeddingProfile.googleTextEmbedding004
+        let validatedAt = Date(timeIntervalSince1970: 1_716_000_000)
+        let storedHash = AppSettingsStore.hashAPIKey("valid-key")
+
+        #expect(
+            AppSettingsStore.computeValidationStatus(
+                apiKey: "valid-key",
+                profile: profile,
+                storedKeyHash: storedHash,
+                storedProfileID: profile.id,
+                storedAt: validatedAt
+            ) == .validated(validatedAt)
+        )
+
+        #expect(
+            AppSettingsStore.computeValidationStatus(
+                apiKey: "changed-key",
+                profile: profile,
+                storedKeyHash: storedHash,
+                storedProfileID: profile.id,
+                storedAt: validatedAt
+            ) == .unvalidated
+        )
+    }
+
+    @Test
+    func validationStatusResetsWhenProfileChanges() {
+        let validatedAt = Date(timeIntervalSince1970: 1_716_000_000)
+        let storedHash = AppSettingsStore.hashAPIKey("same-key")
+
+        #expect(
+            AppSettingsStore.computeValidationStatus(
+                apiKey: "same-key",
+                profile: .clapHTSATUnfused,
+                storedKeyHash: storedHash,
+                storedProfileID: EmbeddingProfile.googleTextEmbedding004.id,
+                storedAt: validatedAt
+            ) == .unvalidated
+        )
+    }
+
+    @Test
+    func analysisScopeMappingFollowsSelectedUnanalyzedAndAllRules() {
+        let selectedID = UUID()
+        let currentProfile = EmbeddingProfile.googleTextEmbedding004.id
+        let selectedTrack = makeTrack(
+            id: selectedID,
+            analyzedAt: Date(timeIntervalSince1970: 10),
+            embeddingProfileID: currentProfile,
+            embeddingUpdatedAt: Date(timeIntervalSince1970: 20)
+        )
+        let staleTrack = makeTrack(
+            analyzedAt: Date(timeIntervalSince1970: 10),
+            embeddingProfileID: EmbeddingProfile.clapHTSATUnfused.id,
+            embeddingUpdatedAt: Date(timeIntervalSince1970: 20)
+        )
+        let neverAnalyzedTrack = makeTrack(analyzedAt: nil, embeddingProfileID: nil, embeddingUpdatedAt: nil)
+        let tracks = [selectedTrack, staleTrack, neverAnalyzedTrack]
+
+        #expect(
+            AnalysisScope.selectedTrack.resolveTracks(
+                from: tracks,
+                selectedTrackID: selectedID,
+                activeProfileID: currentProfile
+            ) == [selectedTrack]
+        )
+
+        #expect(
+            Set(
+                AnalysisScope.unanalyzedTracks.resolveTracks(
+                    from: tracks,
+                    selectedTrackID: selectedID,
+                    activeProfileID: currentProfile
+                ).map(\.id)
+            ) == Set([staleTrack.id, neverAnalyzedTrack.id])
+        )
+
+        #expect(
+            AnalysisScope.allIndexedTracks.resolveTracks(
+                from: tracks,
+                selectedTrackID: selectedID,
+                activeProfileID: currentProfile
+            ).count == 3
+        )
+    }
+
+    @Test
+    func unvalidatedStateDisablesAnalysisAndSearch() {
+        let selectedTrack = makeTrack(
+            analyzedAt: Date(timeIntervalSince1970: 10),
+            embeddingProfileID: EmbeddingProfile.googleTextEmbedding004.id,
+            embeddingUpdatedAt: Date(timeIntervalSince1970: 20)
+        )
+        let tracks = [selectedTrack]
+
+        #expect(ValidationStatus.unvalidated.allowsSemanticActions(isBusy: false) == false)
+        #expect(ValidationStatus.validated(Date()).allowsSemanticActions(isBusy: false))
+
+        #expect(
+            AnalysisScope.selectedTrack.canRun(
+                validationStatus: .unvalidated,
+                isBusy: false,
+                tracks: tracks,
+                selectedTrackID: selectedTrack.id,
+                activeProfileID: EmbeddingProfile.googleTextEmbedding004.id
+            ) == false
+        )
+
+        #expect(
+            SearchMode.text.canSubmit(
+                validationStatus: .unvalidated,
+                isBusy: false,
+                queryText: "warm melodic house",
+                hasReferenceTrackEmbedding: false
+            ) == false
+        )
+    }
+
+    @Test
+    func searchModeStateChangesBetweenTextAndReferenceModes() {
+        let validated = ValidationStatus.validated(Date())
+
+        #expect(SearchMode.text.isQueryEditable)
+        #expect(SearchMode.text.queryPlaceholder == "Describe the sound or transition you want")
+        #expect(
+            SearchMode.text.canSubmit(
+                validationStatus: validated,
+                isBusy: false,
+                queryText: "  deep rolling bass  ",
+                hasReferenceTrackEmbedding: false
+            )
+        )
+        #expect(
+            SearchMode.text.canSubmit(
+                validationStatus: validated,
+                isBusy: false,
+                queryText: "   ",
+                hasReferenceTrackEmbedding: false
+            ) == false
+        )
+
+        #expect(SearchMode.referenceTrack.isQueryEditable == false)
+        #expect(SearchMode.referenceTrack.queryPlaceholder == "Reference track mode uses the selected track")
+        #expect(
+            SearchMode.referenceTrack.canSubmit(
+                validationStatus: validated,
+                isBusy: false,
+                queryText: "",
+                hasReferenceTrackEmbedding: false
+            ) == false
+        )
+        #expect(
+            SearchMode.referenceTrack.canSubmit(
+                validationStatus: validated,
+                isBusy: false,
+                queryText: "",
+                hasReferenceTrackEmbedding: true
+            )
+        )
+    }
+
+    private func makeTrack(
+        id: UUID = UUID(),
+        analyzedAt: Date?,
+        embeddingProfileID: String?,
+        embeddingUpdatedAt: Date?
+    ) -> Track {
+        Track(
+            id: id,
+            filePath: "/tmp/\(id.uuidString).mp3",
+            fileName: "\(id.uuidString).mp3",
+            title: "Track \(id.uuidString.prefix(4))",
+            artist: "Artist",
+            album: "Album",
+            genre: "House",
+            duration: 240,
+            sampleRate: 44_100,
+            bpm: 124,
+            musicalKey: "8A",
+            modifiedTime: Date(timeIntervalSince1970: 1_700_000_000),
+            contentHash: id.uuidString,
+            analyzedAt: analyzedAt,
+            embeddingProfileID: embeddingProfileID,
+            embeddingUpdatedAt: embeddingUpdatedAt,
+            hasSeratoMetadata: false,
+            hasRekordboxMetadata: false,
+            bpmSource: nil,
+            keySource: nil
+        )
+    }
+}

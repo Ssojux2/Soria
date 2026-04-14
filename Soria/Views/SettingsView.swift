@@ -11,26 +11,36 @@ struct SettingsView: View {
 
                 GroupBox("Analysis Worker") {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Embedding Provider")
+                        Text("Embedding Profile")
                             .font(.headline)
-                        Picker("Embedding Provider", selection: $viewModel.embeddingProvider) {
-                            ForEach(EmbeddingProvider.allCases) { provider in
-                                Text(provider.displayName).tag(provider)
+                        Picker("Embedding Profile", selection: $viewModel.embeddingProfile) {
+                            ForEach(EmbeddingProfile.all, id: \.id) { profile in
+                                Text(profile.displayName).tag(profile)
                             }
                         }
-                        .pickerStyle(.segmented)
-                        .disabled(viewModel.isEmbeddingProviderLocked)
+                        .pickerStyle(.menu)
 
-                        Text(viewModel.isEmbeddingProviderLocked
-                             ? "Embedding provider is locked for this project to prevent vector DB mixing."
-                             : "Choose once before first save. After save, this project uses only one embedding provider.")
+                        Text("Active model: \(viewModel.embeddingProfile.modelName)")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
 
-                        Text("Gemini API Key")
+                        Text("Validation")
                             .font(.headline)
-                        SecureField("Paste your Gemini API key", text: $viewModel.geminiAPIKey)
+                        Text(viewModel.validationStatus.summaryText)
+                            .font(.footnote)
+                            .foregroundStyle(viewModel.validationStatus.isValidated ? .green : .secondary)
+
+                        Text("Google AI API Key")
+                            .font(.headline)
+                        SecureField("Paste your Google AI API key", text: $viewModel.googleAIAPIKey)
                             .textFieldStyle(.roundedBorder)
+                            .disabled(!viewModel.embeddingProfile.requiresAPIKey)
+
+                        if !viewModel.embeddingProfile.requiresAPIKey {
+                            Text("This profile does not require a Google AI API key, but it still needs explicit validation.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
 
                         Text("Python Executable")
                             .font(.headline)
@@ -51,7 +61,10 @@ struct SettingsView: View {
                         HStack {
                             Button("Use Detected Defaults") { viewModel.useDetectedAnalysisDefaults() }
                             Button("Save") { viewModel.saveAnalysisSettings() }
-                            Button("Validate Setup") { viewModel.validateAnalysisSetup() }
+                            Button(viewModel.embeddingProfile.requiresAPIKey ? "Validate API Key" : "Validate Profile") {
+                                viewModel.validateEmbeddingProfile()
+                            }
+                            .disabled(viewModel.validationStatus == .validating)
                         }
 
                         if !viewModel.settingsStatusMessage.isEmpty {
@@ -59,31 +72,91 @@ struct SettingsView: View {
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
-
-                        if !viewModel.workerHealthSummary.isEmpty {
-                            Text(viewModel.workerHealthSummary)
-                                .font(.system(.footnote, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                GroupBox("Library Roots") {
+                GroupBox("Embedding Coverage") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Analyzed tracks: \(viewModel.analyzedTrackCount)")
+                        Text("Tracks ready for active profile: \(viewModel.activeEmbeddingTrackCount)")
+                        Text("Tracks needing fresh embeddings: \(viewModel.staleEmbeddingTrackCount)")
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                GroupBox("DJ Library Sources") {
                     VStack(alignment: .leading, spacing: 12) {
-                        List(viewModel.libraryRoots, id: \.self) { root in
-                            HStack {
-                                Text(root)
-                                    .lineLimit(2)
-                                Spacer()
-                                Button("Remove") { viewModel.removeLibraryRoot(root) }
+                        ForEach(viewModel.librarySources) { source in
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Label(source.kind.displayName, systemImage: source.kind.iconName)
+                                        .font(.headline)
+                                    Spacer()
+                                    Toggle(
+                                        "Enabled",
+                                        isOn: Binding(
+                                            get: { source.enabled },
+                                            set: { viewModel.setLibrarySourceEnabled(source.kind, enabled: $0) }
+                                        )
+                                    )
+                                    .labelsHidden()
+                                    .disabled(source.kind != .folderFallback && source.resolvedPath == nil)
+                                }
+
+                                Text(source.resolvedPath ?? "Not detected")
+                                    .font(.footnote)
+                                    .foregroundStyle(source.resolvedPath == nil ? .secondary : .primary)
+                                    .lineLimit(3)
+                                    .textSelection(.enabled)
+
+                                HStack {
+                                    Text(source.status.displayText)
+                                        .font(.footnote.weight(.semibold))
+                                    if let lastSyncAt = source.lastSyncAt {
+                                        Text("Last sync \(lastSyncAt.formatted(date: .abbreviated, time: .shortened))")
+                                            .font(.footnote)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+
+                                if let lastError = source.lastError, !lastError.isEmpty {
+                                    Text(lastError)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 4)
                         }
-                        .frame(minHeight: 180)
 
                         HStack {
-                            Button("Add Root") { viewModel.addLibraryRoot() }
-                            Button("Rescan") { viewModel.runScan() }
+                            Button("Refresh Detection") { viewModel.refreshLibrarySourceDetection() }
+                            Button("Sync Libraries") { viewModel.syncLibraries() }
+                        }
+                    }
+                }
+
+                GroupBox("Manual Folder Fallback") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if viewModel.libraryRoots.isEmpty {
+                            Text("No fallback folder configured.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(viewModel.libraryRoots, id: \.self) { root in
+                                HStack {
+                                    Text(root)
+                                        .lineLimit(2)
+                                    Spacer()
+                                    Button("Remove") { viewModel.removeLibraryRoot(root) }
+                                }
+                            }
+                        }
+
+                        HStack {
+                            Button("Choose Folder") { viewModel.addLibraryRoot() }
+                            Button("Rescan Folder") { viewModel.runFallbackScan() }
                         }
                     }
                 }

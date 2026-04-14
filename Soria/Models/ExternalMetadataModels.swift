@@ -14,10 +14,23 @@ struct ExternalDJMetadata: Identifiable, Codable, Hashable {
     var playlistMemberships: [String]
     var cueCount: Int?
     var comment: String?
+    var vendorTrackID: String?
+    var analysisState: String?
+    var analysisCachePath: String?
+    var syncVersion: String?
 
-    enum Source: String, Codable {
+    enum Source: String, Codable, CaseIterable {
         case serato
         case rekordbox
+
+        var displayName: String {
+            switch self {
+            case .serato:
+                return "Serato"
+            case .rekordbox:
+                return "rekordbox"
+            }
+        }
     }
 }
 
