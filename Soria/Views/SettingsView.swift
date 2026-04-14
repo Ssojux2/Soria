@@ -132,6 +132,7 @@ struct SettingsView: View {
                         }
 
                         HStack {
+                            Button("Library Setup") { viewModel.openInitialSetup() }
                             Button("Refresh Detection") { viewModel.refreshLibrarySourceDetection() }
                             Button("Sync Libraries") { viewModel.syncLibraries() }
                         }

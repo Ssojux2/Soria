@@ -190,6 +190,18 @@ final class AppViewModel: ObservableObject {
         isShowingInitialSetupSheet = false
     }
 
+    func openInitialSetup() {
+        initialSetupStatusMessage = ""
+        if initialSetupLibraryRoot.isEmpty, let existingRoot = libraryRoots.first {
+            initialSetupLibraryRoot = existingRoot
+        }
+
+        Task {
+            await detectLibrarySources()
+            isShowingInitialSetupSheet = true
+        }
+    }
+
     func completeInitialSetup() {
         let hasNativeSelection = librarySources.contains {
             $0.kind != .folderFallback && $0.enabled && $0.resolvedPath != nil

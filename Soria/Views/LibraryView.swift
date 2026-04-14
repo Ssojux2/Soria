@@ -6,6 +6,7 @@ struct LibraryView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
+                Button("Library Setup") { viewModel.openInitialSetup() }
                 Button("Sync Libraries") { viewModel.syncLibraries() }
                 Button("Rescan Fallback Folder") { viewModel.runFallbackScan() }
                 Button("Choose Fallback Folder") { viewModel.addLibraryRoot() }
