@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+
+# Xcode / Swift
+.build/
+DerivedData/
+*.xcuserdata/
+*.xcbkptlist
+*.xcscheme
+*.xcuserstate
+
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Environment files
+.env
+.env.*
+
+# Node / JS (if any)
+node_modules/
+dist/
+
+# Logs
+*.log
+
+# Temp / cache
+.tmp-worker-cache/
