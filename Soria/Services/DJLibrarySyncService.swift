@@ -68,9 +68,11 @@ struct NativeLibrarySyncSummary {
 
 final class SeratoLibraryService {
     private let fileManager: FileManager
+    private let cuePointParser: ExternalCuePointParser
 
-    init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default, cuePointParser: ExternalCuePointParser = ExternalCuePointParser()) {
         self.fileManager = fileManager
+        self.cuePointParser = cuePointParser
     }
 
     func defaultDatabaseURL() -> URL? {
@@ -83,6 +85,7 @@ final class SeratoLibraryService {
         let reader = try SQLiteReader(databaseURL: databaseURL)
         let containers = try loadContainers(reader: reader)
         let membershipsByAssetID = try loadMemberships(reader: reader, containers: containers)
+        let cuePointsByAssetID = try loadCuePoints(reader: reader)
         let sql = """
         SELECT id, portable_id, file_name, name, artist, album, genre, bpm, key, rating, dj_play_count, comments, length_sec, analysis_flags
         FROM asset
@@ -116,6 +119,7 @@ final class SeratoLibraryService {
             let duration = reader.optionalDouble(statement, index: 12)
             let analysisFlags = reader.optionalInt(statement, index: 13)
             let memberships = membershipsByAssetID[assetID] ?? []
+            let cuePoints = cuePointsByAssetID[assetID] ?? []
 
             let metadata = ExternalDJMetadata(
                 id: UUID(),
@@ -129,7 +133,8 @@ final class SeratoLibraryService {
                 playCount: playCount,
                 lastPlayed: nil,
                 playlistMemberships: memberships,
-                cueCount: nil,
+                cueCount: cuePoints.isEmpty ? nil : cuePoints.count,
+                cuePoints: cuePoints,
                 comment: comment,
                 vendorTrackID: assetID,
                 analysisState: analysisFlags.map { "flags=\($0)" },
@@ -151,6 +156,95 @@ final class SeratoLibraryService {
                 metadata: metadata
             )
         }
+    }
+
+    private func loadCuePoints(reader: SQLiteReader) throws -> [String: [ExternalDJCuePoint]] {
+        var groupedPoints: [String: [ExternalDJCuePoint]] = [:]
+        for spec in cuePointTableSpecs() {
+            guard let parsedPoints = try? loadCuePoints(from: reader, spec: spec) else { continue }
+            for point in parsedPoints {
+                groupedPoints[point.trackID, default: []].append(point.cuePoint)
+            }
+        }
+        return groupedPoints.mapValues { cuePointParser.normalize($0) }
+    }
+
+    private func loadCuePoints(from reader: SQLiteReader, spec: SQLiteCuePointTableSpec) throws -> [(trackID: String, cuePoint: ExternalDJCuePoint)] {
+        guard try reader.tableExists(spec.table) else { return [] }
+        let columns = try reader.columns(for: spec.table)
+        guard spec.supports(columns: columns) else { return [] }
+
+        let query = """
+        SELECT * FROM \(spec.table)
+        """
+        return try reader.query(query) { statement in
+            guard let row = try? reader.rowDictionary(statement) else { return nil }
+            return cuePointParser.parseSQLiteCuePoint(
+                from: row,
+                trackIDColumns: spec.trackIDColumns,
+                timeColumns: spec.timeColumns,
+                endColumns: spec.endColumns,
+                nameColumns: spec.nameColumns,
+                kindColumns: spec.kindColumns,
+                indexColumns: spec.indexColumns,
+                colorColumns: spec.colorColumns,
+                fallbackKind: spec.fallbackKind,
+                sourceName: spec.sourceName
+            )
+        }
+    }
+
+    private func cuePointTableSpecs() -> [SQLiteCuePointTableSpec] {
+        [
+            SQLiteCuePointTableSpec(
+                table: "cues",
+                trackIDColumns: ["asset_id", "assetID", "assetid", "asset", "portable_id", "track_id", "trackid"],
+                timeColumns: ["position", "time", "start", "cue_time", "time_ms", "time_in_ms", "start_time", "starttime"],
+                endColumns: ["end", "end_time", "endposition", "length", "duration", "end_time_ms"],
+                nameColumns: ["name", "label", "title"],
+                kindColumns: ["type", "kind", "cue_type"],
+                indexColumns: ["idx", "index", "num", "number", "order", "position_number"],
+                colorColumns: ["color", "colour", "rgb", "cue_color"],
+                fallbackKind: .cue,
+                sourceName: "serato:cues"
+            ),
+            SQLiteCuePointTableSpec(
+                table: "hotcues",
+                trackIDColumns: ["asset_id", "assetID", "assetid", "asset", "portable_id", "track_id", "trackid"],
+                timeColumns: ["position", "time", "start", "cue_time", "time_ms", "time_in_ms", "start_time", "starttime"],
+                endColumns: ["end", "end_time", "length", "duration", "end_time_ms"],
+                nameColumns: ["name", "label", "title"],
+                kindColumns: ["type", "kind", "cue_type"],
+                indexColumns: ["idx", "index", "num", "number", "order"],
+                colorColumns: ["color", "colour", "rgb", "cue_color"],
+                fallbackKind: .hotcue,
+                sourceName: "serato:hotcues"
+            ),
+            SQLiteCuePointTableSpec(
+                table: "cue",
+                trackIDColumns: ["asset_id", "assetID", "assetid", "asset", "portable_id", "track_id", "trackid"],
+                timeColumns: ["position", "time", "start", "cue_time", "time_ms", "time_in_ms", "start_time", "starttime"],
+                endColumns: ["end", "end_time", "length", "duration", "end_time_ms"],
+                nameColumns: ["name", "label", "title"],
+                kindColumns: ["type", "kind", "cue_type"],
+                indexColumns: ["idx", "index", "num", "number", "order", "position_number"],
+                colorColumns: ["color", "colour", "rgb", "cue_color"],
+                fallbackKind: .cue,
+                sourceName: "serato:cue"
+            ),
+            SQLiteCuePointTableSpec(
+                table: "marks",
+                trackIDColumns: ["asset_id", "assetID", "assetid", "asset", "portable_id", "track_id", "trackid"],
+                timeColumns: ["position", "time", "start", "cue_time", "time_ms", "time_in_ms", "start_time", "starttime"],
+                endColumns: ["end", "end_time", "length", "duration", "end_time_ms"],
+                nameColumns: ["name", "label", "title"],
+                kindColumns: ["type", "kind", "cue_type"],
+                indexColumns: ["idx", "index", "num", "number", "order", "position_number"],
+                colorColumns: ["color", "colour", "rgb", "cue_color"],
+                fallbackKind: .cue,
+                sourceName: "serato:marks"
+            )
+        ]
     }
 
     private func loadContainers(reader: SQLiteReader) throws -> [Int: SeratoContainerNode] {
@@ -219,9 +313,11 @@ final class SeratoLibraryService {
 
 final class RekordboxLibraryService {
     private let fileManager: FileManager
+    private let cuePointParser: ExternalCuePointParser
 
-    init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default, cuePointParser: ExternalCuePointParser = ExternalCuePointParser()) {
         self.fileManager = fileManager
+        self.cuePointParser = cuePointParser
     }
 
     func defaultSettingsURL() -> URL? {
@@ -262,6 +358,8 @@ final class RekordboxLibraryService {
 
     func loadTracks(from databaseDirectory: URL) throws -> [VendorLibraryTrackRecord] {
         var aggregates: [String: RekordboxAggregate] = [:]
+        var cuePointsByPath: [String: [ExternalDJCuePoint]] = [:]
+
         for databaseName in ["networkRecommend.db", "networkAnalyze6.db"] {
             let databaseURL = databaseDirectory.appendingPathComponent(databaseName)
             guard fileManager.fileExists(atPath: databaseURL.path) else { continue }
@@ -291,6 +389,19 @@ final class RekordboxLibraryService {
                 )
             }
 
+            let pathByIdentifier = rows.reduce(into: [String: String]()) { result, row in
+                if let trackID = trimToNil(row.trackID) {
+                    result[trackID.lowercased()] = row.normalizedPath
+                }
+                if let trackChecksum = trimToNil(row.trackChecksum) {
+                    result[trackChecksum.lowercased()] = row.normalizedPath
+                }
+            }
+            let cuePoints = try loadCuePointsFromDatabase(reader: reader, pathByIdentifier: pathByIdentifier)
+            for (path, points) in cuePoints {
+                cuePointsByPath[path, default: []].append(contentsOf: points)
+            }
+
             for row in rows {
                 var aggregate = aggregates[row.normalizedPath] ?? RekordboxAggregate(path: row.normalizedPath)
                 aggregate.merge(row)
@@ -305,6 +416,9 @@ final class RekordboxLibraryService {
 
         return aggregates.values.map { aggregate in
             let normalizedDuration = Self.normalizedDuration(aggregate.duration)
+            let cacheCuePoints = loadCuePointsFromAnalysisCache(aggregate.analysisCachePath)
+            let trackCuePoints = cuePointsByPath[aggregate.path] ?? []
+            let cuePoints = cuePointParser.normalize(trackCuePoints + cacheCuePoints)
             let metadata = ExternalDJMetadata(
                 id: UUID(),
                 trackPath: aggregate.path,
@@ -317,7 +431,8 @@ final class RekordboxLibraryService {
                 playCount: nil,
                 lastPlayed: nil,
                 playlistMemberships: Array(Set(aggregate.playlistMemberships)).sorted(),
-                cueCount: nil,
+                cueCount: cuePoints.isEmpty ? nil : cuePoints.count,
+                cuePoints: cuePoints,
                 comment: nil,
                 vendorTrackID: trimToNil(aggregate.vendorTrackID),
                 analysisState: aggregate.analysisStateDescription,
@@ -341,6 +456,103 @@ final class RekordboxLibraryService {
                 metadata: metadata
             )
         }
+    }
+
+    private func loadCuePointsFromDatabase(reader: SQLiteReader, pathByIdentifier: [String: String]) throws -> [String: [ExternalDJCuePoint]] {
+        var groupedPoints: [String: [ExternalDJCuePoint]] = [:]
+        for spec in cuePointTableSpecs() {
+            guard try reader.tableExists(spec.table) else { continue }
+            let columns = try reader.columns(for: spec.table)
+            guard spec.supports(columns: columns) else { continue }
+            let rows = try reader.query("SELECT * FROM \(spec.table)") { statement in
+                let row = reader.rowDictionary(statement)
+                return cuePointParser.parseSQLiteCuePoint(
+                    from: row,
+                    trackIDColumns: spec.trackIDColumns,
+                    timeColumns: spec.timeColumns,
+                    endColumns: spec.endColumns,
+                    nameColumns: spec.nameColumns,
+                    kindColumns: spec.kindColumns,
+                    indexColumns: spec.indexColumns,
+                    colorColumns: spec.colorColumns,
+                    fallbackKind: spec.fallbackKind,
+                    sourceName: spec.sourceName
+                )
+            }
+            for point in rows {
+                if let path = pathByIdentifier[point.trackID.lowercased()] {
+                    groupedPoints[path, default: []].append(point.cuePoint)
+                }
+            }
+        }
+        return groupedPoints
+    }
+
+    private func loadCuePointsFromAnalysisCache(_ path: String?) -> [ExternalDJCuePoint] {
+        guard let path else { return [] }
+        let normalized = TrackPathNormalizer.normalizedAbsolutePath(path)
+        guard !normalized.isEmpty else { return [] }
+        let cacheURL = URL(fileURLWithPath: normalized)
+        guard fileManager.fileExists(atPath: cacheURL.path),
+              let data = try? Data(contentsOf: cacheURL),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              !cacheURL.path.isEmpty
+        else { return [] }
+
+        return cuePointParser.parseCuePoints(fromSerialized: object, kind: .cue, sourceName: "rekordbox:analysis_cache")
+    }
+
+    private func cuePointTableSpecs() -> [SQLiteCuePointTableSpec] {
+        [
+            SQLiteCuePointTableSpec(
+                table: "djmdHotCue",
+                trackIDColumns: ["TrackID", "track_id", "trackid", "TrackNo", "Path", "track_path"],
+                timeColumns: ["StartPos", "Start", "StartTime", "CuePos", "Position", "Time", "time"],
+                endColumns: ["Length", "Duration", "EndPos", "EndTime", "End"],
+                nameColumns: ["Name", "Label", "CueName", "Tag"],
+                kindColumns: ["Kind", "Type", "CueType"],
+                indexColumns: ["Index", "Num", "Order", "No"],
+                colorColumns: ["Color", "Colour", "CueColor"],
+                fallbackKind: .hotcue,
+                sourceName: "rekordbox:hotcue"
+            ),
+            SQLiteCuePointTableSpec(
+                table: "trackCue",
+                trackIDColumns: ["TrackID", "track_id", "trackid", "TrackNo", "Path", "track_path"],
+                timeColumns: ["StartPos", "Start", "StartTime", "CuePos", "Position", "Time", "time"],
+                endColumns: ["Length", "Duration", "EndPos", "EndTime", "End"],
+                nameColumns: ["Name", "Label", "CueName", "Tag"],
+                kindColumns: ["Kind", "Type", "CueType"],
+                indexColumns: ["Index", "Num", "Order", "No"],
+                colorColumns: ["Color", "Colour", "CueColor"],
+                fallbackKind: .cue,
+                sourceName: "rekordbox:cue"
+            ),
+            SQLiteCuePointTableSpec(
+                table: "marker",
+                trackIDColumns: ["TrackID", "track_id", "trackid", "TrackNo", "Path", "track_path"],
+                timeColumns: ["StartPos", "Start", "StartTime", "CuePos", "Position", "Time", "time"],
+                endColumns: ["Length", "Duration", "EndPos", "EndTime", "End"],
+                nameColumns: ["Name", "Label", "CueName", "Tag"],
+                kindColumns: ["Kind", "Type", "CueType"],
+                indexColumns: ["Index", "Num", "Order", "No"],
+                colorColumns: ["Color", "Colour", "CueColor"],
+                fallbackKind: .cue,
+                sourceName: "rekordbox:marker"
+            ),
+            SQLiteCuePointTableSpec(
+                table: "markers",
+                trackIDColumns: ["TrackID", "track_id", "trackid", "TrackNo", "Path", "track_path"],
+                timeColumns: ["StartPos", "Start", "StartTime", "CuePos", "Position", "Time", "time"],
+                endColumns: ["Length", "Duration", "EndPos", "EndTime", "End"],
+                nameColumns: ["Name", "Label", "CueName", "Tag"],
+                kindColumns: ["Kind", "Type", "CueType"],
+                indexColumns: ["Index", "Num", "Order", "No"],
+                colorColumns: ["Color", "Colour", "CueColor"],
+                fallbackKind: .cue,
+                sourceName: "rekordbox:markers"
+            )
+        ]
     }
 
     private func loadPlaylists(from xmlURL: URL) -> [String: [String]] {
@@ -710,6 +922,25 @@ private struct RekordboxAggregate {
     }
 }
 
+private struct SQLiteCuePointTableSpec {
+    let table: String
+    let trackIDColumns: [String]
+    let timeColumns: [String]
+    let endColumns: [String]
+    let nameColumns: [String]
+    let kindColumns: [String]
+    let indexColumns: [String]
+    let colorColumns: [String]
+    let fallbackKind: ExternalDJCuePoint.Kind
+    let sourceName: String
+
+    func supports(columns: Set<String>) -> Bool {
+        guard trackIDColumns.contains(where: { columns.contains($0.lowercased()) }) else { return false }
+        guard timeColumns.contains(where: { columns.contains($0.lowercased()) }) else { return false }
+        return true
+    }
+}
+
 private final class SQLiteReader {
     private var db: OpaquePointer?
 
@@ -723,12 +954,16 @@ private final class SQLiteReader {
         sqlite3_close(db)
     }
 
-    func query<T>(_ sql: String, map: (OpaquePointer?) throws -> T?) throws -> [T] {
+    func query<T>(_ sql: String, bind: ((OpaquePointer?) throws -> Void)? = nil, map: (OpaquePointer?) throws -> T?) throws -> [T] {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
             throw DatabaseError.queryFailed
         }
         defer { sqlite3_finalize(statement) }
+
+        if let bind {
+            try bind(statement)
+        }
 
         var results: [T] = []
         while sqlite3_step(statement) == SQLITE_ROW {
@@ -737,6 +972,39 @@ private final class SQLiteReader {
             }
         }
         return results
+    }
+
+    func tableExists(_ table: String) throws -> Bool {
+        let target = table.lowercased()
+        return try tableNames().contains(where: { $0 == target })
+    }
+
+    func tableNames() throws -> [String] {
+        try query("SELECT name FROM sqlite_master WHERE type = 'table';") { statement in
+            guard let text = string(statement, index: 0) else { return nil }
+            return text.lowercased()
+        }
+    }
+
+    func columns(for table: String) throws -> Set<String> {
+        let lowercasedTable = table.lowercased()
+        let sql = "PRAGMA table_info(\(lowercasedTable));"
+        let columns: [String] = try query(sql) { statement in
+            guard let text = string(statement, index: 1) else { return nil }
+            return text.lowercased()
+        }
+        return Set(columns)
+    }
+
+    func rowDictionary(_ statement: OpaquePointer?) -> [String: Any?] {
+        let columnCount = sqlite3_column_count(statement)
+        var dict: [String: Any?] = [:]
+        for index in 0..<columnCount {
+            guard let rawName = sqlite3_column_name(statement, Int32(index)) else { continue }
+            let name = String(cString: rawName).lowercased()
+            dict[name] = rowValue(statement: statement, index: Int32(index))
+        }
+        return dict
     }
 
     func string(_ statement: OpaquePointer?, index: Int32) -> String? {
@@ -752,5 +1020,23 @@ private final class SQLiteReader {
     func optionalInt(_ statement: OpaquePointer?, index: Int32) -> Int? {
         guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return nil }
         return Int(sqlite3_column_int64(statement, index))
+    }
+
+    private func rowValue(statement: OpaquePointer?, index: Int32) -> Any? {
+        switch sqlite3_column_type(statement, index) {
+        case SQLITE_INTEGER:
+            return sqlite3_column_int64(statement, index)
+        case SQLITE_FLOAT:
+            return sqlite3_column_double(statement, index)
+        case SQLITE_TEXT:
+            return string(statement, index: index)
+        case SQLITE_BLOB:
+            guard let blob = sqlite3_column_blob(statement, index) else { return nil }
+            let size = sqlite3_column_bytes(statement, index)
+            guard size > 0 else { return nil }
+            return Data(bytes: blob, count: Int(size))
+        default:
+            return nil
+        }
     }
 }

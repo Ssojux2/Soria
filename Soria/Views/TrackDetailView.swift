@@ -17,9 +17,12 @@ struct TrackDetailView: View {
 
                 GroupBox("Waveform Preview") {
                     VStack(alignment: .leading, spacing: 10) {
+                        let cuePoints = viewModel.selectedTrackExternalMetadata.flatMap(\.cuePoints)
                         WaveformPreview(
                             samples: viewModel.selectedTrackAnalysis?.waveformPreview ?? [],
-                            segments: viewModel.selectedTrackSegments
+                            segments: viewModel.selectedTrackSegments,
+                            cuePoints: cuePoints,
+                            trackDuration: track.duration
                         )
                         .frame(height: 96)
 
@@ -93,6 +96,7 @@ struct TrackDetailView: View {
                                     analysisRow("Rating", metadata.rating.map(String.init) ?? "-")
                                     analysisRow("Play Count", metadata.playCount.map(String.init) ?? "-")
                                     analysisRow("Cue Count", metadata.cueCount.map(String.init) ?? "-")
+                                    analysisRow("Cue Points", "\(metadata.cuePoints.count)")
                                     analysisRow(
                                         "Tags",
                                         metadata.tags.isEmpty ? "-" : metadata.tags.joined(separator: ", ")
@@ -164,12 +168,19 @@ struct TrackDetailView: View {
 private struct WaveformPreview: View {
     let samples: [Double]
     let segments: [TrackSegment]
+    let cuePoints: [ExternalDJCuePoint]
+    let trackDuration: Double
+
+    private let barCount = 128
+    private let sidePadding: CGFloat = 6
 
     var body: some View {
         GeometryReader { proxy in
-            let values = samples.isEmpty ? Array(repeating: 0.15, count: 128) : samples
-            let barWidth = max(1.0, proxy.size.width / CGFloat(max(values.count, 1)))
-            let totalDuration = max(segments.map(\.endSec).max() ?? 1.0, 1.0)
+            let values = normalizedWaveformSamples(from: samples)
+            let trackLength = resolvedTrackDuration
+            let barWidth = max(1.0, (proxy.size.width - (sidePadding * 2.0)) / CGFloat(max(values.count, 1)))
+            let segmentBars = segmentOverlays()
+            let cueOverlays = cuePointOverlays()
 
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 10)
@@ -179,22 +190,146 @@ private struct WaveformPreview: View {
                     ForEach(Array(values.enumerated()), id: \.offset) { item in
                         Capsule(style: .continuous)
                             .fill(Color.accentColor.opacity(0.7))
-                            .frame(width: barWidth, height: max(6, proxy.size.height * item.element))
+                            .frame(
+                                width: barWidth,
+                                height: max(6, proxy.size.height * item.element)
+                            )
                     }
                 }
                 .frame(maxHeight: .infinity, alignment: .center)
-                .padding(.horizontal, 6)
+                .padding(.horizontal, sidePadding)
 
-                ForEach(segments) { segment in
-                    let startRatio = segment.startSec / totalDuration
-                    let endRatio = segment.endSec / totalDuration
+                ForEach(segmentBars) { segment in
+                    let startRatio = CGFloat(segment.startSec / trackLength)
+                    let endRatio = CGFloat(segment.endSec / trackLength)
                     RoundedRectangle(cornerRadius: 6)
                         .strokeBorder(color(for: segment), lineWidth: 2)
                         .background(color(for: segment).opacity(0.12))
-                        .frame(width: max(12, proxy.size.width * CGFloat(endRatio - startRatio)))
-                        .offset(x: proxy.size.width * CGFloat(startRatio))
+                        .frame(width: max(12, max(0, min(1, endRatio - startRatio)) * (proxy.size.width - (sidePadding * 2))))
+                        .offset(x: sidePadding + (proxy.size.width - (sidePadding * 2)) * min(1, max(0, startRatio)))
+                }
+
+                ForEach(Array(cueOverlays.enumerated()), id: \.offset) { item in
+                    let ratio = CGFloat(item.element.startSec / trackLength)
+                    let x = sidePadding + (proxy.size.width - (sidePadding * 2)) * min(1, max(0, ratio))
+                    Capsule(style: .continuous)
+                        .fill(color(for: item.element))
+                        .frame(width: 2, height: proxy.size.height + 6)
+                        .offset(x: x)
+                        .opacity(0.85)
                 }
             }
+        }
+    }
+
+    private var resolvedTrackDuration: Double {
+        if trackDuration.isFinite && trackDuration > 0 {
+            return trackDuration
+        }
+
+        let segmentEnd = segments
+            .map(\.endSec)
+            .filter { $0.isFinite }
+            .max()
+
+        if let segmentEnd, segmentEnd > 0 {
+            return segmentEnd
+        }
+
+        return 1.0
+    }
+
+    private func segmentOverlays() -> [TrackSegment] {
+        segments.compactMap { segment in
+            let start = segment.startSec
+            let end = segment.endSec
+            guard start.isFinite && end.isFinite else { return nil }
+
+            let clampedStart = min(max(0, start), resolvedTrackDuration)
+            let clampedEnd = min(max(0, end), resolvedTrackDuration)
+            guard clampedEnd >= clampedStart else { return nil }
+
+            return TrackSegment(
+                id: segment.id,
+                trackID: segment.trackID,
+                type: segment.type,
+                startSec: clampedStart,
+                endSec: clampedEnd,
+                energyScore: segment.energyScore,
+                descriptorText: segment.descriptorText,
+                vector: segment.vector
+            )
+        }.sorted { $0.startSec < $1.startSec }
+    }
+
+    private func cuePointOverlays() -> [ExternalDJCuePoint] {
+        let normalized = cuePoints
+            .filter { $0.startSec.isFinite }
+            .compactMap { point -> ExternalDJCuePoint? in
+                guard point.startSec >= 0 else { return nil }
+                return ExternalDJCuePoint(
+                    kind: point.kind,
+                    name: point.name,
+                    index: point.index,
+                    startSec: min(point.startSec, resolvedTrackDuration),
+                    endSec: point.endSec,
+                    color: point.color,
+                    source: point.source
+                )
+            }
+            .sorted { lhs, rhs in
+                if lhs.startSec == rhs.startSec {
+                    return (lhs.index ?? Int.max) < (rhs.index ?? Int.max)
+                }
+                return lhs.startSec < rhs.startSec
+            }
+
+        return normalized.enumerated().reduce(into: [ExternalDJCuePoint]()) { result, item in
+            let point = item.element
+            guard let previous = result.last else {
+                result.append(point)
+                return
+            }
+
+            let isDuplicate = abs(previous.startSec - point.startSec) < 0.001 &&
+                previous.kind == point.kind &&
+                (previous.color ?? "") == (point.color ?? "")
+
+            if !isDuplicate {
+                result.append(point)
+            }
+        }
+    }
+
+    private func normalizedWaveformSamples(from values: [Double]) -> [Double] {
+        let validValues = values.filter { $0.isFinite && $0 > 0.0 }.map { max(0.0, min(1.0, $0)) }
+        let source = validValues.isEmpty ? Array(repeating: 0.15, count: barCount) : validValues
+        guard !source.isEmpty else { return Array(repeating: 0.0, count: barCount) }
+
+        if source.count == barCount {
+            return source
+        }
+
+        if source.count > barCount {
+            let span = Double(source.count) / Double(barCount)
+            return (0..<barCount).compactMap { index in
+                let start = Int(Double(index) * span)
+                let end = Int(Double(index + 1) * span)
+                guard end > start else { return source[min(start, source.count - 1)] }
+                let values = source[start..<min(end, source.count)]
+                return values.reduce(0.0, +) / Double(values.count)
+            }
+        }
+
+        return (0..<barCount).map { index in
+            if source.count == 1 {
+                return source[0]
+            }
+            let raw = Double(index) * Double(source.count - 1) / Double(barCount - 1)
+            let lower = Int(floor(raw))
+            let upper = min(source.count - 1, lower + 1)
+            let fraction = raw - Double(lower)
+            return (1.0 - fraction) * source[lower] + fraction * source[upper]
         }
     }
 
@@ -203,6 +338,15 @@ private struct WaveformPreview: View {
         case .intro: return .cyan
         case .middle: return .orange
         case .outro: return .mint
+        }
+    }
+
+    private func color(for cuePoint: ExternalDJCuePoint) -> Color {
+        switch cuePoint.kind {
+        case .cue: return .blue
+        case .hotcue: return .orange
+        case .loop: return .purple
+        case .unknown: return .secondary
         }
     }
 }

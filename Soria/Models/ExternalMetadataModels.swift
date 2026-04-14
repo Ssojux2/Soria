@@ -13,6 +13,7 @@ struct ExternalDJMetadata: Identifiable, Codable, Hashable {
     var lastPlayed: Date?
     var playlistMemberships: [String]
     var cueCount: Int?
+    var cuePoints: [ExternalDJCuePoint] = []
     var comment: String?
     var vendorTrackID: String?
     var analysisState: String?
@@ -32,6 +33,23 @@ struct ExternalDJMetadata: Identifiable, Codable, Hashable {
             }
         }
     }
+}
+
+struct ExternalDJCuePoint: Codable, Hashable {
+    enum Kind: String, Codable {
+        case cue
+        case hotcue
+        case loop
+        case unknown
+    }
+
+    let kind: Kind
+    let name: String?
+    let index: Int?
+    let startSec: Double
+    let endSec: Double?
+    let color: String?
+    let source: String?
 }
 
 struct RekordboxTrackEntry: Codable, Hashable {

@@ -1,6 +1,12 @@
 import Foundation
 
 final class ExternalMetadataService {
+    private let cuePointParser: ExternalCuePointParser
+
+    init(cuePointParser: ExternalCuePointParser = ExternalCuePointParser()) {
+        self.cuePointParser = cuePointParser
+    }
+
     func importRekordboxXML(from url: URL) throws -> [ExternalDJMetadata] {
         let data = try Data(contentsOf: url)
         let document = try XMLDocument(data: data)
@@ -22,7 +28,8 @@ final class ExternalMetadataService {
 
             let trackID = element.attribute(forName: "TrackID")?.stringValue ?? UUID().uuidString
             let trackPath = normalizedTrackPath(location)
-            let cueCount = element.elements(forName: "POSITION_MARK").count
+            let cuePoints = cuePointParser.parseRekordboxCuePoints(from: element)
+            let cueCount = cueCount(from: cuePoints, legacy: cuePoints.count)
             let genreTag = element.attribute(forName: "Genre")?.stringValue
             let comment = element.attribute(forName: "Comments")?.stringValue
 
@@ -38,7 +45,8 @@ final class ExternalMetadataService {
                 playCount: Int(element.attribute(forName: "PlayCount")?.stringValue ?? ""),
                 lastPlayed: parsedDate(element.attribute(forName: "DateAdded")?.stringValue),
                 playlistMemberships: playlistsByTrackID[trackID] ?? [],
-                cueCount: cueCount == 0 ? nil : cueCount,
+                cueCount: cueCount,
+                cuePoints: cuePoints,
                 comment: comment,
                 vendorTrackID: trackID,
                 analysisState: nil,
@@ -61,21 +69,25 @@ final class ExternalMetadataService {
             let trackPath = normalizedTrackPath(row["path"] ?? row["track_path"] ?? "")
             guard !trackPath.isEmpty else { return nil }
 
+            let cuePoints = cuePointParser.parseSeratoCuePoints(from: row)
+            let cueCount = cueCount(from: cuePoints, legacy: parseInt(row["cue_count"]))
             let tagText = row["tags"] ?? row["genre"] ?? ""
             let playlistText = row["playlists"] ?? row["playlist_memberships"] ?? ""
+
             return ExternalDJMetadata(
                 id: UUID(),
                 trackPath: trackPath,
                 source: .serato,
-                bpm: Double(row["bpm"] ?? ""),
+                bpm: parseDouble(row["bpm"]),
                 musicalKey: nilIfEmpty(row["key"] ?? row["musical_key"]),
-                rating: Int(row["rating"] ?? ""),
+                rating: parseInt(row["rating"]),
                 color: nilIfEmpty(row["color"] ?? ""),
                 tags: splitPipeList(tagText),
-                playCount: Int(row["play_count"] ?? ""),
+                playCount: parseInt(row["play_count"]),
                 lastPlayed: parsedDate(row["last_played"]),
                 playlistMemberships: splitPipeList(playlistText),
-                cueCount: Int(row["cue_count"] ?? ""),
+                cueCount: cueCount,
+                cuePoints: cuePoints,
                 comment: nilIfEmpty(row["comment"] ?? ""),
                 vendorTrackID: nilIfEmpty(row["id"] ?? row["track_id"]),
                 analysisState: nilIfEmpty(row["analysis_state"]),
@@ -87,6 +99,13 @@ final class ExternalMetadataService {
 
     func normalizedTrackPath(_ input: String) -> String {
         TrackPathNormalizer.normalizedAbsolutePath(input)
+    }
+
+    private func cueCount(from points: [ExternalDJCuePoint], legacy: Int?) -> Int? {
+        if !points.isEmpty {
+            return max(points.count, legacy ?? 0).takeIfPositive()
+        }
+        return legacy.flatMap { $0 > 0 ? $0 : nil }
     }
 
     private func splitPipeList(_ input: String) -> [String] {
@@ -124,6 +143,16 @@ final class ExternalMetadataService {
         return values
     }
 
+    private func parseDouble(_ value: String?) -> Double? {
+        guard let trimmed = nilIfEmpty(value) else { return nil }
+        return Double(trimmed)
+    }
+
+    private func parseInt(_ value: String?) -> Int? {
+        guard let trimmed = nilIfEmpty(value) else { return nil }
+        return Int(trimmed)
+    }
+
     private func parsedDate(_ rawValue: String?) -> Date? {
         guard let rawValue = nilIfEmpty(rawValue) else { return nil }
         if let date = LibraryDatabase.iso8601.date(from: rawValue) {
@@ -146,6 +175,12 @@ final class ExternalMetadataService {
             return nil
         }
         return trimmed
+    }
+}
+
+private extension Int {
+    func takeIfPositive() -> Int? {
+        self > 0 ? self : nil
     }
 }
 

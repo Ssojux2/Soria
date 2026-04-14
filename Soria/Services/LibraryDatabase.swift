@@ -325,12 +325,13 @@ final class LibraryDatabase {
             let insertSQL = """
             INSERT INTO external_metadata (
                 id, track_id, source, track_path, bpm, musical_key, rating, color, tags_json, play_count,
-                last_played, playlist_memberships_json, cue_count, comment, vendor_track_id, analysis_state,
+                last_played, playlist_memberships_json, cue_count, cue_points_json, comment, vendor_track_id, analysis_state,
                 analysis_cache_path, sync_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """
             try withStatement(insertSQL) { statement in
-                for entry in entries {
+            for entry in entries {
+                    let cueCount = resolvedCueCount(stored: entry.cueCount, cuePoints: entry.cuePoints)
                     sqlite3_reset(statement)
                     sqlite3_clear_bindings(statement)
                     bind(statement, index: 1, text: entry.id.uuidString)
@@ -345,12 +346,13 @@ final class LibraryDatabase {
                     bind(statement, index: 10, int: entry.playCount)
                     bind(statement, index: 11, text: entry.lastPlayed.map { Self.iso8601.string(from: $0) })
                     bind(statement, index: 12, text: jsonString(entry.playlistMemberships))
-                    bind(statement, index: 13, int: entry.cueCount)
-                    bind(statement, index: 14, text: entry.comment)
-                    bind(statement, index: 15, text: entry.vendorTrackID)
-                    bind(statement, index: 16, text: entry.analysisState)
-                    bind(statement, index: 17, text: entry.analysisCachePath)
-                    bind(statement, index: 18, text: entry.syncVersion)
+                    bind(statement, index: 13, int: cueCount)
+                    bind(statement, index: 14, text: jsonString(entry.cuePoints))
+                    bind(statement, index: 15, text: entry.comment)
+                    bind(statement, index: 16, text: entry.vendorTrackID)
+                    bind(statement, index: 17, text: entry.analysisState)
+                    bind(statement, index: 18, text: entry.analysisCachePath)
+                    bind(statement, index: 19, text: entry.syncVersion)
                     guard sqlite3_step(statement) == SQLITE_DONE else {
                         throw DatabaseError.writeFailed
                     }
@@ -362,7 +364,7 @@ final class LibraryDatabase {
     func fetchExternalMetadata(trackID: UUID) throws -> [ExternalDJMetadata] {
         let sql = """
         SELECT id, source, track_path, bpm, musical_key, rating, color, tags_json, play_count,
-               last_played, playlist_memberships_json, cue_count, comment, vendor_track_id, analysis_state,
+               last_played, playlist_memberships_json, cue_count, cue_points_json, comment, vendor_track_id, analysis_state,
                analysis_cache_path, sync_version
         FROM external_metadata
         WHERE track_id = ?
@@ -382,6 +384,8 @@ final class LibraryDatabase {
                     continue
                 }
                 let lastPlayed = sqliteString(statement, index: 9).flatMap { Self.iso8601.date(from: $0) }
+                let cuePoints = decodeCuePoints(sqliteString(statement, index: 12) ?? "[]")
+                let legacyCueCount = sqliteOptionalInt(statement, index: 11)
                 results.append(
                     ExternalDJMetadata(
                         id: id,
@@ -395,12 +399,13 @@ final class LibraryDatabase {
                         playCount: sqliteOptionalInt(statement, index: 8),
                         lastPlayed: lastPlayed,
                         playlistMemberships: stringArray(from: sqliteString(statement, index: 10) ?? "[]"),
-                        cueCount: sqliteOptionalInt(statement, index: 11),
-                        comment: sqliteString(statement, index: 12),
-                        vendorTrackID: sqliteString(statement, index: 13),
-                        analysisState: sqliteString(statement, index: 14),
-                        analysisCachePath: sqliteString(statement, index: 15),
-                        syncVersion: sqliteString(statement, index: 16)
+                        cueCount: resolvedCueCount(stored: legacyCueCount, cuePoints: cuePoints),
+                        cuePoints: cuePoints,
+                        comment: sqliteString(statement, index: 13),
+                        vendorTrackID: sqliteString(statement, index: 14),
+                        analysisState: sqliteString(statement, index: 15),
+                        analysisCachePath: sqliteString(statement, index: 16),
+                        syncVersion: sqliteString(statement, index: 17)
                     )
                 )
             }
@@ -539,6 +544,7 @@ final class LibraryDatabase {
             last_played TEXT,
             playlist_memberships_json TEXT NOT NULL DEFAULT '[]',
             cue_count INTEGER,
+            cue_points_json TEXT NOT NULL DEFAULT '[]',
             comment TEXT,
             vendor_track_id TEXT,
             analysis_state TEXT,
@@ -588,6 +594,9 @@ final class LibraryDatabase {
         }
         if try !columnExists(table: "external_metadata", column: "sync_version") {
             try exec("ALTER TABLE external_metadata ADD COLUMN sync_version TEXT;")
+        }
+        if try !columnExists(table: "external_metadata", column: "cue_points_json") {
+            try exec("ALTER TABLE external_metadata ADD COLUMN cue_points_json TEXT NOT NULL DEFAULT '[]';")
         }
 
         try exec("CREATE INDEX IF NOT EXISTS idx_tracks_hash ON tracks(content_hash);")
@@ -735,6 +744,18 @@ final class LibraryDatabase {
 
     private func stringArray(from text: String) -> [String] {
         (try? decode([String].self, from: text)) ?? []
+    }
+
+    private func decodeCuePoints(_ text: String) -> [ExternalDJCuePoint] {
+        (try? decode([ExternalDJCuePoint].self, from: text)) ?? []
+    }
+
+    private func resolvedCueCount(stored: Int?, cuePoints: [ExternalDJCuePoint]) -> Int? {
+        let storedValue = stored.flatMap { $0 > 0 ? $0 : nil }
+        if let storedValue {
+            return cuePoints.isEmpty ? storedValue : max(storedValue, cuePoints.count)
+        }
+        return cuePoints.isEmpty ? nil : cuePoints.count
     }
 
     static let iso8601: ISO8601DateFormatter = {
