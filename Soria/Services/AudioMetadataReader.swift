@@ -110,7 +110,7 @@ struct ExternalVisualizationResolver {
 
     nonisolated static func parseSeratoOverviewTagData(_ data: Data) -> [Double] {
         guard data.count > 2 else { return [] }
-        let payload = data.dropFirst(2)
+        let payload = Array(data.dropFirst(2))
         var values: [Double] = []
 
         var offset = 0

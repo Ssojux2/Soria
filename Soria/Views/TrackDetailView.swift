@@ -93,20 +93,43 @@ struct TrackDetailView: View {
     }
 
     private func singleTrackDetails(for track: Track) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        let cueGroups = TrackCuePresentation.groups(from: viewModel.selectedTrackExternalMetadata)
+        let cuePoints = viewModel.selectedTrackExternalMetadata.flatMap(\.cuePoints)
+        let hasWaveformPreview = viewModel.selectedTrackWaveformPreview.contains { $0.isFinite }
+        let cueCount = cueGroups.reduce(into: 0) { $0 += $1.items.count }
+
+        return VStack(alignment: .leading, spacing: 14) {
             GroupBox("Waveform Preview") {
                 VStack(alignment: .leading, spacing: 10) {
-                        let cuePoints = viewModel.selectedTrackExternalMetadata.flatMap(\.cuePoints)
-                        WaveformPreview(
-                            samples: viewModel.selectedTrackWaveformPreview,
-                            segments: viewModel.selectedTrackSegments,
-                            cuePoints: cuePoints,
-                            trackDuration: track.duration
-                        )
+                    WaveformPreview(
+                        samples: viewModel.selectedTrackWaveformPreview,
+                        segments: viewModel.selectedTrackSegments,
+                        cuePoints: cuePoints,
+                        trackDuration: track.duration
+                    )
                     .frame(height: 96)
 
+                    Text(
+                        TrackCuePresentation.waveformSummaryText(
+                            hasWaveformPreview: hasWaveformPreview,
+                            cueCount: cueCount
+                        )
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                    if !cueGroups.isEmpty {
+                        cueGroupList(cueGroups)
+                    }
+
+                    Divider()
+
+                    Text("Analysis Segments")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
                     if viewModel.selectedTrackSegments.isEmpty {
-                        Text("No segment data yet")
+                        Text("No analysis segments yet.")
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(viewModel.selectedTrackSegments) { segment in
@@ -203,6 +226,70 @@ struct TrackDetailView: View {
         }
     }
 
+    @ViewBuilder
+    private func cueGroupList(_ groups: [TrackCuePresentation.CueGroup]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Imported Cue Points")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            ForEach(groups) { group in
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(group.source.displayName)
+                            .font(.headline)
+                        Spacer()
+                        Text("\(group.items.count) cues")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    ForEach(group.items) { item in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                cueKindSwatch(for: item.kind)
+
+                                Text(item.kindLabel)
+                                    .fontWeight(.medium)
+
+                                if let indexLabel = item.indexLabel {
+                                    Text(indexLabel)
+                                        .font(.caption.weight(.semibold))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 3)
+                                        .background(Color.secondary.opacity(0.12), in: Capsule())
+                                }
+
+                                Spacer()
+
+                                Text(item.timeText)
+                                    .font(.system(.body, design: .monospaced))
+                            }
+
+                            if let noteText = item.noteText {
+                                Text(noteText)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            if let sourceTag = item.sourceTag {
+                                Text(sourceTag)
+                                    .font(.caption2.weight(.medium))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 3)
+                                    .background(Color.secondary.opacity(0.12), in: Capsule())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                }
+            }
+        }
+    }
+
     private var multiSelectionDetails: some View {
         GroupBox("Selected Tracks") {
             VStack(alignment: .leading, spacing: 8) {
@@ -282,6 +369,26 @@ struct TrackDetailView: View {
             ? "Manual Fallback"
             : Array(Set(sources)).sorted().joined(separator: ", ")
     }
+
+    private func cueKindSwatch(for kind: ExternalDJCuePoint.Kind) -> some View {
+        Capsule(style: .continuous)
+            .fill(color(for: kind))
+            .frame(width: 8, height: 18)
+            .opacity(kind == .loop ? 0.5 : 0.9)
+    }
+
+    private func color(for kind: ExternalDJCuePoint.Kind) -> Color {
+        switch kind {
+        case .cue:
+            return .blue
+        case .hotcue:
+            return .orange
+        case .loop:
+            return .purple
+        case .unknown:
+            return .secondary
+        }
+    }
 }
 
 private struct WaveformPreview: View {
@@ -300,6 +407,10 @@ private struct WaveformPreview: View {
             let barWidth = max(1.0, (proxy.size.width - (sidePadding * 2.0)) / CGFloat(max(values.count, 1)))
             let segmentBars = segmentOverlays()
             let cueOverlays = cuePointOverlays()
+            let loopOverlays = cueOverlays.filter { cuePoint in
+                cuePoint.kind == .loop &&
+                    (cuePoint.endSec ?? cuePoint.startSec) > cuePoint.startSec
+            }
             let hasWaveformData = !values.isEmpty
 
             ZStack(alignment: .leading) {
@@ -332,6 +443,24 @@ private struct WaveformPreview: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 }
 
+                ForEach(Array(loopOverlays.enumerated()), id: \.offset) { item in
+                    let startRatio = CGFloat(item.element.startSec / trackLength)
+                    let endRatio = CGFloat((item.element.endSec ?? item.element.startSec) / trackLength)
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(color(for: item.element).opacity(0.12))
+                        .frame(
+                            width: max(
+                                6,
+                                max(0, min(1, endRatio - startRatio)) * (proxy.size.width - (sidePadding * 2))
+                            ),
+                            height: proxy.size.height * 0.58
+                        )
+                        .offset(
+                            x: sidePadding + (proxy.size.width - (sidePadding * 2)) * min(1, max(0, startRatio)),
+                            y: proxy.size.height * 0.21
+                        )
+                }
+
                 ForEach(segmentBars) { segment in
                     let startRatio = CGFloat(segment.startSec / trackLength)
                     let endRatio = CGFloat(segment.endSec / trackLength)
@@ -347,9 +476,12 @@ private struct WaveformPreview: View {
                     let x = sidePadding + (proxy.size.width - (sidePadding * 2)) * min(1, max(0, ratio))
                     Capsule(style: .continuous)
                         .fill(color(for: item.element))
-                        .frame(width: 2, height: proxy.size.height + 6)
+                        .frame(
+                            width: item.element.kind == .loop ? 1 : 2,
+                            height: item.element.kind == .loop ? proxy.size.height : proxy.size.height + 6
+                        )
                         .offset(x: x)
-                        .opacity(0.85)
+                        .opacity(item.element.kind == .loop ? 0.55 : 0.85)
                 }
             }
         }
@@ -482,5 +614,142 @@ private struct WaveformPreview: View {
         case .loop: return .purple
         case .unknown: return .secondary
         }
+    }
+}
+
+enum TrackCuePresentation {
+    struct CueGroup: Identifiable, Equatable {
+        let source: ExternalDJMetadata.Source
+        let items: [CueItem]
+
+        var id: String { source.rawValue }
+    }
+
+    struct CueItem: Identifiable, Equatable {
+        let source: ExternalDJMetadata.Source
+        let kind: ExternalDJCuePoint.Kind
+        let kindLabel: String
+        let indexLabel: String?
+        let startSec: Double
+        let timeText: String
+        let noteText: String?
+        let sourceTag: String?
+
+        var id: String {
+            [
+                source.rawValue,
+                kind.rawValue,
+                String(format: "%.3f", startSec),
+                indexLabel ?? "",
+                noteText ?? "",
+                sourceTag ?? ""
+            ].joined(separator: "|")
+        }
+    }
+
+    nonisolated static func groups(from metadata: [ExternalDJMetadata]) -> [CueGroup] {
+        let entriesBySource = Dictionary(grouping: metadata, by: \.source)
+
+        return ExternalDJMetadata.Source.allCases.compactMap { source in
+            guard let entries = entriesBySource[source] else { return nil }
+
+            var seen: Set<String> = []
+            let items = entries
+                .flatMap(\.cuePoints)
+                .filter { cuePoint in
+                    seen.insert(cueKey(for: cuePoint)).inserted
+                }
+                .sorted(by: cueSort)
+                .map { cuePoint in
+                    CueItem(
+                        source: source,
+                        kind: cuePoint.kind,
+                        kindLabel: typeLabel(for: cuePoint.kind),
+                        indexLabel: indexLabel(for: cuePoint),
+                        startSec: cuePoint.startSec,
+                        timeText: timeText(for: cuePoint.startSec),
+                        noteText: normalizedText(cuePoint.name),
+                        sourceTag: normalizedText(cuePoint.source)
+                    )
+                }
+
+            return items.isEmpty ? nil : CueGroup(source: source, items: items)
+        }
+    }
+
+    nonisolated static func waveformSummaryText(hasWaveformPreview: Bool, cueCount: Int) -> String {
+        switch (hasWaveformPreview, cueCount > 0) {
+        case (true, true):
+            return "\(cueCount) cue marker\(cueCount == 1 ? "" : "s") loaded on the waveform."
+        case (true, false):
+            return "Waveform preview loaded. No imported cue points yet."
+        case (false, true):
+            return "Cue points are available, but no waveform preview was found."
+        case (false, false):
+            return "No waveform preview or cue points are available yet."
+        }
+    }
+
+    nonisolated static func typeLabel(for kind: ExternalDJCuePoint.Kind) -> String {
+        switch kind {
+        case .cue:
+            return "Memory Cue"
+        case .hotcue:
+            return "Hot Cue"
+        case .loop:
+            return "Loop"
+        case .unknown:
+            return "Cue Marker"
+        }
+    }
+
+    nonisolated static func timeText(for seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "--:--" }
+
+        let totalMilliseconds = Int((seconds * 1000.0).rounded())
+        let totalSeconds = totalMilliseconds / 1000
+        let minutes = totalSeconds / 60
+        let secs = totalSeconds % 60
+        let milliseconds = totalMilliseconds % 1000
+        return String(format: "%d:%02d.%03d", minutes, secs, milliseconds)
+    }
+
+    nonisolated private static func cueSort(lhs: ExternalDJCuePoint, rhs: ExternalDJCuePoint) -> Bool {
+        if lhs.startSec == rhs.startSec {
+            return (lhs.index ?? Int.max) < (rhs.index ?? Int.max)
+        }
+        return lhs.startSec < rhs.startSec
+    }
+
+    nonisolated private static func indexLabel(for cuePoint: ExternalDJCuePoint) -> String? {
+        guard let index = cuePoint.index else { return nil }
+
+        switch cuePoint.kind {
+        case .hotcue:
+            return "Slot \(index)"
+        case .loop:
+            return "Loop \(index)"
+        case .cue, .unknown:
+            return nil
+        }
+    }
+
+    nonisolated private static func normalizedText(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
+
+    nonisolated private static func cueKey(for cuePoint: ExternalDJCuePoint) -> String {
+        [
+            cuePoint.kind.rawValue,
+            String(Int((cuePoint.startSec * 1000.0).rounded())),
+            cuePoint.endSec.map { String(Int(($0 * 1000.0).rounded())) } ?? "",
+            cuePoint.index.map(String.init) ?? "",
+            normalizedText(cuePoint.name) ?? "",
+            normalizedText(cuePoint.color) ?? "",
+            normalizedText(cuePoint.source) ?? ""
+        ].joined(separator: "|")
     }
 }
