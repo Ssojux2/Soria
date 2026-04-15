@@ -93,12 +93,15 @@ final class AppViewModel: ObservableObject {
     private let externalVisualizationResolver = ExternalVisualizationResolver()
     private var pendingAnalyzeAllTrackIDs: [UUID] = []
     private var analysisTask: Task<Void, Never>?
+    private var analysisWatchdogTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var workerHealthTask: Task<Void, Never>?
     private var validationTask: Task<Void, Never>?
     private var readyTrackIDs: Set<UUID> = []
     private var pendingAnalysisTrackIDs: [UUID] = []
     private let workerTimeoutSec = PythonWorkerClient.defaultWorkerTimeoutSec
+    private let analysisWatchdogDelaySec =
+        max(Double(ProcessInfo.processInfo.environment["SORIA_ANALYSIS_WATCHDOG_SEC"] ?? "") ?? 12, 5)
     private lazy var worker: PythonWorkerClient = PythonWorkerClient(
         configProvider: { [unowned self] in
             PythonWorkerClient.WorkerConfig(
@@ -348,6 +351,13 @@ final class AppViewModel: ObservableObject {
         )
         updateAnalysisState(trackID: trackID, state: .running, message: event.stage.displayName, updatedAt: event.timestamp)
         updateAnalysisQueueTextFromActivity()
+        scheduleAnalysisProgressWatchdog(
+            trackID: trackID,
+            trackTitle: trackTitle,
+            trackPath: trackPath,
+            queueIndex: queueIndex,
+            totalCount: totalCount
+        )
     }
 
     private func finishAnalysisActivity(
@@ -388,6 +398,124 @@ final class AppViewModel: ObservableObject {
         } else {
             analysisQueueProgressText = "\(activity.currentMessage) • \(activity.currentTrackTitle) (\(queueText))"
         }
+    }
+
+    private func prepareAnalysisSession(for tracks: [Track]) {
+        guard let firstTrack = tracks.first else {
+            analysisActivity = nil
+            analysisQueueProgressText = "Preparing analysis queue..."
+            return
+        }
+
+        analysisActivity = AnalysisActivity.started(
+            trackTitle: firstTrack.title,
+            trackPath: firstTrack.filePath,
+            queueIndex: 1,
+            totalCount: tracks.count,
+            timeoutSec: workerTimeoutSec
+        )
+        isAnalysisActivityPanelExpanded = true
+        updateAnalysisQueueTextFromActivity()
+    }
+
+    private func scheduleAnalysisProgressWatchdog(
+        trackID: UUID,
+        trackTitle: String,
+        trackPath: String,
+        queueIndex: Int,
+        totalCount: Int
+    ) {
+        analysisWatchdogTask?.cancel()
+        let thresholdSec = analysisWatchdogDelaySec
+        analysisWatchdogTask = Task { [weak self] in
+            let delayNs = UInt64(max(thresholdSec, 1) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: delayNs)
+            guard !Task.isCancelled else { return }
+
+            await MainActor.run {
+                guard let self else { return }
+                guard
+                    self.isAnalyzing,
+                    !self.isCancellingAnalysis,
+                    let activity = self.analysisActivity,
+                    activity.currentTrackPath == trackPath,
+                    activity.queueIndex == queueIndex
+                else {
+                    return
+                }
+
+                guard let event = Self.makeAnalysisWatchdogEvent(
+                    activity: activity,
+                    thresholdSec: thresholdSec
+                ) else {
+                    return
+                }
+
+                self.recordAnalysisProgress(
+                    event,
+                    trackID: trackID,
+                    trackTitle: trackTitle,
+                    trackPath: trackPath,
+                    queueIndex: queueIndex,
+                    totalCount: totalCount
+                )
+                AppLogger.shared.info(
+                    "Analysis watchdog triggered | trackPath=\(trackPath) | queue=\(queueIndex)/\(totalCount) | message=\(event.message)"
+                )
+            }
+        }
+    }
+
+    private func cancelAnalysisProgressWatchdog() {
+        analysisWatchdogTask?.cancel()
+        analysisWatchdogTask = nil
+    }
+
+    nonisolated static func makeAnalysisWatchdogEvent(
+        activity: AnalysisActivity,
+        thresholdSec: Double,
+        now: Date = Date()
+    ) -> WorkerProgressEvent? {
+        guard thresholdSec > 0, !activity.isFinished else { return nil }
+        guard !activity.currentMessage.hasPrefix("No new worker progress") else { return nil }
+
+        let idleSec = now.timeIntervalSince(activity.updatedAt)
+        guard idleSec >= thresholdSec else { return nil }
+
+        let roundedThreshold = max(Int(thresholdSec.rounded()), 1)
+        return WorkerProgressEvent(
+            stage: activity.stage,
+            message: "No new worker progress for \(roundedThreshold)s (last stage: \(activity.stage.displayName))",
+            fraction: activity.stageFraction,
+            trackPath: activity.currentTrackPath,
+            timestamp: now
+        )
+    }
+
+    private func logAnalysisEvent(
+        _ event: String,
+        track: Track,
+        queueIndex: Int,
+        totalCount: Int,
+        elapsedMs: Int? = nil,
+        extra: [String: String] = [:]
+    ) {
+        var parts: [String] = [
+            "Analysis \(event)",
+            "trackPath=\(track.filePath)",
+            "queue=\(queueIndex)/\(totalCount)",
+            "profile=\(embeddingProfile.id)",
+            "focus=\(analysisFocus.rawValue)"
+        ]
+        if let elapsedMs {
+            parts.append("elapsedMs=\(elapsedMs)")
+        }
+        for key in extra.keys.sorted() {
+            if let value = extra[key], !value.isEmpty {
+                parts.append("\(key)=\(value)")
+            }
+        }
+        AppLogger.shared.info(parts.joined(separator: " | "))
     }
 
     private func decoratedAnalysisError(_ error: Error) -> String {
@@ -647,6 +775,7 @@ final class AppViewModel: ObservableObject {
         for trackID in pendingAnalysisTrackIDs {
             updateAnalysisState(trackID: trackID, state: .queued, message: "Queued")
         }
+        prepareAnalysisSession(for: targets)
         analysisTask?.cancel()
         analysisTask = Task {
             await analyzeTracks(targets, mode: .batch)
@@ -661,6 +790,7 @@ final class AppViewModel: ObservableObject {
         for trackID in pendingAnalysisTrackIDs {
             updateAnalysisState(trackID: trackID, state: .queued, message: "Queued")
         }
+        prepareAnalysisSession(for: targets)
         analysisTask?.cancel()
         analysisTask = Task {
             await analyzeTracks(targets, mode: .batch)
@@ -675,6 +805,7 @@ final class AppViewModel: ObservableObject {
 
     func cancelAnalysis() {
         analysisTask?.cancel()
+        cancelAnalysisProgressWatchdog()
         isCancellingAnalysis = true
         analysisErrorMessage = "Cancelling analysis..."
         for trackID in pendingAnalysisTrackIDs {
@@ -1046,12 +1177,16 @@ final class AppViewModel: ObservableObject {
 
         isAnalyzing = true
         analysisErrorMessage = ""
-        analysisQueueProgressText = "Preparing..."
+        if analysisActivity == nil {
+            prepareAnalysisSession(for: tracksToAnalyze)
+        }
         isCancellingAnalysis = false
+        let batchStartedAt = Date()
         defer {
             isAnalyzing = false
             analysisTask = nil
             pendingAnalysisTrackIDs = []
+            cancelAnalysisProgressWatchdog()
             if Task.isCancelled {
                 analysisErrorMessage = "Analysis was canceled."
             }
@@ -1059,6 +1194,7 @@ final class AppViewModel: ObservableObject {
 
         for (index, track) in tracksToAnalyze.enumerated() {
             let queueIndex = index + 1
+            let trackStartedAt = Date()
             if Task.isCancelled {
                 analysisQueueProgressText = "Canceled: \(index) / \(tracksToAnalyze.count)"
                 for pendingTrack in tracksToAnalyze[index...] {
@@ -1070,6 +1206,20 @@ final class AppViewModel: ObservableObject {
             do {
                 startAnalysisActivity(for: track, queueIndex: queueIndex, totalCount: tracksToAnalyze.count, stage: .launching)
                 updateAnalysisState(trackID: track.id, state: .running, message: AnalysisStage.launching.displayName)
+                scheduleAnalysisProgressWatchdog(
+                    trackID: track.id,
+                    trackTitle: track.title,
+                    trackPath: track.filePath,
+                    queueIndex: queueIndex,
+                    totalCount: tracksToAnalyze.count
+                )
+                logAnalysisEvent(
+                    "track_started",
+                    track: track,
+                    queueIndex: queueIndex,
+                    totalCount: tracksToAnalyze.count,
+                    extra: ["mode": "\(mode)"]
+                )
                 let externalMetadata = try database.fetchExternalMetadata(trackID: track.id)
                 let existingSegments = try database.fetchSegments(trackID: track.id)
                 let existingSummary = try database.fetchAnalysisSummary(trackID: track.id)
@@ -1095,11 +1245,23 @@ final class AppViewModel: ObservableObject {
                 }
 
                 if canReembed {
+                    let workerStartedAt = Date()
                     let result = try await worker.embedDescriptors(
                         track: track,
                         segments: existingSegments,
                         externalMetadata: externalMetadata,
                         progress: progressHandler
+                    )
+                    logAnalysisEvent(
+                        "worker_embed_descriptors_completed",
+                        track: track,
+                        queueIndex: queueIndex,
+                        totalCount: tracksToAnalyze.count,
+                        elapsedMs: max(Int(Date().timeIntervalSince(workerStartedAt) * 1000), 0),
+                        extra: [
+                            "embeddingProfileID": result.embeddingProfileID,
+                            "segmentCount": "\(result.segments.count)"
+                        ]
                     )
                     guard let refreshedSegments = mergedReembeddedSegments(
                         trackID: track.id,
@@ -1112,14 +1274,41 @@ final class AppViewModel: ObservableObject {
                         throw WorkerError.executionFailed("Worker returned an empty track embedding for re-embedding.")
                     }
 
+                    let replaceStartedAt = Date()
                     try database.replaceTrackEmbeddings(
                         trackID: track.id,
                         segments: refreshedSegments,
                         trackEmbedding: trackEmbedding
                     )
+                    logAnalysisEvent(
+                        "database_replace_track_embeddings_completed",
+                        track: track,
+                        queueIndex: queueIndex,
+                        totalCount: tracksToAnalyze.count,
+                        elapsedMs: max(Int(Date().timeIntervalSince(replaceStartedAt) * 1000), 0),
+                        extra: ["segmentCount": "\(refreshedSegments.count)"]
+                    )
+                    let vectorUpsertStartedAt = Date()
                     try await worker.upsertTrackVectors(track: track, segments: refreshedSegments, trackEmbedding: trackEmbedding)
+                    logAnalysisEvent(
+                        "worker_upsert_track_vectors_completed",
+                        track: track,
+                        queueIndex: queueIndex,
+                        totalCount: tracksToAnalyze.count,
+                        elapsedMs: max(Int(Date().timeIntervalSince(vectorUpsertStartedAt) * 1000), 0)
+                    )
+                    let markIndexedStartedAt = Date()
                     try database.markTrackEmbeddingIndexed(trackID: track.id, embeddingProfileID: result.embeddingProfileID)
+                    logAnalysisEvent(
+                        "database_mark_track_embedding_indexed_completed",
+                        track: track,
+                        queueIndex: queueIndex,
+                        totalCount: tracksToAnalyze.count,
+                        elapsedMs: max(Int(Date().timeIntervalSince(markIndexedStartedAt) * 1000), 0),
+                        extra: ["embeddingProfileID": result.embeddingProfileID]
+                    )
                     updateAnalysisState(trackID: track.id, state: .succeeded, message: "Done")
+                    cancelAnalysisProgressWatchdog()
                     finishAnalysisActivity(
                         state: .succeeded,
                         for: track,
@@ -1127,12 +1316,24 @@ final class AppViewModel: ObservableObject {
                         totalCount: tracksToAnalyze.count
                     )
                 } else {
+                    let workerStartedAt = Date()
                     let result = try await worker.analyze(
                         filePath: track.filePath,
                         track: track,
                         analysisFocus: analysisFocus,
                         externalMetadata: externalMetadata,
                         progress: progressHandler
+                    )
+                    logAnalysisEvent(
+                        "worker_analyze_completed",
+                        track: track,
+                        queueIndex: queueIndex,
+                        totalCount: tracksToAnalyze.count,
+                        elapsedMs: max(Int(Date().timeIntervalSince(workerStartedAt) * 1000), 0),
+                        extra: [
+                            "embeddingProfileID": result.embeddingProfileID,
+                            "segmentCount": "\(result.segments.count)"
+                        ]
                     )
                     let segments = result.segments.compactMap { item -> TrackSegment? in
                         guard let type = TrackSegment.SegmentType(rawValue: item.segmentType) else { return nil }
@@ -1169,10 +1370,19 @@ final class AppViewModel: ObservableObject {
                         mixabilityTags: result.mixabilityTags,
                         confidence: result.confidence
                     )
+                    let replaceStartedAt = Date()
                     try database.replaceSegments(
                         trackID: track.id,
                         segments: segments,
                         analysisSummary: summary
+                    )
+                    logAnalysisEvent(
+                        "database_replace_segments_completed",
+                        track: track,
+                        queueIndex: queueIndex,
+                        totalCount: tracksToAnalyze.count,
+                        elapsedMs: max(Int(Date().timeIntervalSince(replaceStartedAt) * 1000), 0),
+                        extra: ["segmentCount": "\(segments.count)"]
                     )
 
                     if var updatedTrack = tracks.first(where: { $0.id == track.id }) {
@@ -1197,11 +1407,37 @@ final class AppViewModel: ObservableObject {
                         updatedTrack.analyzedAt = Date()
                         updatedTrack.embeddingProfileID = nil
                         updatedTrack.embeddingUpdatedAt = nil
+                        let upsertTrackStartedAt = Date()
                         try database.upsertTrack(updatedTrack)
+                        logAnalysisEvent(
+                            "database_upsert_track_completed",
+                            track: track,
+                            queueIndex: queueIndex,
+                            totalCount: tracksToAnalyze.count,
+                            elapsedMs: max(Int(Date().timeIntervalSince(upsertTrackStartedAt) * 1000), 0)
+                        )
+                        let vectorUpsertStartedAt = Date()
                         try await worker.upsertTrackVectors(track: updatedTrack, segments: segments, trackEmbedding: trackEmbedding)
+                        logAnalysisEvent(
+                            "worker_upsert_track_vectors_completed",
+                            track: track,
+                            queueIndex: queueIndex,
+                            totalCount: tracksToAnalyze.count,
+                            elapsedMs: max(Int(Date().timeIntervalSince(vectorUpsertStartedAt) * 1000), 0)
+                        )
+                        let markIndexedStartedAt = Date()
                         try database.markTrackEmbeddingIndexed(trackID: track.id, embeddingProfileID: result.embeddingProfileID)
+                        logAnalysisEvent(
+                            "database_mark_track_embedding_indexed_completed",
+                            track: track,
+                            queueIndex: queueIndex,
+                            totalCount: tracksToAnalyze.count,
+                            elapsedMs: max(Int(Date().timeIntervalSince(markIndexedStartedAt) * 1000), 0),
+                            extra: ["embeddingProfileID": result.embeddingProfileID]
+                        )
                     }
                     updateAnalysisState(trackID: track.id, state: .succeeded, message: "Done")
+                    cancelAnalysisProgressWatchdog()
                     finishAnalysisActivity(
                         state: .succeeded,
                         for: track,
@@ -1212,11 +1448,20 @@ final class AppViewModel: ObservableObject {
             } catch {
                 if Task.isCancelled || (error as? WorkerError).map({ if case .cancelled = $0 { return true } else { return false } }) == true {
                     updateAnalysisState(trackID: track.id, state: .canceled, message: "Canceled")
+                    cancelAnalysisProgressWatchdog()
                     finishAnalysisActivity(
                         state: .canceled,
                         for: track,
                         queueIndex: queueIndex,
                         totalCount: tracksToAnalyze.count
+                    )
+                    logAnalysisEvent(
+                        "track_finished",
+                        track: track,
+                        queueIndex: queueIndex,
+                        totalCount: tracksToAnalyze.count,
+                        elapsedMs: max(Int(Date().timeIntervalSince(trackStartedAt) * 1000), 0),
+                        extra: ["result": "canceled"]
                     )
                     continue
                 }
@@ -1234,11 +1479,24 @@ final class AppViewModel: ObservableObject {
                     errorMessage: decoratedError
                 )
                 analysisErrorMessage = decoratedError
+                cancelAnalysisProgressWatchdog()
                 AppLogger.shared.error("Analyze failed for \(track.filePath): \(decoratedError)")
             }
+
+            logAnalysisEvent(
+                "track_finished",
+                track: track,
+                queueIndex: queueIndex,
+                totalCount: tracksToAnalyze.count,
+                elapsedMs: max(Int(Date().timeIntervalSince(trackStartedAt) * 1000), 0)
+            )
         }
 
+        let refreshStartedAt = Date()
         await refreshTracks()
+        AppLogger.shared.info(
+            "Analysis refresh_tracks_completed | trackCount=\(tracksToAnalyze.count) | elapsedMs=\(max(Int(Date().timeIntervalSince(refreshStartedAt) * 1000), 0)) | batchElapsedMs=\(max(Int(Date().timeIntervalSince(batchStartedAt) * 1000), 0))"
+        )
     }
 
     private func loadSelectedTrackDetails() async {
@@ -1670,11 +1928,15 @@ final class AppViewModel: ObservableObject {
                 self.settingsStatusMessage = "Validated \(response.modelName)."
             } catch {
                 guard !Task.isCancelled, validatingProfile.id == self.embeddingProfile.id else { return }
-                self.validationStatus = .failed(error.localizedDescription)
+                let failureSummary = PythonWorkerClient.failureSummary(
+                    for: "validate_embedding_profile",
+                    error: error
+                )
+                self.validationStatus = .failed(failureSummary)
                 self.settingsStatusMessage = userInitiated
-                    ? "Validation failed: \(error.localizedDescription)"
-                    : "Runtime validation failed: \(error.localizedDescription)"
-                AppLogger.shared.error("Embedding validation failed: \(error.localizedDescription)")
+                    ? "Validation failed: \(failureSummary)"
+                    : "Runtime validation failed: \(failureSummary)"
+                AppLogger.shared.error("Embedding validation failed: \(failureSummary)")
             }
         }
     }
@@ -1707,7 +1969,9 @@ final class AppViewModel: ObservableObject {
             if Task.isCancelled {
                 return
             }
-            AppLogger.shared.error("Worker healthcheck failed: \(error.localizedDescription)")
+            let failureSummary = PythonWorkerClient.failureSummary(for: "healthcheck", error: error)
+            validationStatus = .failed(failureSummary)
+            AppLogger.shared.error("Worker healthcheck failed: \(failureSummary)")
         }
     }
 

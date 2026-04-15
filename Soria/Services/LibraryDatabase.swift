@@ -323,6 +323,98 @@ final class LibraryDatabase {
                 throw DatabaseError.writeFailed
             }
         }
+        _ = try verifyPersistedEmbeddingState(
+            trackID: trackID,
+            expectedEmbeddingProfileID: embeddingProfileID,
+            context: "markTrackEmbeddingIndexed"
+        )
+    }
+
+    func verifyPersistedEmbeddingState(
+        trackID: UUID,
+        expectedEmbeddingProfileID: String? = nil,
+        context: String = "verifyPersistedEmbeddingState"
+    ) throws -> PersistedEmbeddingStateSnapshot {
+        let trackSQL = """
+        SELECT analyzed_at, track_embedding_json, analysis_summary_json, embedding_profile_id, embedding_updated_at
+        FROM tracks
+        WHERE id = ?
+        LIMIT 1;
+        """
+        let trackState = try withStatement(trackSQL) { statement -> PersistedEmbeddingStateSnapshot? in
+            bind(statement, index: 1, text: trackID.uuidString)
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+
+            let analyzedAt = sqliteString(statement, index: 0).flatMap { Self.iso8601.date(from: $0) }
+            let trackEmbeddingJSON = sqliteString(statement, index: 1)
+            let analysisSummaryJSON = sqliteString(statement, index: 2)
+            let embeddingProfileID = sqliteString(statement, index: 3)
+            let embeddingUpdatedAt = sqliteString(statement, index: 4).flatMap { Self.iso8601.date(from: $0) }
+
+            return PersistedEmbeddingStateSnapshot(
+                trackID: trackID,
+                analyzedAt: analyzedAt,
+                hasTrackEmbedding: Self.hasNonEmptyJSONPayload(trackEmbeddingJSON),
+                hasAnalysisSummary: Self.hasNonEmptyJSONPayload(analysisSummaryJSON),
+                embeddingProfileID: embeddingProfileID,
+                embeddingUpdatedAt: embeddingUpdatedAt,
+                segmentCount: 0,
+                embeddedSegmentCount: 0
+            )
+        }
+
+        guard var snapshot = trackState else {
+            throw DatabaseError.writeFailed
+        }
+
+        let segmentSQL = """
+        SELECT
+            COUNT(*),
+            SUM(
+                CASE
+                    WHEN embedding_json IS NOT NULL
+                     AND embedding_json <> ''
+                     AND embedding_json <> '[]'
+                    THEN 1
+                    ELSE 0
+                END
+            )
+        FROM segments
+        WHERE track_id = ?;
+        """
+        let segmentState = try withStatement(segmentSQL) { statement -> (Int, Int) in
+            bind(statement, index: 1, text: trackID.uuidString)
+            guard sqlite3_step(statement) == SQLITE_ROW else { return (0, 0) }
+            return (
+                Int(sqlite3_column_int64(statement, 0)),
+                Int(sqlite3_column_int64(statement, 1))
+            )
+        }
+        snapshot.segmentCount = segmentState.0
+        snapshot.embeddedSegmentCount = segmentState.1
+        let analyzedAtText = snapshot.analyzedAt.map { Self.iso8601.string(from: $0) } ?? "nil"
+        let embeddingUpdatedAtText = snapshot.embeddingUpdatedAt.map { Self.iso8601.string(from: $0) } ?? "nil"
+
+        let isProfileValid = expectedEmbeddingProfileID.map { snapshot.embeddingProfileID == $0 } ?? true
+        guard
+            snapshot.analyzedAt != nil,
+            snapshot.hasTrackEmbedding,
+            snapshot.hasAnalysisSummary,
+            snapshot.embeddingUpdatedAt != nil,
+            isProfileValid,
+            snapshot.segmentCount > 0,
+            snapshot.segmentCount == snapshot.embeddedSegmentCount
+        else {
+            AppLogger.shared.error(
+                "Database embedding state verification failed | context=\(context) | trackID=\(trackID.uuidString) | expectedProfile=\(expectedEmbeddingProfileID ?? "nil") | actualProfile=\(snapshot.embeddingProfileID ?? "nil") | analyzedAt=\(analyzedAtText) | embeddingUpdatedAt=\(embeddingUpdatedAtText) | segmentCount=\(snapshot.segmentCount) | embeddedSegmentCount=\(snapshot.embeddedSegmentCount) | hasTrackEmbedding=\(snapshot.hasTrackEmbedding) | hasAnalysisSummary=\(snapshot.hasAnalysisSummary)"
+            )
+            throw DatabaseError.writeFailed
+        }
+
+        AppLogger.shared.info(
+            "Database embedding state verified | context=\(context) | trackID=\(trackID.uuidString) | profile=\(snapshot.embeddingProfileID ?? "nil") | analyzedAt=\(analyzedAtText) | embeddingUpdatedAt=\(embeddingUpdatedAtText) | segmentCount=\(snapshot.segmentCount) | embeddedSegmentCount=\(snapshot.embeddedSegmentCount)"
+        )
+        return snapshot
     }
 
     func fetchAnalysisSummary(trackID: UUID) throws -> TrackAnalysisSummary? {
@@ -872,6 +964,12 @@ final class LibraryDatabase {
         return formatter
     }()
 
+    private static func hasNonEmptyJSONPayload(_ text: String?) -> Bool {
+        guard let text else { return false }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed != "[]" && trimmed != "{}" && trimmed != "null"
+    }
+
     private let trackSelectColumns = """
     id, file_path, file_name, title, artist, album, genre, duration, sample_rate, bpm, musical_key,
     modified_time, content_hash, analyzed_at, embedding_profile_id, embedding_updated_at,
@@ -884,4 +982,15 @@ enum DatabaseError: Error {
     case queryFailed
     case writeFailed
     case decodeFailed
+}
+
+struct PersistedEmbeddingStateSnapshot: Equatable {
+    let trackID: UUID
+    let analyzedAt: Date?
+    let hasTrackEmbedding: Bool
+    let hasAnalysisSummary: Bool
+    let embeddingProfileID: String?
+    let embeddingUpdatedAt: Date?
+    var segmentCount: Int
+    var embeddedSegmentCount: Int
 }

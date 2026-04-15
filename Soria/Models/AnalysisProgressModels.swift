@@ -15,7 +15,7 @@ struct AnalysisStage: RawRepresentable, Codable, Hashable, Sendable {
     static let embeddingDescriptors = AnalysisStage(rawValue: "embedding_descriptors")
     static let returningResult = AnalysisStage(rawValue: "returning_result")
 
-    var displayName: String {
+    nonisolated var displayName: String {
         switch self {
         case .queued:
             return "Queued"
@@ -56,7 +56,7 @@ struct WorkerProgressEvent: Codable, Hashable, Sendable {
         case timestamp
     }
 
-    init(
+    nonisolated init(
         stage: AnalysisStage,
         message: String,
         fraction: Double?,
@@ -189,7 +189,7 @@ struct AnalysisActivity: Hashable, Sendable {
         Array(recentEvents.suffix(5).reversed())
     }
 
-    var isFinished: Bool {
+    nonisolated var isFinished: Bool {
         guard let finalState else { return false }
         return finalState == .succeeded || finalState == .failed || finalState == .canceled
     }
@@ -210,7 +210,7 @@ struct AnalysisActivity: Hashable, Sendable {
         return stage.displayName
     }
 
-    var currentMessage: String {
+    nonisolated var currentMessage: String {
         recentEvents.last?.message ?? stage.displayName
     }
 

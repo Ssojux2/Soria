@@ -738,6 +738,67 @@ struct SoriaTests {
         let readyIDs = try database.fetchReadyTrackIDs(profileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id)
         #expect(readyIDs == Set([readyTrack.id]))
     }
+
+    @Test func verifyPersistedEmbeddingStateConfirmsAnalysisArtifactsAfterIndexing() throws {
+        let directory = try makeTemporaryDirectory()
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let database = try LibraryDatabase(databaseURL: databaseURL)
+
+        let track = makeTrack(
+            path: "/music/persisted.mp3",
+            title: "Persisted",
+            analyzedAt: Date()
+        )
+        try database.upsertTrack(track)
+
+        let segments = TrackSegment.SegmentType.allCases.enumerated().map { index, type in
+            TrackSegment(
+                id: UUID(),
+                trackID: track.id,
+                type: type,
+                startSec: Double(index * 30),
+                endSec: Double((index + 1) * 30),
+                energyScore: 0.4 + (Double(index) * 0.1),
+                descriptorText: "\(type.rawValue) descriptor",
+                vector: [0.1 + Double(index), 0.2 + Double(index)]
+            )
+        }
+
+        try database.replaceSegments(
+            trackID: track.id,
+            segments: segments,
+            analysisSummary: TrackAnalysisSummary(
+                trackID: track.id,
+                segments: segments,
+                trackEmbedding: [0.3, 0.5, 0.7],
+                estimatedBPM: 122,
+                estimatedKey: "8A",
+                brightness: 0.4,
+                onsetDensity: 0.5,
+                rhythmicDensity: 0.6,
+                lowMidHighBalance: [0.3, 0.4, 0.3],
+                waveformPreview: [0.1, 0.2, 0.3]
+            )
+        )
+        try database.markTrackEmbeddingIndexed(
+            trackID: track.id,
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding001.id
+        )
+
+        let snapshot = try database.verifyPersistedEmbeddingState(
+            trackID: track.id,
+            expectedEmbeddingProfileID: EmbeddingProfile.googleGeminiEmbedding001.id,
+            context: "test"
+        )
+
+        #expect(snapshot.analyzedAt != nil)
+        #expect(snapshot.hasTrackEmbedding)
+        #expect(snapshot.hasAnalysisSummary)
+        #expect(snapshot.embeddingProfileID == EmbeddingProfile.googleGeminiEmbedding001.id)
+        #expect(snapshot.embeddingUpdatedAt != nil)
+        #expect(snapshot.segmentCount == 3)
+        #expect(snapshot.embeddedSegmentCount == 3)
+    }
 }
 
 private func makeTrack(

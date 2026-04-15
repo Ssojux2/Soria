@@ -126,7 +126,7 @@ final class PythonWorkerClient {
             trackMetadata: trackMetadata(for: track, externalMetadata: externalMetadata),
             options: workerOptions(analysisFocus: analysisFocus)
         )
-        return try await runGeneric(payload: payload, progress: progress)
+        return try await runGeneric(payload: payload, progress: progress, commandName: payload.command)
     }
 
     func embedDescriptors(
@@ -150,7 +150,7 @@ final class PythonWorkerClient {
             },
             options: workerOptions()
         )
-        return try await runGeneric(payload: payload, progress: progress)
+        return try await runGeneric(payload: payload, progress: progress, commandName: payload.command)
     }
 
     func validateEmbeddingProfile() async throws -> WorkerValidationResponse {
@@ -158,7 +158,7 @@ final class PythonWorkerClient {
             command: "validate_embedding_profile",
             options: workerOptions()
         )
-        return try await runGeneric(payload: payload)
+        return try await runGeneric(payload: payload, commandName: payload.command)
     }
 
     func healthcheck() async throws -> WorkerHealthcheckResponse {
@@ -166,7 +166,7 @@ final class PythonWorkerClient {
             command: "healthcheck",
             options: workerOptions()
         )
-        return try await runGeneric(payload: payload)
+        return try await runGeneric(payload: payload, commandName: payload.command)
     }
 
     func searchTracksText(
@@ -238,7 +238,7 @@ final class PythonWorkerClient {
             track: vectorTrackPayload(track: track, segments: segments, trackEmbedding: trackEmbedding),
             options: workerOptions()
         )
-        let _: WorkerMutationResponse = try await runGeneric(payload: payload)
+        let _: WorkerMutationResponse = try await runGeneric(payload: payload, commandName: payload.command)
     }
 
     func deleteTrackVectors(trackID: UUID, profileIDs: [String]? = nil, deleteAllProfiles: Bool = false) async throws {
@@ -249,7 +249,7 @@ final class PythonWorkerClient {
             deleteAllProfiles: deleteAllProfiles,
             options: workerOptions()
         )
-        let _: WorkerMutationResponse = try await runGeneric(payload: payload)
+        let _: WorkerMutationResponse = try await runGeneric(payload: payload, commandName: payload.command)
     }
 
     func rebuildVectorIndex(tracks: [Track], segmentsByTrackID: [UUID: [TrackSegment]], trackEmbeddings: [UUID: [Double]]) async throws {
@@ -269,7 +269,7 @@ final class PythonWorkerClient {
             tracks: payloadTracks,
             options: workerOptions()
         )
-        let _: WorkerMutationResponse = try await runGeneric(payload: payload)
+        let _: WorkerMutationResponse = try await runGeneric(payload: payload, commandName: payload.command)
     }
 
     private func workerOptions(
@@ -352,7 +352,8 @@ final class PythonWorkerClient {
 
     private func runGeneric<T: Encodable, U: Decodable>(
         payload: T,
-        progress: WorkerProgressHandler? = nil
+        progress: WorkerProgressHandler? = nil,
+        commandName: String
     ) async throws -> U {
         let config = configProvider()
         let payloadData = try JSONEncoder().encode(payload)
@@ -365,7 +366,8 @@ final class PythonWorkerClient {
                             config: config,
                             payloadData: payloadData,
                             controller: controller,
-                            progress: progress
+                            progress: progress,
+                            commandName: commandName
                         )
                         continuation.resume(returning: result)
                     } catch {
@@ -384,7 +386,8 @@ final class PythonWorkerClient {
         config: WorkerConfig,
         payloadData: Data,
         controller: WorkerProcessController,
-        progress: WorkerProgressHandler?
+        progress: WorkerProgressHandler?,
+        commandName: String
     ) throws -> U {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: config.pythonExecutable)
@@ -403,8 +406,45 @@ final class PythonWorkerClient {
             terminationSignal.signal()
         }
 
-        try process.run()
+        let startedAt = Date()
+        do {
+            try process.run()
+        } catch {
+            AppLogger.shared.error(
+                workerCommandLogLine(
+                    level: "launch_failed",
+                    commandName: commandName,
+                    elapsedMs: elapsedMilliseconds(since: startedAt),
+                    processID: nil,
+                    payloadBytes: payloadData.count,
+                    stdoutBytes: nil,
+                    stderrText: error.localizedDescription,
+                    extra: [
+                        "python": config.pythonExecutable,
+                        "script": config.workerScriptPath
+                    ]
+                )
+            )
+            throw error
+        }
         controller.attach(process)
+        let processID = process.processIdentifier
+        AppLogger.shared.info(
+            workerCommandLogLine(
+                level: "started",
+                commandName: commandName,
+                elapsedMs: 0,
+                processID: processID,
+                payloadBytes: payloadData.count,
+                stdoutBytes: nil,
+                stderrText: nil,
+                extra: [
+                    "timeoutSec": String(format: "%.0f", defaultWorkerTimeoutSec),
+                    "python": config.pythonExecutable,
+                    "script": config.workerScriptPath
+                ]
+            )
+        )
 
         let stdoutBuffer = LockedDataBuffer()
         let stderrRouter = WorkerStderrRouter(progress: progress)
@@ -433,8 +473,30 @@ final class PythonWorkerClient {
             try inputPipe.fileHandleForWriting.close()
         } catch {
             if controller.wasCancelled {
+                AppLogger.shared.info(
+                    workerCommandLogLine(
+                        level: "cancelled",
+                        commandName: commandName,
+                        elapsedMs: elapsedMilliseconds(since: startedAt),
+                        processID: processID,
+                        payloadBytes: payloadData.count,
+                        stdoutBytes: nil,
+                        stderrText: "Cancelled while writing worker payload."
+                    )
+                )
                 throw WorkerError.cancelled
             }
+            AppLogger.shared.error(
+                workerCommandLogLine(
+                    level: "stdin_write_failed",
+                    commandName: commandName,
+                    elapsedMs: elapsedMilliseconds(since: startedAt),
+                    processID: processID,
+                    payloadBytes: payloadData.count,
+                    stdoutBytes: nil,
+                    stderrText: error.localizedDescription
+                )
+            )
             throw error
         }
 
@@ -449,24 +511,100 @@ final class PythonWorkerClient {
         let outputData = stdoutBuffer.data
         let stderrText = stderrRouter.plainText
         if controller.wasCancelled {
+            AppLogger.shared.info(
+                workerCommandLogLine(
+                    level: "cancelled",
+                    commandName: commandName,
+                    elapsedMs: elapsedMilliseconds(since: startedAt),
+                    processID: processID,
+                    payloadBytes: payloadData.count,
+                    stdoutBytes: outputData.count,
+                    stderrText: stderrText
+                )
+            )
             throw WorkerError.cancelled
         }
         if !didExit {
+            AppLogger.shared.error(
+                workerCommandLogLine(
+                    level: "timed_out",
+                    commandName: commandName,
+                    elapsedMs: elapsedMilliseconds(since: startedAt),
+                    processID: processID,
+                    payloadBytes: payloadData.count,
+                    stdoutBytes: outputData.count,
+                    stderrText: stderrText
+                )
+            )
             throw WorkerError.timedOut(timeoutSec, detail: stderrText)
         }
         if process.terminationStatus != 0 {
+            AppLogger.shared.error(
+                workerCommandLogLine(
+                    level: "execution_failed",
+                    commandName: commandName,
+                    elapsedMs: elapsedMilliseconds(since: startedAt),
+                    processID: processID,
+                    payloadBytes: payloadData.count,
+                    stdoutBytes: outputData.count,
+                    stderrText: stderrText,
+                    extra: ["terminationStatus": "\(process.terminationStatus)"]
+                )
+            )
             throw WorkerError.executionFailed(stderrText)
         }
 
         if let parsedError = try? JSONDecoder().decode(WorkerErrorResponse.self, from: outputData), !parsedError.error.isEmpty {
+            AppLogger.shared.error(
+                workerCommandLogLine(
+                    level: "worker_error_payload",
+                    commandName: commandName,
+                    elapsedMs: elapsedMilliseconds(since: startedAt),
+                    processID: processID,
+                    payloadBytes: payloadData.count,
+                    stdoutBytes: outputData.count,
+                    stderrText: parsedError.error
+                )
+            )
             throw WorkerError.executionFailed(parsedError.error)
         }
 
         do {
-            return try JSONDecoder().decode(U.self, from: outputData)
+            let decoded = try JSONDecoder().decode(U.self, from: outputData)
+            AppLogger.shared.info(
+                workerCommandLogLine(
+                    level: "completed",
+                    commandName: commandName,
+                    elapsedMs: elapsedMilliseconds(since: startedAt),
+                    processID: processID,
+                    payloadBytes: payloadData.count,
+                    stdoutBytes: outputData.count,
+                    stderrText: stderrText,
+                    extra: ["terminationStatus": "\(process.terminationStatus)"]
+                )
+            )
+            return decoded
         } catch {
             let text = String(data: outputData, encoding: .utf8) ?? ""
-            throw WorkerError.decodeFailed([text, stderrText].filter { !$0.isEmpty }.joined(separator: "\n"))
+            let payloadPreview = diagnosticPreview(text)
+            let errorPayload = [
+                payloadPreview.isEmpty ? nil : "Payload preview: \(payloadPreview)",
+                stderrText.isEmpty ? nil : "Stderr: \(diagnosticPreview(stderrText))"
+            ]
+                .compactMap { $0 }
+                .joined(separator: "\n")
+            AppLogger.shared.error(
+                workerCommandLogLine(
+                    level: "decode_failed",
+                    commandName: commandName,
+                    elapsedMs: elapsedMilliseconds(since: startedAt),
+                    processID: processID,
+                    payloadBytes: payloadData.count,
+                    stdoutBytes: outputData.count,
+                    stderrText: errorPayload
+                )
+            )
+            throw WorkerError.decodeFailed(errorPayload)
         }
     }
 
@@ -491,7 +629,7 @@ final class PythonWorkerClient {
             weights: weights,
             options: workerOptions()
         )
-        return try await runGeneric(payload: payload)
+        return try await runGeneric(payload: payload, commandName: payload.command)
     }
 
     static func makeTrackSearchPayload(
@@ -560,6 +698,80 @@ final class PythonWorkerClient {
         case .hybrid:
             hybridSearchWeights
         }
+    }
+
+    static func diagnosticPreview(_ text: String, maxLength: Int = 240) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalized.count > maxLength else { return normalized }
+        let endIndex = normalized.index(normalized.startIndex, offsetBy: maxLength)
+        return String(normalized[..<endIndex]) + "..."
+    }
+
+    static func failureSummary(for commandName: String, error: Error) -> String {
+        guard let workerError = error as? WorkerError else {
+            return "Worker \(commandName) failed: \(error.localizedDescription)"
+        }
+
+        switch workerError {
+        case .executionFailed(let detail):
+            let suffix = diagnosticPreview(detail)
+            return suffix.isEmpty
+                ? "Worker \(commandName) execution failed."
+                : "Worker \(commandName) execution failed: \(suffix)"
+        case .decodeFailed(let payload):
+            let suffix = diagnosticPreview(payload)
+            return suffix.isEmpty
+                ? "Worker \(commandName) returned unreadable output."
+                : "Worker \(commandName) decode failed: \(suffix)"
+        case .cancelled:
+            return "Worker \(commandName) was canceled."
+        case .timedOut(let seconds, let detail):
+            let suffix = diagnosticPreview(detail)
+            return suffix.isEmpty
+                ? "Worker \(commandName) timed out after \(Int(seconds)) seconds."
+                : "Worker \(commandName) timed out after \(Int(seconds)) seconds: \(suffix)"
+        }
+    }
+
+    private static func elapsedMilliseconds(since date: Date) -> Int {
+        max(Int(Date().timeIntervalSince(date) * 1000), 0)
+    }
+
+    private static func workerCommandLogLine(
+        level: String,
+        commandName: String,
+        elapsedMs: Int,
+        processID: Int32?,
+        payloadBytes: Int,
+        stdoutBytes: Int?,
+        stderrText: String?,
+        extra: [String: String] = [:]
+    ) -> String {
+        var parts: [String] = [
+            "Worker command \(level)",
+            "command=\(commandName)",
+            "elapsedMs=\(elapsedMs)",
+            "payloadBytes=\(payloadBytes)"
+        ]
+        if let processID {
+            parts.append("pid=\(processID)")
+        }
+        if let stdoutBytes {
+            parts.append("stdoutBytes=\(stdoutBytes)")
+        }
+        for key in extra.keys.sorted() {
+            if let value = extra[key], !value.isEmpty {
+                parts.append("\(key)=\(value)")
+            }
+        }
+        let stderrPreview = stderrText.map { diagnosticPreview($0) } ?? ""
+        if !stderrPreview.isEmpty {
+            parts.append("detail=\(stderrPreview)")
+        }
+        return parts.joined(separator: " | ")
     }
 }
 
