@@ -36,6 +36,7 @@ struct ExportsView: View {
             Spacer()
         }
         .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("exports-info-view")
     }
 }
