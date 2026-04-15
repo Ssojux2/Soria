@@ -6,13 +6,16 @@ import logging
 import os
 import sys
 import uuid
+from datetime import datetime, timezone
+import inspect
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
 LOGGER = logging.getLogger("soria.worker")
 VALIDATION_PROBE_TEXT = "Soria validation probe for semantic DJ track search."
+PROGRESS_PREFIX = "SORIA_PROGRESS "
 EMBEDDING_PROFILES: dict[str, dict[str, Any]] = {
     "google/gemini-embedding-001": {
         "backend": "google_ai",
@@ -94,9 +97,17 @@ def handle_analyze(payload: dict[str, Any]) -> dict[str, Any]:
     analyze_track = _load_analyze_track()
 
     file_path = payload["filePath"]
+    progress = _progress_emitter(file_path)
     track_metadata = dict(payload.get("trackMetadata") or {})
     track_metadata["analysisFocus"] = (payload.get("options") or {}).get("analysisFocus")
-    analysis = analyze_track(file_path=file_path, track_metadata=track_metadata)
+    progress("launching", "Launching analysis worker", 0.02)
+    analysis = _call_with_optional_keyword(
+        analyze_track,
+        "progress_callback",
+        progress,
+        file_path=file_path,
+        track_metadata=track_metadata,
+    )
     segments = [
         {
             "segment_type": segment.segment_type,
@@ -113,6 +124,7 @@ def handle_analyze(payload: dict[str, Any]) -> dict[str, Any]:
         file_path=file_path,
         track_metadata=track_metadata,
         normalized_segments=segments,
+        progress_callback=progress,
     )
 
     return {
@@ -136,6 +148,9 @@ def handle_analyze(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_embed_descriptors(payload: dict[str, Any]) -> dict[str, Any]:
+    file_path = payload["filePath"]
+    progress = _progress_emitter(file_path)
+    progress("launching", "Preparing descriptor embedding", 0.02)
     track_metadata = payload.get("trackMetadata") or {}
     normalized_segments = _normalize_payload_segments(payload.get("segments") or [])
     if not normalized_segments:
@@ -143,9 +158,10 @@ def handle_embed_descriptors(payload: dict[str, Any]) -> dict[str, Any]:
 
     return _embed_track(
         payload=payload,
-        file_path=payload["filePath"],
+        file_path=file_path,
         track_metadata=track_metadata,
         normalized_segments=normalized_segments,
+        progress_callback=progress,
     )
 
 
@@ -258,18 +274,39 @@ def _embed_track(
     file_path: str,
     track_metadata: dict[str, Any],
     normalized_segments: list[dict[str, Any]],
+    progress_callback: Callable[[str, str, float | None], None] | None = None,
 ) -> dict[str, Any]:
     if not normalized_segments:
         raise ValueError("No valid segments are available for embedding.")
 
     profile = _resolve_embedding_profile(payload)
-    client = _build_embedding_client(payload, profile)
+    if progress_callback:
+        progress_callback("embedding_descriptors", "Embedding descriptor text", 0.72)
+    client = _call_with_optional_keyword(
+        _build_embedding_client,
+        "progress_callback",
+        (
+            None
+            if progress_callback is None
+            else lambda message, fraction=None: progress_callback(
+                "embedding_descriptors",
+                message,
+                fraction,
+            )
+        ),
+        payload,
+        profile,
+    )
     segment_texts = [segment["descriptor_text"] for segment in normalized_segments]
     segment_embeddings = client.embed_batch(segment_texts)
     segment_embeddings = _require_non_empty_embeddings(segment_embeddings, client)
+    if progress_callback:
+        progress_callback("embedding_descriptors", "Descriptor embeddings ready", 0.92)
     weighted_track_embedding = _weighted_embedding(segment_embeddings, normalized_segments)
     if not weighted_track_embedding:
         raise ValueError("Failed to compute a track embedding from the analyzed segments.")
+    if progress_callback:
+        progress_callback("returning_result", "Returning analyzed result", 0.98)
 
     return {
         "trackEmbedding": weighted_track_embedding,
@@ -594,18 +631,32 @@ def _resolve_google_ai_api_key(options: dict[str, Any]) -> str | None:
     return None
 
 
-def _build_embedding_client(payload: dict[str, Any], profile: dict[str, Any]):
+def _build_embedding_client(
+    payload: dict[str, Any],
+    profile: dict[str, Any],
+    progress_callback: Callable[[str, float | None], None] | None = None,
+):
     cache_dir = str((payload.get("options") or {}).get("cacheDirectory") or Path.home() / ".soria-cache")
     api_key = _resolve_google_ai_api_key(payload.get("options") or {})
 
     if profile["backend"] == "google_ai":
         from embedding.gemini_client import GeminiEmbeddingClient
 
-        return GeminiEmbeddingClient(api_key=api_key, cache_dir=cache_dir, model=profile["model"])
+        return GeminiEmbeddingClient(
+            api_key=api_key,
+            cache_dir=cache_dir,
+            model=profile["model"],
+            progress_callback=progress_callback,
+        )
     if profile["backend"] == "clap":
         from embedding.clap_client import CLAPEmbeddingClient
 
-        return CLAPEmbeddingClient(api_key=api_key, cache_dir=cache_dir, model=profile["model"])
+        return CLAPEmbeddingClient(
+            api_key=api_key,
+            cache_dir=cache_dir,
+            model=profile["model"],
+            progress_callback=progress_callback,
+        )
     raise ValueError(f"Unsupported embedding backend: {profile['backend']}")
 
 
@@ -640,6 +691,56 @@ def _disable_telemetry_noise() -> None:
         posthog.capture = lambda *args, **kwargs: None
     except Exception:
         return
+
+
+def _progress_emitter(file_path: str) -> Callable[[str, str, float | None], None]:
+    def emit(stage: str, message: str, fraction: float | None = None) -> None:
+        _emit_progress(
+            stage=stage,
+            message=message,
+            fraction=fraction,
+            track_path=file_path,
+        )
+
+    return emit
+
+
+def _emit_progress(
+    *,
+    stage: str,
+    message: str,
+    fraction: float | None = None,
+    track_path: str | None = None,
+) -> None:
+    payload = {
+        "stage": stage,
+        "message": message,
+        "fraction": fraction,
+        "trackPath": track_path,
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        sys.stderr.write(PROGRESS_PREFIX + json.dumps(payload, ensure_ascii=False) + "\n")
+        sys.stderr.flush()
+    except BrokenPipeError:
+        return
+
+
+def _call_with_optional_keyword(
+    function: Callable[..., Any],
+    keyword: str,
+    value: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+
+    if keyword in parameters:
+        kwargs[keyword] = value
+    return function(*args, **kwargs)
 
 
 def _module_available(module_name: str) -> bool:

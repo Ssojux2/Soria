@@ -3,13 +3,21 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from typing import Callable
 
 
 class CLAPEmbeddingClient:
-    def __init__(self, api_key: str | None, cache_dir: str, model: str = "laion/clap-htsat-unfused") -> None:
+    def __init__(
+        self,
+        api_key: str | None,
+        cache_dir: str,
+        model: str = "laion/clap-htsat-unfused",
+        progress_callback: Callable[[str, float | None], None] | None = None,
+    ) -> None:
         self.model_name = model
         self.cache_path = Path(cache_dir) / "embedding-cache"
         self.cache_path.mkdir(parents=True, exist_ok=True)
+        self._progress_callback = progress_callback
 
         try:
             import torch
@@ -50,12 +58,18 @@ class CLAPEmbeddingClient:
     def validate(self, probe_text: str) -> list[float] | None:
         return self._embed_texts([probe_text])[0]
 
+    def _notify_progress(self, message: str, fraction: float | None = None) -> None:
+        if self._progress_callback is not None:
+            self._progress_callback(message, fraction)
+
     def _embed_texts(self, texts: list[str]) -> list[list[float] | None]:
         try:
+            self._notify_progress("Embedding descriptors locally with CLAP", 0.80)
             inputs = self._processor(text=texts, return_tensors="pt", padding=True, truncation=True)
             with self._torch.no_grad():
                 features = self._model.get_text_features(**inputs)
             features = self._torch.nn.functional.normalize(features, dim=-1)
+            self._notify_progress("Local descriptor embeddings ready", 0.90)
             return [[float(v) for v in row] for row in features.cpu().tolist()]
         except Exception:
             return [None for _ in texts]

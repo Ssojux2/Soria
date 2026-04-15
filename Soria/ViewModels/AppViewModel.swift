@@ -52,6 +52,8 @@ final class AppViewModel: ObservableObject {
     @Published var selectedExportFormat: ExportFormat = .rekordboxXML
     @Published var analysisQueueProgressText: String = ""
     @Published var analysisStateByTrackID: [UUID: TrackAnalysisState] = [:]
+    @Published var analysisActivity: AnalysisActivity?
+    @Published var isAnalysisActivityPanelExpanded = true
     @Published var analysisFocus: AnalysisFocus = .balanced
     @Published var googleAIAPIKey: String {
         didSet { refreshValidationStatus() }
@@ -96,6 +98,7 @@ final class AppViewModel: ObservableObject {
     private var validationTask: Task<Void, Never>?
     private var readyTrackIDs: Set<UUID> = []
     private var pendingAnalysisTrackIDs: [UUID] = []
+    private let workerTimeoutSec = PythonWorkerClient.defaultWorkerTimeoutSec
     private lazy var worker: PythonWorkerClient = PythonWorkerClient(
         configProvider: { [unowned self] in
             PythonWorkerClient.WorkerConfig(
@@ -280,6 +283,130 @@ final class AppViewModel: ObservableObject {
     func analysisStatusIsTransient(for track: Track) -> Bool {
         let state = analysisState(for: track).state
         return state == .queued || state == .running
+    }
+
+    private func startAnalysisActivity(
+        for track: Track,
+        queueIndex: Int,
+        totalCount: Int,
+        stage: AnalysisStage
+    ) {
+        let startedAt = Date()
+        var activity = AnalysisActivity.started(
+            trackTitle: track.title,
+            trackPath: track.filePath,
+            queueIndex: queueIndex,
+            totalCount: totalCount,
+            timeoutSec: workerTimeoutSec,
+            startedAt: startedAt
+        )
+        if stage != .queued {
+            activity.recordProgress(
+                WorkerProgressEvent(
+                    stage: stage,
+                    message: stage.displayName,
+                    fraction: 0.02,
+                    trackPath: track.filePath,
+                    timestamp: startedAt
+                ),
+                trackTitle: track.title,
+                fallbackTrackPath: track.filePath,
+                queueIndex: queueIndex,
+                totalCount: totalCount
+            )
+        }
+        analysisActivity = activity
+        isAnalysisActivityPanelExpanded = true
+        updateAnalysisQueueTextFromActivity()
+    }
+
+    private func recordAnalysisProgress(
+        _ event: WorkerProgressEvent,
+        trackID: UUID,
+        trackTitle: String,
+        trackPath: String,
+        queueIndex: Int,
+        totalCount: Int
+    ) {
+        if analysisActivity?.currentTrackPath != trackPath || analysisActivity?.queueIndex != queueIndex {
+            analysisActivity = AnalysisActivity.started(
+                trackTitle: trackTitle,
+                trackPath: trackPath,
+                queueIndex: queueIndex,
+                totalCount: totalCount,
+                timeoutSec: workerTimeoutSec
+            )
+            isAnalysisActivityPanelExpanded = true
+        }
+
+        analysisActivity?.recordProgress(
+            event,
+            trackTitle: trackTitle,
+            fallbackTrackPath: trackPath,
+            queueIndex: queueIndex,
+            totalCount: totalCount
+        )
+        updateAnalysisState(trackID: trackID, state: .running, message: event.stage.displayName, updatedAt: event.timestamp)
+        updateAnalysisQueueTextFromActivity()
+    }
+
+    private func finishAnalysisActivity(
+        state: AnalysisTaskState,
+        for track: Track,
+        queueIndex: Int,
+        totalCount: Int,
+        errorMessage: String? = nil
+    ) {
+        if analysisActivity?.currentTrackPath != track.filePath || analysisActivity?.queueIndex != queueIndex {
+            startAnalysisActivity(for: track, queueIndex: queueIndex, totalCount: totalCount, stage: .queued)
+        }
+
+        let message: String
+        switch state {
+        case .succeeded:
+            message = "Completed \(track.title)"
+        case .failed:
+            message = "Failed \(track.title)"
+        case .canceled:
+            message = "Canceled \(track.title)"
+        default:
+            message = state.displayName
+        }
+        analysisActivity?.markFinished(
+            state: state,
+            errorMessage: errorMessage,
+            message: message
+        )
+        updateAnalysisQueueTextFromActivity()
+    }
+
+    private func updateAnalysisQueueTextFromActivity() {
+        guard let activity = analysisActivity else { return }
+        let queueText = "\(activity.queueIndex) / \(activity.totalCount)"
+        if activity.isFinished {
+            analysisQueueProgressText = "\(activity.headlineText) • \(activity.currentTrackTitle) (\(queueText))"
+        } else {
+            analysisQueueProgressText = "\(activity.currentMessage) • \(activity.currentTrackTitle) (\(queueText))"
+        }
+    }
+
+    private func decoratedAnalysisError(_ error: Error) -> String {
+        var segments: [String] = []
+        let baseMessage = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !baseMessage.isEmpty {
+            segments.append(baseMessage)
+        }
+        if let activity = analysisActivity {
+            let lastStage = activity.stage.displayName
+            if !lastStage.isEmpty {
+                segments.append("Last stage: \(lastStage)")
+            }
+            let lastEvent = activity.displayedEvents.first?.message.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !lastEvent.isEmpty, lastEvent != lastStage {
+                segments.append("Last event: \(lastEvent)")
+            }
+        }
+        return segments.isEmpty ? "Analysis failed." : segments.joined(separator: "\n")
     }
 
     func addLibraryRoot() {
@@ -555,6 +682,12 @@ final class AppViewModel: ObservableObject {
             if currentState == .queued || currentState == .running {
                 updateAnalysisState(trackID: trackID, state: .canceled, message: "Canceled")
             }
+        }
+        if let activity = analysisActivity {
+            var updatedActivity = activity
+            updatedActivity.markFinished(state: AnalysisTaskState.canceled, message: "Canceled by user")
+            analysisActivity = updatedActivity
+            updateAnalysisQueueTextFromActivity()
         }
         analysisTask = nil
     }
@@ -925,6 +1058,7 @@ final class AppViewModel: ObservableObject {
         }
 
         for (index, track) in tracksToAnalyze.enumerated() {
+            let queueIndex = index + 1
             if Task.isCancelled {
                 analysisQueueProgressText = "Canceled: \(index) / \(tracksToAnalyze.count)"
                 for pendingTrack in tracksToAnalyze[index...] {
@@ -934,8 +1068,8 @@ final class AppViewModel: ObservableObject {
             }
 
             do {
-                updateAnalysisState(trackID: track.id, state: .running, message: "Analyzing")
-                analysisQueueProgressText = "Analyzing \(track.title) (\(index + 1) / \(tracksToAnalyze.count))"
+                startAnalysisActivity(for: track, queueIndex: queueIndex, totalCount: tracksToAnalyze.count, stage: .launching)
+                updateAnalysisState(trackID: track.id, state: .running, message: AnalysisStage.launching.displayName)
                 let externalMetadata = try database.fetchExternalMetadata(trackID: track.id)
                 let existingSegments = try database.fetchSegments(trackID: track.id)
                 let existingSummary = try database.fetchAnalysisSummary(trackID: track.id)
@@ -944,12 +1078,28 @@ final class AppViewModel: ObservableObject {
                     && !existingSegments.isEmpty
                     && existingSummary != nil
                     && existingSummary?.analysisFocus == analysisFocus
+                let trackID = track.id
+                let trackTitle = track.title
+                let trackPath = track.filePath
+                let progressHandler: PythonWorkerClient.WorkerProgressHandler = { [weak self] event in
+                    Task { @MainActor [weak self] in
+                        self?.recordAnalysisProgress(
+                            event,
+                            trackID: trackID,
+                            trackTitle: trackTitle,
+                            trackPath: trackPath,
+                            queueIndex: queueIndex,
+                            totalCount: tracksToAnalyze.count
+                        )
+                    }
+                }
 
                 if canReembed {
                     let result = try await worker.embedDescriptors(
                         track: track,
                         segments: existingSegments,
-                        externalMetadata: externalMetadata
+                        externalMetadata: externalMetadata,
+                        progress: progressHandler
                     )
                     guard let refreshedSegments = mergedReembeddedSegments(
                         trackID: track.id,
@@ -970,12 +1120,19 @@ final class AppViewModel: ObservableObject {
                     try await worker.upsertTrackVectors(track: track, segments: refreshedSegments, trackEmbedding: trackEmbedding)
                     try database.markTrackEmbeddingIndexed(trackID: track.id, embeddingProfileID: result.embeddingProfileID)
                     updateAnalysisState(trackID: track.id, state: .succeeded, message: "Done")
+                    finishAnalysisActivity(
+                        state: .succeeded,
+                        for: track,
+                        queueIndex: queueIndex,
+                        totalCount: tracksToAnalyze.count
+                    )
                 } else {
                     let result = try await worker.analyze(
                         filePath: track.filePath,
                         track: track,
                         analysisFocus: analysisFocus,
-                        externalMetadata: externalMetadata
+                        externalMetadata: externalMetadata,
+                        progress: progressHandler
                     )
                     let segments = result.segments.compactMap { item -> TrackSegment? in
                         guard let type = TrackSegment.SegmentType(rawValue: item.segmentType) else { return nil }
@@ -1045,20 +1202,39 @@ final class AppViewModel: ObservableObject {
                         try database.markTrackEmbeddingIndexed(trackID: track.id, embeddingProfileID: result.embeddingProfileID)
                     }
                     updateAnalysisState(trackID: track.id, state: .succeeded, message: "Done")
-                }
-
-                if mode == .batch {
-                    analysisQueueProgressText = "Processed \(index + 1) / \(tracksToAnalyze.count)"
+                    finishAnalysisActivity(
+                        state: .succeeded,
+                        for: track,
+                        queueIndex: queueIndex,
+                        totalCount: tracksToAnalyze.count
+                    )
                 }
             } catch {
                 if Task.isCancelled || (error as? WorkerError).map({ if case .cancelled = $0 { return true } else { return false } }) == true {
                     updateAnalysisState(trackID: track.id, state: .canceled, message: "Canceled")
-                    analysisQueueProgressText = "Canceled: \(index + 1) / \(tracksToAnalyze.count)"
+                    finishAnalysisActivity(
+                        state: .canceled,
+                        for: track,
+                        queueIndex: queueIndex,
+                        totalCount: tracksToAnalyze.count
+                    )
                     continue
                 }
-                updateAnalysisState(trackID: track.id, state: .failed, message: error.localizedDescription)
-                analysisErrorMessage = error.localizedDescription
-                AppLogger.shared.error("Analyze failed for \(track.filePath): \(error.localizedDescription)")
+                let decoratedError = decoratedAnalysisError(error)
+                updateAnalysisState(
+                    trackID: track.id,
+                    state: .failed,
+                    message: analysisActivity?.stage.displayName ?? "Failed"
+                )
+                finishAnalysisActivity(
+                    state: .failed,
+                    for: track,
+                    queueIndex: queueIndex,
+                    totalCount: tracksToAnalyze.count,
+                    errorMessage: decoratedError
+                )
+                analysisErrorMessage = decoratedError
+                AppLogger.shared.error("Analyze failed for \(track.filePath): \(decoratedError)")
             }
         }
 

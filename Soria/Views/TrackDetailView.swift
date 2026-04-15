@@ -50,6 +50,13 @@ struct TrackDetailView: View {
                                 .tint(.red)
                             }
 
+                            if let activity = viewModel.analysisActivity {
+                                AnalysisActivityPanel(
+                                    activity: activity,
+                                    isExpanded: $viewModel.isAnalysisActivityPanelExpanded
+                                )
+                            }
+
                             if !viewModel.analysisQueueProgressText.isEmpty {
                                 Text(viewModel.analysisQueueProgressText)
                                     .font(.footnote)
