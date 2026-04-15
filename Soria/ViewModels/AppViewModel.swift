@@ -26,6 +26,15 @@ final class AppViewModel: ObservableObject {
     @Published var isSearching = false
     @Published var recommendations: [RecommendationCandidate] = []
     @Published var recommendationStatusMessage: String = ""
+    @Published var recommendationQueryText: String = ""
+    @Published var recommendationResultLimit: Int = 20 {
+        didSet {
+            let clamped = RecommendationInputState.clampedResultLimit(recommendationResultLimit)
+            if recommendationResultLimit != clamped {
+                recommendationResultLimit = clamped
+            }
+        }
+    }
     @Published var libraryStatusMessage: String = ""
     @Published var searchResults: [TrackSearchResult] = []
     @Published var searchMode: SearchMode = .text {
@@ -189,13 +198,36 @@ final class AppViewModel: ObservableObject {
         tracks.filter { $0.analyzedAt != nil && !readyTrackIDs.contains($0.id) }.count
     }
 
+    var readySelectedReferenceTracks: [Track] {
+        selectedTracks.filter { readyTrackIDs.contains($0.id) }
+    }
+
     var canRunReferenceTrackFeatures: Bool {
         guard hasValidatedEmbeddingProfile else { return false }
-        return selectedTracks.contains(where: { readyTrackIDs.contains($0.id) })
+        return !readySelectedReferenceTracks.isEmpty
+    }
+
+    var recommendationInputState: RecommendationInputState? {
+        RecommendationInputState.resolve(
+            queryText: recommendationQueryText,
+            readyReferenceCount: readySelectedReferenceTracks.count
+        )
+    }
+
+    var canRunRecommendationActions: Bool {
+        guard hasValidatedEmbeddingProfile, isSelectedEmbeddingProfileSupported else { return false }
+        return recommendationInputState != nil
     }
 
     var selectedReferenceTracksMissingEmbeddingCount: Int {
         selectedTracks.filter { !readyTrackIDs.contains($0.id) }.count
+    }
+
+    var recommendationReferenceSummary: String {
+        selectedTracks
+            .prefix(3)
+            .map { "\($0.title) - \($0.artist)" }
+            .joined(separator: ", ")
     }
 
     var canRunAnalysis: Bool {
@@ -527,7 +559,7 @@ final class AppViewModel: ObservableObject {
         analysisTask = nil
     }
 
-    func generateRecommendations(limit: Int = 20) {
+    func generateRecommendations(limit: Int? = nil) {
         guard isSelectedEmbeddingProfileSupported else {
             recommendationStatusMessage = selectedEmbeddingProfileDependencyMessage ?? "The active embedding profile is unavailable."
             return
@@ -536,12 +568,9 @@ final class AppViewModel: ObservableObject {
             recommendationStatusMessage = "Validate the active embedding profile first."
             return
         }
-        guard let seed = selectedTrack else {
-            recommendationStatusMessage = "Select a track first."
-            return
-        }
-        guard readyTrackIDs.contains(seed.id) else {
-            recommendationStatusMessage = "Analyze the selected track for the active embedding profile first."
+        let effectiveLimit = RecommendationInputState.clampedResultLimit(limit ?? recommendationResultLimit)
+        guard let input = resolveRecommendationInput() else {
+            recommendationStatusMessage = recommendationInputValidationMessage()
             return
         }
 
@@ -549,26 +578,34 @@ final class AppViewModel: ObservableObject {
             do {
                 let embeddingsByTrackID = try loadTrackEmbeddings()
                 let summariesByTrackID = try loadAnalysisSummaries(trackIDs: Array(readyTrackIDs))
-                let similarityMap = try await workerSimilarityMap(
-                    seed: seed,
+                let excludedReferenceTrackIDs = Set(input.readyReferenceTracks.map(\.id))
+                let seedContext = try await resolveRecommendationSeedContext(
+                    input: input,
                     embeddingsByTrackID: embeddingsByTrackID,
-                    limit: limit,
+                    summariesByTrackID: summariesByTrackID,
+                    limit: max(effectiveLimit, 25),
                     excludedPaths: Set(playlistTracks.map(\.filePath))
                 )
                 let recs = recommendationEngine.recommendNextTracks(
-                    seed: seed,
+                    seed: seedContext.seed,
                     candidates: tracks.filter { readyTrackIDs.contains($0.id) },
                     embeddingsByTrackID: embeddingsByTrackID,
                     summariesByTrackID: summariesByTrackID,
-                    vectorSimilarityByPath: similarityMap,
+                    vectorSimilarityByPath: seedContext.similarityMap,
                     constraints: constraints,
                     weights: weights,
-                    limit: limit,
-                    excludeTrackIDs: Set(playlistTracks.map(\.id))
+                    limit: effectiveLimit,
+                    excludeTrackIDs: Set(playlistTracks.map(\.id)).union(excludedReferenceTrackIDs)
                 )
                 recommendations = recs
                 selectedRecommendationID = recs.first?.id
-                recommendationStatusMessage = recs.isEmpty ? "No recommendations found." : "Generated \(recs.count) matches."
+                if recs.isEmpty {
+                    recommendationStatusMessage = "No recommendations found for the current inputs."
+                } else if input.state.requiresSemanticSeed {
+                    recommendationStatusMessage = "Generated \(recs.count) matches from semantic seed: \(seedContext.seed.title)."
+                } else {
+                    recommendationStatusMessage = "Generated \(recs.count) matches."
+                }
             } catch {
                 recommendationStatusMessage = "Recommendation failed: \(error.localizedDescription)"
                 AppLogger.shared.error("Recommendation failed: \(error.localizedDescription)")
@@ -585,12 +622,8 @@ final class AppViewModel: ObservableObject {
             recommendationStatusMessage = "Validate the active embedding profile first."
             return
         }
-        guard let seed = selectedTrack else {
-            recommendationStatusMessage = "Select a track first."
-            return
-        }
-        guard readyTrackIDs.contains(seed.id) else {
-            recommendationStatusMessage = "Analyze the selected track for the active embedding profile first."
+        guard let input = resolveRecommendationInput() else {
+            recommendationStatusMessage = recommendationInputValidationMessage()
             return
         }
 
@@ -598,9 +631,17 @@ final class AppViewModel: ObservableObject {
             do {
                 let embeddingsByTrackID = try loadTrackEmbeddings()
                 let summariesByTrackID = try loadAnalysisSummaries(trackIDs: Array(readyTrackIDs))
-                var pathTracks: [Track] = [seed]
-                var current = seed
+                let excludedReferenceTrackIDs = Set(input.readyReferenceTracks.map(\.id))
                 let targetCount = max(2, playlistTargetCount)
+                let seedContext = try await resolveRecommendationSeedContext(
+                    input: input,
+                    embeddingsByTrackID: embeddingsByTrackID,
+                    summariesByTrackID: summariesByTrackID,
+                    limit: max(targetCount * 2, 25),
+                    excludedPaths: []
+                )
+                var pathTracks: [Track] = [seedContext.seed]
+                var current = seedContext.seed
 
                 while pathTracks.count < targetCount {
                     let similarityMap = try await workerSimilarityMap(
@@ -618,7 +659,7 @@ final class AppViewModel: ObservableObject {
                         constraints: constraints,
                         weights: weights,
                         limit: 1,
-                        excludeTrackIDs: Set(pathTracks.map(\.id))
+                        excludeTrackIDs: Set(pathTracks.map(\.id)).union(excludedReferenceTrackIDs)
                     ).first?.track
 
                     guard let next else { break }
@@ -627,7 +668,7 @@ final class AppViewModel: ObservableObject {
                 }
 
                 playlistTracks = pathTracks
-                recommendationStatusMessage = "Built \(pathTracks.count)-track path from seed: \(seed.title)"
+                recommendationStatusMessage = "Built \(pathTracks.count)-track path from seed: \(seedContext.seed.title)"
             } catch {
                 recommendationStatusMessage = "Playlist path build failed: \(error.localizedDescription)"
                 AppLogger.shared.error("Playlist path build failed: \(error.localizedDescription)")
@@ -827,6 +868,10 @@ final class AppViewModel: ObservableObject {
     }
 
     func analyzeSelectedTracksForSearch() {
+        analyzeSelectedTrackForSearch()
+    }
+
+    func analyzeSelectedTracksForRecommendations() {
         analyzeSelectedTrackForSearch()
     }
 
@@ -1135,6 +1180,138 @@ final class AppViewModel: ObservableObject {
             }
         }
         return output
+    }
+
+    private func resolveRecommendationInput() -> RecommendationResolvedInput? {
+        guard let state = recommendationInputState else { return nil }
+        let readyReferenceTracks = readySelectedReferenceTracks
+        return RecommendationResolvedInput(
+            state: state,
+            readyReferenceTracks: readyReferenceTracks,
+            referencePayload: readyReferenceTracks.isEmpty
+                ? nil
+                : buildReferenceTrackSearchPayload(from: readyReferenceTracks)
+        )
+    }
+
+    private func recommendationInputValidationMessage() -> String {
+        let trimmedQueryText = recommendationQueryText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedQueryText.isEmpty, selectedTracks.isEmpty {
+            return "Enter text or select one or more library tracks first."
+        }
+        if trimmedQueryText.isEmpty, !selectedTracks.isEmpty, readySelectedReferenceTracks.isEmpty {
+            return "Analyze the selected track(s) for the active embedding profile first, or enter text."
+        }
+        return "No seed track matched the current recommendation inputs."
+    }
+
+    private func resolveRecommendationSeedContext(
+        input: RecommendationResolvedInput,
+        embeddingsByTrackID: [UUID: [Double]],
+        summariesByTrackID: [UUID: TrackAnalysisSummary],
+        limit: Int,
+        excludedPaths: Set<String>
+    ) async throws -> RecommendationSeedContext {
+        switch input.state.seedSource {
+        case .selectedReference:
+            guard let seed = input.readyReferenceTracks.first else {
+                throw RecommendationResolutionError.missingReferenceTrack
+            }
+            let similarityMap = try await workerSimilarityMap(
+                seed: seed,
+                embeddingsByTrackID: embeddingsByTrackID,
+                limit: max(limit, 1),
+                excludedPaths: excludedPaths
+            )
+            return RecommendationSeedContext(seed: seed, similarityMap: similarityMap)
+
+        case .semanticMatch:
+            let response = try await searchRecommendationMatches(
+                input: input,
+                limit: max(limit, 1),
+                excludedPaths: excludedPaths
+            )
+            let trackIndex = Dictionary(uniqueKeysWithValues: tracks.map { ($0.filePath, $0) })
+            let rankedMatches = response.results.compactMap { item -> (Track, Double)? in
+                guard let track = trackIndex[item.filePath], readyTrackIDs.contains(track.id) else {
+                    return nil
+                }
+                guard recommendationEngine.matchesConstraints(
+                    track: track,
+                    summary: summariesByTrackID[track.id],
+                    constraints: constraints
+                ) else {
+                    return nil
+                }
+                return (track, item.fusedScore)
+            }
+            guard let seed = rankedMatches.first?.0 else {
+                throw RecommendationResolutionError.noSemanticSeed
+            }
+            return RecommendationSeedContext(
+                seed: seed,
+                similarityMap: Dictionary(uniqueKeysWithValues: rankedMatches.map { ($0.0.filePath, $0.1) })
+            )
+        }
+    }
+
+    private func searchRecommendationMatches(
+        input: RecommendationResolvedInput,
+        limit: Int,
+        excludedPaths: Set<String>
+    ) async throws -> WorkerTrackSearchResponse {
+        let filters = recommendationWorkerFilters()
+        let referenceExcludedPaths = input.referencePayload?.excludeTrackPaths ?? []
+        let effectiveExcludedPaths = Array(excludedPaths.union(referenceExcludedPaths))
+
+        switch input.state.mode {
+        case .text:
+            return try await worker.searchTracksText(
+                query: input.state.trimmedQueryText,
+                limit: limit,
+                excludeTrackPaths: effectiveExcludedPaths,
+                filters: filters
+            )
+
+        case .reference:
+            guard
+                let referencePayload = input.referencePayload,
+                let referenceTrack = input.readyReferenceTracks.first
+            else {
+                throw RecommendationResolutionError.missingReferencePayload
+            }
+            return try await worker.searchTracksReference(
+                track: referenceTrack,
+                segments: referencePayload.segments,
+                trackEmbedding: referencePayload.trackEmbedding,
+                limit: limit,
+                excludeTrackPaths: effectiveExcludedPaths,
+                filters: filters
+            )
+
+        case .hybrid:
+            guard let referencePayload = input.referencePayload else {
+                throw RecommendationResolutionError.missingReferencePayload
+            }
+            return try await worker.searchTracksHybrid(
+                query: input.state.trimmedQueryText,
+                segments: referencePayload.segments,
+                trackEmbedding: referencePayload.trackEmbedding,
+                limit: limit,
+                excludeTrackPaths: effectiveExcludedPaths,
+                filters: filters
+            )
+        }
+    }
+
+    private func recommendationWorkerFilters() -> WorkerSimilarityFilters {
+        WorkerSimilarityFilters(
+            bpmMin: constraints.targetBPMMin,
+            bpmMax: constraints.targetBPMMax,
+            durationMaxSec: constraints.maxDurationMinutes.map { $0 * 60 },
+            musicalKey: nil,
+            genre: nil
+        )
     }
 
     private func invalidateTrackVectors(for track: Track) async {
@@ -1610,6 +1787,38 @@ final class AppViewModel: ObservableObject {
 
 private enum AnalysisMode {
     case batch
+}
+
+private struct RecommendationResolvedInput {
+    let state: RecommendationInputState
+    let readyReferenceTracks: [Track]
+    let referencePayload: (
+        trackEmbedding: [Double],
+        segments: [TrackSegment],
+        excludeTrackPaths: Set<String>
+    )?
+}
+
+private struct RecommendationSeedContext {
+    let seed: Track
+    let similarityMap: [String: Double]
+}
+
+private enum RecommendationResolutionError: LocalizedError {
+    case missingReferenceTrack
+    case missingReferencePayload
+    case noSemanticSeed
+
+    var errorDescription: String? {
+        switch self {
+        case .missingReferenceTrack:
+            return "Select a ready reference track first."
+        case .missingReferencePayload:
+            return "Selected reference track data is not ready for recommendations yet."
+        case .noSemanticSeed:
+            return "No seed track matched the current recommendation filters."
+        }
+    }
 }
 
 private struct MetadataImportSummary {

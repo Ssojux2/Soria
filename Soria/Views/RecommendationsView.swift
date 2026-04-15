@@ -9,15 +9,32 @@ struct RecommendationsView: View {
     @State private var maxDurationText: String = ""
 
     var body: some View {
+        let canRunRecommendations = viewModel.canRunRecommendationActions
+
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Recommendations")
                     .font(.title2.bold())
                 Spacer()
                 Button("Generate") { viewModel.generateRecommendations() }
-                    .disabled(!viewModel.canRunReferenceTrackFeatures)
+                    .disabled(!canRunRecommendations)
                 Button("Build Playlist Path") { viewModel.buildPlaylistPath() }
-                    .disabled(!viewModel.canRunReferenceTrackFeatures)
+                    .disabled(!canRunRecommendations)
+            }
+
+            Text("Build a mixset from text, selected library tracks, or both together.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                TextField("Describe the mix vibe or transition you want", text: $viewModel.recommendationQueryText)
+                    .textFieldStyle(.roundedBorder)
+                Stepper(
+                    "Results \(viewModel.recommendationResultLimit)",
+                    value: $viewModel.recommendationResultLimit,
+                    in: RecommendationInputState.minimumResultLimit...RecommendationInputState.maximumResultLimit
+                )
+                .frame(width: 180)
             }
 
             HStack {
@@ -70,6 +87,33 @@ struct RecommendationsView: View {
                 Button("Apply Tags") {
                     viewModel.constraints.includeTags = splitTags(includeTagsText)
                     viewModel.constraints.excludeTags = splitTags(excludeTagsText)
+                }
+            }
+
+            if !viewModel.selectedTracks.isEmpty {
+                Text("Reference tracks selected: \(viewModel.selectedTracks.count)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                if !viewModel.recommendationReferenceSummary.isEmpty {
+                    Text(viewModel.recommendationReferenceSummary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("Select one or more library tracks if you want track-based guidance, or leave it empty for text-only generation.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            if viewModel.selectedReferenceTracksMissingEmbeddingCount > 0 {
+                HStack {
+                    Text("Some selected tracks are not analyzed for the active embedding profile yet.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Button("Analyze Selected Tracks First") {
+                        viewModel.analyzeSelectedTracksForRecommendations()
+                    }
+                    .disabled(!viewModel.hasValidatedEmbeddingProfile || viewModel.isAnalyzing)
                 }
             }
 

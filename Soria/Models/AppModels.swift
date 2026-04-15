@@ -196,6 +196,73 @@ enum SearchMode: String, CaseIterable, Identifiable {
     }
 }
 
+enum RecommendationInputMode: String, Codable, Equatable {
+    case text
+    case reference
+    case hybrid
+}
+
+enum RecommendationSeedSource: Equatable {
+    case selectedReference
+    case semanticMatch
+}
+
+struct RecommendationInputState: Equatable {
+    static let minimumResultLimit = 10
+    static let maximumResultLimit = 100
+
+    let mode: RecommendationInputMode
+    let queryText: String
+    let readyReferenceCount: Int
+
+    var trimmedQueryText: String {
+        queryText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var hasTextInput: Bool {
+        !trimmedQueryText.isEmpty
+    }
+
+    var seedSource: RecommendationSeedSource {
+        if mode == .reference, readyReferenceCount == 1 {
+            return .selectedReference
+        }
+        return .semanticMatch
+    }
+
+    var requiresSemanticSeed: Bool {
+        seedSource == .semanticMatch
+    }
+
+    static func resolve(queryText: String, readyReferenceCount: Int) -> RecommendationInputState? {
+        let trimmedQueryText = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasTextInput = !trimmedQueryText.isEmpty
+        let hasReadyReference = readyReferenceCount > 0
+
+        let mode: RecommendationInputMode
+        switch (hasTextInput, hasReadyReference) {
+        case (true, true):
+            mode = .hybrid
+        case (true, false):
+            mode = .text
+        case (false, true):
+            mode = .reference
+        case (false, false):
+            return nil
+        }
+
+        return RecommendationInputState(
+            mode: mode,
+            queryText: trimmedQueryText,
+            readyReferenceCount: readyReferenceCount
+        )
+    }
+
+    static func clampedResultLimit(_ value: Int) -> Int {
+        min(max(value, minimumResultLimit), maximumResultLimit)
+    }
+}
+
 enum EmbeddingBackendKind: String, Codable, Hashable {
     case googleAI = "google_ai"
     case clap = "clap"

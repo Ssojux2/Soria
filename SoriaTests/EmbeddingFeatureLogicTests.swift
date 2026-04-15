@@ -179,6 +179,75 @@ extension SoriaTests {
     }
 
     @Test
+    func recommendationInputStateResolvesTextReferenceHybridAndEmptyCases() {
+        #expect(
+            RecommendationInputState.resolve(queryText: " warm sunrise ", readyReferenceCount: 0)?.mode == .text
+        )
+        #expect(
+            RecommendationInputState.resolve(queryText: "", readyReferenceCount: 1)?.mode == .reference
+        )
+        #expect(
+            RecommendationInputState.resolve(queryText: "deep opener", readyReferenceCount: 2)?.mode == .hybrid
+        )
+        #expect(
+            RecommendationInputState.resolve(queryText: "   ", readyReferenceCount: 0) == nil
+        )
+    }
+
+    @Test
+    func recommendationInputStateChoosesDirectSeedOnlyForSingleReferenceMode() {
+        #expect(
+            RecommendationInputState.resolve(queryText: "", readyReferenceCount: 1)?.seedSource == .selectedReference
+        )
+        #expect(
+            RecommendationInputState.resolve(queryText: "", readyReferenceCount: 2)?.seedSource == .semanticMatch
+        )
+        #expect(
+            RecommendationInputState.resolve(queryText: "peak time", readyReferenceCount: 0)?.seedSource == .semanticMatch
+        )
+        #expect(
+            RecommendationInputState.resolve(queryText: "peak time", readyReferenceCount: 1)?.seedSource == .semanticMatch
+        )
+    }
+
+    @Test
+    func recommendationResultLimitClampsToSupportedRange() {
+        #expect(RecommendationInputState.clampedResultLimit(3) == 10)
+        #expect(RecommendationInputState.clampedResultLimit(42) == 42)
+        #expect(RecommendationInputState.clampedResultLimit(120) == 100)
+    }
+
+    @Test
+    func hybridTrackSearchPayloadCarriesTextAndReferenceInputs() {
+        let segment = TrackSegment(
+            id: UUID(),
+            trackID: UUID(),
+            type: .intro,
+            startSec: 0,
+            endSec: 32,
+            energyScore: 0.4,
+            descriptorText: "warm opener",
+            vector: [0.3, 0.7]
+        )
+        let payload = PythonWorkerClient.makeTrackSearchPayload(
+            mode: .hybrid,
+            queryText: "warmup journey",
+            trackEmbedding: [0.25, 0.75],
+            segments: [segment],
+            limit: 25,
+            excludeTrackPaths: ["/tmp/ref.mp3"],
+            filters: WorkerSimilarityFilters()
+        )
+
+        #expect(payload.mode == .hybrid)
+        #expect(payload.queryText == "warmup journey")
+        #expect(payload.queryTrackEmbedding == [0.25, 0.75])
+        #expect(payload.querySegments == [
+            WorkerQuerySegment(segmentType: "intro", embedding: [0.3, 0.7])
+        ])
+    }
+
+    @Test
     func legacyAnalysisSummaryDecodesWithNewDefaults() throws {
         let trackID = UUID()
         let json = """

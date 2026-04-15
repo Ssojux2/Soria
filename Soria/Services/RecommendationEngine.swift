@@ -1,6 +1,29 @@
 import Foundation
 
 struct RecommendationEngine {
+    func matchesConstraints(
+        track: Track,
+        summary: TrackAnalysisSummary?,
+        constraints: RecommendationConstraints
+    ) -> Bool {
+        if let focus = constraints.analysisFocus, summary?.analysisFocus != focus { return false }
+        if let min = constraints.targetBPMMin, let bpm = track.bpm, bpm < min { return false }
+        if let max = constraints.targetBPMMax, let bpm = track.bpm, bpm > max { return false }
+        if let maxMinutes = constraints.maxDurationMinutes, track.duration > maxMinutes * 60 { return false }
+        if !constraints.includeFolders.isEmpty && !constraints.includeFolders.contains(where: { track.filePath.hasPrefix($0) }) {
+            return false
+        }
+        if constraints.excludeFolders.contains(where: { track.filePath.hasPrefix($0) }) {
+            return false
+        }
+        return matchesTagFilters(
+            track: track,
+            summary: summary,
+            includeTags: constraints.includeTags,
+            excludeTags: constraints.excludeTags
+        )
+    }
+
     func recommendNextTracks(
         seed: Track,
         candidates: [Track],
@@ -14,21 +37,11 @@ struct RecommendationEngine {
     ) -> [RecommendationCandidate] {
         let filtered = candidates.filter { track in
             guard !excludeTrackIDs.contains(track.id), track.id != seed.id else { return false }
-            if let focus = constraints.analysisFocus, summariesByTrackID[track.id]?.analysisFocus != focus { return false }
-            if let min = constraints.targetBPMMin, let bpm = track.bpm, bpm < min { return false }
-            if let max = constraints.targetBPMMax, let bpm = track.bpm, bpm > max { return false }
-            if let maxMinutes = constraints.maxDurationMinutes, track.duration > maxMinutes * 60 { return false }
-            if !constraints.includeFolders.isEmpty && !constraints.includeFolders.contains(where: { track.filePath.hasPrefix($0) }) { return false }
-            if constraints.excludeFolders.contains(where: { track.filePath.hasPrefix($0) }) { return false }
-            if !matchesTagFilters(
+            return matchesConstraints(
                 track: track,
                 summary: summariesByTrackID[track.id],
-                includeTags: constraints.includeTags,
-                excludeTags: constraints.excludeTags
-            ) {
-                return false
-            }
-            return true
+                constraints: constraints
+            )
         }
 
         let seedEmbedding = embeddingsByTrackID[seed.id] ?? []

@@ -87,6 +87,12 @@ struct WorkerMutationResponse: Codable {
     let trackID: String?
 }
 
+enum WorkerTrackSearchMode: String, Codable, Equatable {
+    case text
+    case reference
+    case hybrid
+}
+
 final class PythonWorkerClient {
     struct WorkerConfig {
         var pythonExecutable: String
@@ -161,24 +167,16 @@ final class PythonWorkerClient {
         excludeTrackPaths: [String],
         filters: WorkerSimilarityFilters
     ) async throws -> WorkerTrackSearchResponse {
-        let payload = WorkerTrackSearchPayload(
-            command: "search_tracks",
-            mode: "text",
+        try await searchTracks(
+            mode: .text,
             queryText: query,
-            queryTrackEmbedding: nil,
-            querySegments: [],
+            trackEmbedding: nil,
+            segments: [],
             limit: limit,
             excludeTrackPaths: excludeTrackPaths,
             filters: filters,
-            weights: [
-                "tracks": 0.45,
-                "intro": 0.15,
-                "middle": 0.25,
-                "outro": 0.15
-            ],
-            options: workerOptions()
+            weights: Self.textSearchWeights
         )
-        return try await runGeneric(payload: payload)
     }
 
     func searchTracksReference(
@@ -189,30 +187,37 @@ final class PythonWorkerClient {
         excludeTrackPaths: [String],
         filters: WorkerSimilarityFilters
     ) async throws -> WorkerTrackSearchResponse {
-        let payload = WorkerTrackSearchPayload(
-            command: "search_tracks",
-            mode: "reference",
+        _ = track
+        return try await searchTracks(
+            mode: .reference,
             queryText: nil,
-            queryTrackEmbedding: trackEmbedding,
-            querySegments: segments.compactMap { segment in
-                guard let vector = segment.vector, !vector.isEmpty else { return nil }
-                return WorkerQuerySegment(
-                    segmentType: segment.type.rawValue,
-                    embedding: vector
-                )
-            },
+            trackEmbedding: trackEmbedding,
+            segments: segments,
             limit: limit,
             excludeTrackPaths: excludeTrackPaths,
             filters: filters,
-            weights: [
-                "tracks": 0.70,
-                "intro": 0.10,
-                "middle": 0.10,
-                "outro": 0.10
-            ],
-            options: workerOptions()
+            weights: Self.referenceSearchWeights
         )
-        return try await runGeneric(payload: payload)
+    }
+
+    func searchTracksHybrid(
+        query: String,
+        segments: [TrackSegment],
+        trackEmbedding: [Double],
+        limit: Int,
+        excludeTrackPaths: [String],
+        filters: WorkerSimilarityFilters
+    ) async throws -> WorkerTrackSearchResponse {
+        try await searchTracks(
+            mode: .hybrid,
+            queryText: query,
+            trackEmbedding: trackEmbedding,
+            segments: segments,
+            limit: limit,
+            excludeTrackPaths: excludeTrackPaths,
+            filters: filters,
+            weights: Self.hybridSearchWeights
+        )
     }
 
     func upsertTrackVectors(
@@ -445,14 +450,106 @@ final class PythonWorkerClient {
             throw WorkerError.decodeFailed([text, errorText].filter { !$0.isEmpty }.joined(separator: "\n"))
         }
     }
+
+    private func searchTracks(
+        mode: WorkerTrackSearchMode,
+        queryText: String?,
+        trackEmbedding: [Double]?,
+        segments: [TrackSegment],
+        limit: Int,
+        excludeTrackPaths: [String],
+        filters: WorkerSimilarityFilters,
+        weights: [String: Double]
+    ) async throws -> WorkerTrackSearchResponse {
+        let payload = Self.makeTrackSearchPayload(
+            mode: mode,
+            queryText: queryText,
+            trackEmbedding: trackEmbedding,
+            segments: segments,
+            limit: limit,
+            excludeTrackPaths: excludeTrackPaths,
+            filters: filters,
+            weights: weights,
+            options: workerOptions()
+        )
+        return try await runGeneric(payload: payload)
+    }
+
+    static func makeTrackSearchPayload(
+        mode: WorkerTrackSearchMode,
+        queryText: String?,
+        trackEmbedding: [Double]?,
+        segments: [TrackSegment],
+        limit: Int,
+        excludeTrackPaths: [String],
+        filters: WorkerSimilarityFilters,
+        weights: [String: Double]? = nil,
+        options: WorkerOptionsPayload = WorkerOptionsPayload(
+            googleAIAPIKey: nil,
+            cacheDirectory: "",
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding001.id,
+            analysisFocus: nil
+        )
+    ) -> WorkerTrackSearchPayload {
+        WorkerTrackSearchPayload(
+            command: "search_tracks",
+            mode: mode,
+            queryText: queryText,
+            queryTrackEmbedding: trackEmbedding,
+            querySegments: segments.compactMap { segment in
+                guard let vector = segment.vector, !vector.isEmpty else { return nil }
+                return WorkerQuerySegment(
+                    segmentType: segment.type.rawValue,
+                    embedding: vector
+                )
+            },
+            limit: limit,
+            excludeTrackPaths: excludeTrackPaths,
+            filters: filters,
+            weights: weights ?? defaultWeights(for: mode),
+            options: options
+        )
+    }
+
+    private static let textSearchWeights: [String: Double] = [
+        "tracks": 0.45,
+        "intro": 0.15,
+        "middle": 0.25,
+        "outro": 0.15
+    ]
+
+    private static let referenceSearchWeights: [String: Double] = [
+        "tracks": 0.70,
+        "intro": 0.10,
+        "middle": 0.10,
+        "outro": 0.10
+    ]
+
+    private static let hybridSearchWeights: [String: Double] = [
+        "tracks": 0.60,
+        "intro": 0.10,
+        "middle": 0.20,
+        "outro": 0.10
+    ]
+
+    private static func defaultWeights(for mode: WorkerTrackSearchMode) -> [String: Double] {
+        switch mode {
+        case .text:
+            textSearchWeights
+        case .reference:
+            referenceSearchWeights
+        case .hybrid:
+            hybridSearchWeights
+        }
+    }
 }
 
-struct WorkerSimilarityFilters: Codable {
-    var bpmMin: Double?
-    var bpmMax: Double?
-    var durationMaxSec: Double?
-    var musicalKey: String?
-    var genre: String?
+struct WorkerSimilarityFilters: Codable, Equatable {
+    var bpmMin: Double? = nil
+    var bpmMax: Double? = nil
+    var durationMaxSec: Double? = nil
+    var musicalKey: String? = nil
+    var genre: String? = nil
 }
 
 private struct WorkerTrackMetadataPayload: Codable {
@@ -475,7 +572,7 @@ private struct WorkerTrackMetadataPayload: Codable {
     let comment: String?
 }
 
-private struct WorkerOptionsPayload: Codable {
+struct WorkerOptionsPayload: Codable, Equatable {
     let googleAIAPIKey: String?
     let cacheDirectory: String
     let embeddingProfileID: String
@@ -515,14 +612,14 @@ private struct WorkerHealthcheckPayload: Codable {
     let options: WorkerOptionsPayload
 }
 
-private struct WorkerQuerySegment: Codable {
+struct WorkerQuerySegment: Codable, Equatable {
     let segmentType: String
     let embedding: [Double]
 }
 
-private struct WorkerTrackSearchPayload: Codable {
+struct WorkerTrackSearchPayload: Codable, Equatable {
     let command: String
-    let mode: String
+    let mode: WorkerTrackSearchMode
     let queryText: String?
     let queryTrackEmbedding: [Double]?
     let querySegments: [WorkerQuerySegment]

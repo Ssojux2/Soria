@@ -294,33 +294,84 @@ def _search_query_embeddings(
     mode: str,
 ) -> dict[str, list[float]]:
     if mode == "text":
-        query_text = str(payload.get("queryText") or "").strip()
-        if not query_text:
-            return {}
-        client = _build_embedding_client(payload, profile)
-        query_vector = client.embed_batch([query_text])[0]
-        if not query_vector:
-            return {}
-        return {
-            "tracks": query_vector,
-            "intro": query_vector,
-            "middle": query_vector,
-            "outro": query_vector,
-        }
+        return _text_query_embeddings(payload, profile)
 
     if mode == "reference":
-        output: dict[str, list[float]] = {}
-        track_embedding = payload.get("queryTrackEmbedding")
-        if isinstance(track_embedding, list) and track_embedding:
-            output["tracks"] = [float(value) for value in track_embedding]
-        for segment in payload.get("querySegments") or []:
-            segment_type = str(segment.get("segmentType") or "").strip()
-            embedding = segment.get("embedding")
-            if segment_type in {"intro", "middle", "outro"} and isinstance(embedding, list) and embedding:
-                output[segment_type] = [float(value) for value in embedding]
-        return output
+        return _reference_query_embeddings(payload)
+
+    if mode == "hybrid":
+        return _blend_query_embeddings(
+            text_embeddings=_text_query_embeddings(payload, profile),
+            reference_embeddings=_reference_query_embeddings(payload),
+        )
 
     raise ValueError(f"Unsupported search mode: {mode}")
+
+
+def _text_query_embeddings(
+    payload: dict[str, Any],
+    profile: dict[str, Any],
+) -> dict[str, list[float]]:
+    query_text = str(payload.get("queryText") or "").strip()
+    if not query_text:
+        return {}
+    client = _build_embedding_client(payload, profile)
+    query_vector = client.embed_batch([query_text])[0]
+    if not query_vector:
+        return {}
+    normalized = _normalize_query_vector(query_vector)
+    return {
+        "tracks": normalized,
+        "intro": normalized,
+        "middle": normalized,
+        "outro": normalized,
+    }
+
+
+def _reference_query_embeddings(payload: dict[str, Any]) -> dict[str, list[float]]:
+    output: dict[str, list[float]] = {}
+    track_embedding = payload.get("queryTrackEmbedding")
+    if isinstance(track_embedding, list) and track_embedding:
+        output["tracks"] = _normalize_query_vector(track_embedding)
+    for segment in payload.get("querySegments") or []:
+        segment_type = str(segment.get("segmentType") or "").strip()
+        embedding = segment.get("embedding")
+        if segment_type in {"intro", "middle", "outro"} and isinstance(embedding, list) and embedding:
+            output[segment_type] = _normalize_query_vector(embedding)
+    return output
+
+
+def _blend_query_embeddings(
+    text_embeddings: dict[str, list[float]],
+    reference_embeddings: dict[str, list[float]],
+) -> dict[str, list[float]]:
+    output: dict[str, list[float]] = {}
+    for collection in ("tracks", "intro", "middle", "outro"):
+        vectors: list[np.ndarray] = []
+        if collection in text_embeddings:
+            vectors.append(np.array(text_embeddings[collection], dtype=np.float64) * 0.5)
+
+        reference_vector = reference_embeddings.get(collection) or reference_embeddings.get("tracks")
+        if reference_vector:
+            vectors.append(np.array(reference_vector, dtype=np.float64) * 0.5)
+
+        if not vectors:
+            continue
+
+        aggregate = sum(vectors)
+        norm = np.linalg.norm(aggregate)
+        if norm > 0:
+            aggregate = aggregate / norm
+        output[collection] = [float(value) for value in aggregate.tolist()]
+    return output
+
+
+def _normalize_query_vector(vector: list[float]) -> list[float]:
+    array = np.array([float(value) for value in vector], dtype=np.float64)
+    norm = np.linalg.norm(array)
+    if norm > 0:
+        array = array / norm
+    return [float(value) for value in array.tolist()]
 
 
 def _build_where(filters: dict[str, Any]) -> dict[str, Any] | None:

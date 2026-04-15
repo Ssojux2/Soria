@@ -303,6 +303,39 @@ def test_search_tracks_applies_deterministic_late_fusion(monkeypatch: pytest.Mon
     )
 
 
+def test_hybrid_query_embeddings_blend_text_and_reference_evenly(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeEmbeddingClient:
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            assert texts == ["sunrise warmup"]
+            return [[1.0, 0.0]]
+
+    monkeypatch.setattr(worker_main, "_build_embedding_client", lambda payload, profile: FakeEmbeddingClient())
+
+    embeddings = worker_main._search_query_embeddings(
+        {
+            "queryText": "sunrise warmup",
+            "queryTrackEmbedding": [0.0, 1.0],
+            "querySegments": [
+                {"segmentType": "intro", "embedding": [0.0, 1.0]},
+                {"segmentType": "middle", "embedding": [0.0, 1.0]},
+                {"segmentType": "outro", "embedding": [0.0, 1.0]},
+            ],
+        },
+        {
+            "id": "google/gemini-embedding-2-preview",
+            "backend": "google_ai",
+            "model": "gemini-embedding-2-preview",
+        },
+        "hybrid",
+    )
+
+    expected = [math.sqrt(0.5), math.sqrt(0.5)]
+    assert embeddings["tracks"] == pytest.approx(expected)
+    assert embeddings["intro"] == pytest.approx(expected)
+    assert embeddings["middle"] == pytest.approx(expected)
+    assert embeddings["outro"] == pytest.approx(expected)
+
+
 def test_profile_namespace_separates_collections(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _install_fake_chroma(monkeypatch)
 
