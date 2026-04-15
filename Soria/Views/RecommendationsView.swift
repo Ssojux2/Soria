@@ -11,31 +11,39 @@ struct RecommendationsView: View {
     var body: some View {
         let canRunRecommendations = viewModel.canRunRecommendationActions
 
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Recommendations")
-                    .font(.title2.bold())
-                Spacer()
-                Button("Generate") { viewModel.generateRecommendations() }
-                    .disabled(!canRunRecommendations)
-                Button("Build Playlist Path") { viewModel.buildPlaylistPath() }
-                    .disabled(!canRunRecommendations)
+        VStack(alignment: .leading, spacing: 16) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 12) {
+                    Text("Recommendations")
+                        .font(.title2.bold())
+                    Spacer(minLength: 12)
+                    recommendationActions(canRunRecommendations: canRunRecommendations)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Recommendations")
+                        .font(.title2.bold())
+                    recommendationActions(canRunRecommendations: canRunRecommendations)
+                }
             }
 
             Text("Build a mixset from text, selected library tracks, or both together.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: 12) {
-                TextField("Describe the mix vibe or transition you want", text: $viewModel.recommendationQueryText)
-                    .textFieldStyle(.roundedBorder)
-                Stepper(
-                    "Results \(viewModel.recommendationResultLimit)",
-                    value: $viewModel.recommendationResultLimit,
-                    in: RecommendationInputState.minimumResultLimit...RecommendationInputState.maximumResultLimit
-                )
-                .frame(width: 180)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 12) {
+                    recommendationQueryField
+                    resultLimitStepper
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    recommendationQueryField
+                    resultLimitStepper
+                }
             }
+            .layoutPriority(1)
 
             HStack {
                 Text("Key Strictness")
@@ -149,7 +157,7 @@ struct RecommendationsView: View {
                     Text(row.mixabilityTags.prefix(3).joined(separator: ", ").isEmpty ? "-" : row.mixabilityTags.prefix(3).joined(separator: ", "))
                 }
             }
-            .frame(minHeight: 260)
+            .frame(minHeight: 220, maxHeight: .infinity)
 
             if let selectedRecommendation = viewModel.selectedRecommendation {
                 GroupBox("Selected Recommendation Breakdown") {
@@ -193,8 +201,10 @@ struct RecommendationsView: View {
                     Button("Remove") { viewModel.removeFromPlaylist(track.id) }
                 }
             }
+            .frame(minHeight: 140)
         }
         .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
             bpmMinText = viewModel.constraints.targetBPMMin.map { String(format: "%.1f", $0) } ?? ""
             bpmMaxText = viewModel.constraints.targetBPMMax.map { String(format: "%.1f", $0) } ?? ""
@@ -203,6 +213,38 @@ struct RecommendationsView: View {
             maxDurationText = viewModel.constraints.maxDurationMinutes.map { String(format: "%.1f", $0) } ?? ""
         }
         .accessibilityIdentifier("recommendations-info-view")
+    }
+
+    private func recommendationActions(canRunRecommendations: Bool) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                Button("Generate") { viewModel.generateRecommendations() }
+                    .disabled(!canRunRecommendations)
+                Button("Build Playlist Path") { viewModel.buildPlaylistPath() }
+                    .disabled(!canRunRecommendations)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Button("Generate") { viewModel.generateRecommendations() }
+                    .disabled(!canRunRecommendations)
+                Button("Build Playlist Path") { viewModel.buildPlaylistPath() }
+                    .disabled(!canRunRecommendations)
+            }
+        }
+    }
+
+    private var recommendationQueryField: some View {
+        TextField("Describe the mix vibe or transition you want", text: $viewModel.recommendationQueryText)
+            .textFieldStyle(.roundedBorder)
+    }
+
+    private var resultLimitStepper: some View {
+        Stepper(
+            "Results \(viewModel.recommendationResultLimit)",
+            value: $viewModel.recommendationResultLimit,
+            in: RecommendationInputState.minimumResultLimit...RecommendationInputState.maximumResultLimit
+        )
+        .frame(width: 180, alignment: .leading)
     }
 
     private func splitTags(_ input: String) -> [String] {

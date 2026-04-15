@@ -64,6 +64,8 @@ struct ContentView: View {
         switch viewModel.selectedSection {
         case .search:
             return 380
+        case .recommendations:
+            return 460
         default:
             return 260
         }
@@ -73,6 +75,8 @@ struct ContentView: View {
         switch viewModel.selectedSection {
         case .search:
             return 440
+        case .recommendations:
+            return 560
         default:
             return 320
         }
