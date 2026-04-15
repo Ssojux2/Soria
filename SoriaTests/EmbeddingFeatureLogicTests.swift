@@ -103,6 +103,44 @@ extension SoriaTests {
     }
 
     @Test
+    func libraryTrackFilterMatchesWorkflowStatusBuckets() {
+        #expect(LibraryTrackFilter.all.matches(.ready))
+        #expect(LibraryTrackFilter.all.matches(.needsAnalysis))
+        #expect(LibraryTrackFilter.ready.matches(.ready))
+        #expect(LibraryTrackFilter.ready.matches(.needsRefresh) == false)
+        #expect(LibraryTrackFilter.needsAnalysis.matches(.needsAnalysis))
+        #expect(LibraryTrackFilter.needsAnalysis.matches(.ready) == false)
+        #expect(LibraryTrackFilter.needsRefresh.matches(.needsRefresh))
+        #expect(LibraryTrackFilter.needsRefresh.matches(.needsAnalysis) == false)
+    }
+
+    @Test
+    func selectionReadinessSummarizesBlendReferenceState() {
+        let readiness = SelectionReadiness(
+            signature: "a|b|c|d|e",
+            selectedCount: 5,
+            readyCount: 3,
+            needsAnalysisCount: 1,
+            needsRefreshCount: 1
+        )
+
+        #expect(readiness.pendingCount == 2)
+        #expect(readiness.hasReadyTracks)
+        #expect(readiness.isPartiallyReady)
+        #expect(readiness.referenceSummaryText.contains("5-track blend reference"))
+        #expect(readiness.bannerMessage.contains("3"))
+        #expect(readiness.bannerMessage.contains("2"))
+    }
+
+    @Test
+    func mixAssistantModeLabelsDescribeTheTwoPrimaryFlows() {
+        #expect(MixAssistantMode.similarTracks.displayName == "Similar Tracks")
+        #expect(MixAssistantMode.buildMixset.displayName == "Build Mixset")
+        #expect(MixAssistantMode.similarTracks.helperText.contains("selected library tracks"))
+        #expect(MixAssistantMode.buildMixset.helperText.contains("automatic mix paths"))
+    }
+
+    @Test
     func unvalidatedStateDisablesAnalysisAndSearch() {
         let selectedTrack = makeTrack(
             analyzedAt: Date(timeIntervalSince1970: 10),

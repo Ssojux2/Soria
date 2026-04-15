@@ -9,7 +9,11 @@ struct TrackDetailView: View {
                 if !viewModel.selectedTracks.isEmpty {
                     selectionHeader
 
-                    GroupBox("Analysis Controls") {
+                    Text(viewModel.selectionReadiness.referenceSummaryText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    GroupBox("Selection Prep") {
                         VStack(alignment: .leading, spacing: 10) {
                             Picker("Analysis Scope", selection: $viewModel.analysisScope) {
                                 ForEach(AnalysisScope.allCases) { scope in
@@ -363,9 +367,9 @@ struct TrackDetailView: View {
                 ? "Analysis will run for the selected track."
                 : "Analysis will run for all \(count) selected tracks from the library."
         case .unanalyzedTracks:
-            return "Analysis will run for every track that is missing analysis or needs fresh embeddings."
+            return "Analysis will run for every track that still needs preparation for the current setup."
         case .allIndexedTracks:
-            return "Analysis will rebuild embeddings for the entire indexed library."
+            return "Analysis will rebuild preparation data for the entire indexed library."
         }
     }
 
@@ -420,6 +424,44 @@ struct TrackDetailView: View {
             return .purple
         case .unknown:
             return .secondary
+        }
+    }
+}
+
+struct SelectionReadinessBanner: View {
+    let readiness: SelectionReadiness
+    let canAnalyzePending: Bool
+    let onAnalyzePending: () -> Void
+    let onContinueWithReady: () -> Void
+    let onReviewSelection: () -> Void
+
+    var body: some View {
+        GroupBox(readiness.bannerTitle) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(readiness.bannerMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    Button("Prepare Missing Tracks") {
+                        onAnalyzePending()
+                    }
+                    .disabled(!canAnalyzePending)
+
+                    if readiness.hasReadyTracks {
+                        Button("Continue With Ready Tracks") {
+                            onContinueWithReady()
+                        }
+                    }
+
+                    Button("Review Selection") {
+                        onReviewSelection()
+                    }
+
+                    Spacer()
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

@@ -760,10 +760,22 @@ struct SoriaTests {
                 waveformPreview: [0.1, 0.2]
             )
         )
-        try database.markTrackEmbeddingIndexed(
-            trackID: incompleteTrack.id,
-            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id
-        )
+        var capturedError: Error?
+        do {
+            try database.markTrackEmbeddingIndexed(
+                trackID: incompleteTrack.id,
+                embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id
+            )
+        } catch {
+            capturedError = error
+        }
+        #expect({
+            guard let databaseError = capturedError as? DatabaseError else { return false }
+            if case .writeFailed = databaseError {
+                return true
+            }
+            return false
+        }())
 
         let readyIDs = try database.fetchReadyTrackIDs(profileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id)
         #expect(readyIDs == Set([readyTrack.id]))
@@ -828,6 +840,258 @@ struct SoriaTests {
         #expect(snapshot.embeddingUpdatedAt != nil)
         #expect(snapshot.segmentCount == 3)
         #expect(snapshot.embeddedSegmentCount == 3)
+    }
+
+    @Test func membershipNormalizationSupportsUnionScopeQueriesAndScopedReadyCounts() throws {
+        let directory = try makeTemporaryDirectory()
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let database = try LibraryDatabase(databaseURL: databaseURL)
+        let profileID = EmbeddingProfile.googleGeminiEmbedding001.id
+
+        let warmupTrack = try makeReadyTrack(
+            in: database,
+            path: "/music/warmup.mp3",
+            title: "Warmup",
+            profileID: profileID
+        )
+        let peakTrack = try makeReadyTrack(
+            in: database,
+            path: "/music/peak.mp3",
+            title: "Peak",
+            profileID: profileID
+        )
+        let rekordboxOnlyTrack = makeTrack(
+            path: "/music/playlist.mp3",
+            title: "Playlist Only",
+            analyzedAt: Date()
+        )
+        try database.upsertTrack(rekordboxOnlyTrack)
+
+        try database.replaceExternalMetadata(
+            trackID: warmupTrack.id,
+            source: .serato,
+            entries: [
+                ExternalDJMetadata(
+                    id: UUID(),
+                    trackPath: warmupTrack.filePath,
+                    source: .serato,
+                    bpm: 122,
+                    musicalKey: "8A",
+                    rating: nil,
+                    color: nil,
+                    tags: [],
+                    playCount: nil,
+                    lastPlayed: nil,
+                    playlistMemberships: ["Warmup / Deep"],
+                    cueCount: nil,
+                    cuePoints: [],
+                    comment: nil,
+                    vendorTrackID: nil,
+                    analysisState: nil,
+                    analysisCachePath: nil,
+                    syncVersion: nil
+                )
+            ]
+        )
+        try database.replaceExternalMetadata(
+            trackID: peakTrack.id,
+            source: .serato,
+            entries: [
+                ExternalDJMetadata(
+                    id: UUID(),
+                    trackPath: peakTrack.filePath,
+                    source: .serato,
+                    bpm: 126,
+                    musicalKey: "9A",
+                    rating: nil,
+                    color: nil,
+                    tags: [],
+                    playCount: nil,
+                    lastPlayed: nil,
+                    playlistMemberships: ["Peak / Tools"],
+                    cueCount: nil,
+                    cuePoints: [],
+                    comment: nil,
+                    vendorTrackID: nil,
+                    analysisState: nil,
+                    analysisCachePath: nil,
+                    syncVersion: nil
+                )
+            ]
+        )
+        try database.replaceExternalMetadata(
+            trackID: rekordboxOnlyTrack.id,
+            source: .rekordbox,
+            entries: [
+                ExternalDJMetadata(
+                    id: UUID(),
+                    trackPath: rekordboxOnlyTrack.filePath,
+                    source: .rekordbox,
+                    bpm: nil,
+                    musicalKey: nil,
+                    rating: nil,
+                    color: nil,
+                    tags: [],
+                    playCount: nil,
+                    lastPlayed: nil,
+                    playlistMemberships: ["Festival / Day 1 / Sunrise"],
+                    cueCount: nil,
+                    cuePoints: [],
+                    comment: nil,
+                    vendorTrackID: nil,
+                    analysisState: nil,
+                    analysisCachePath: nil,
+                    syncVersion: nil
+                )
+            ]
+        )
+
+        let seratoFacets = try database.fetchMembershipFacets(source: .serato)
+        let rekordboxFacets = try database.fetchMembershipFacets(source: .rekordbox)
+
+        #expect(seratoFacets.count == 2)
+        #expect(seratoFacets.first(where: { $0.membershipPath == "Warmup / Deep" })?.displayName == "Deep")
+        #expect(seratoFacets.first(where: { $0.membershipPath == "Warmup / Deep" })?.parentPath == "Warmup")
+        #expect(seratoFacets.first(where: { $0.membershipPath == "Warmup / Deep" })?.depth == 1)
+        #expect(rekordboxFacets.first?.membershipPath == "Festival / Day 1 / Sunrise")
+        #expect(rekordboxFacets.first?.depth == 2)
+
+        var scopeFilter = LibraryScopeFilter()
+        scopeFilter.seratoMembershipPaths = ["Warmup / Deep", "Peak / Tools"]
+        scopeFilter.rekordboxMembershipPaths = ["Festival / Day 1 / Sunrise"]
+
+        let scopedTrackIDs = try database.fetchTrackIDs(matching: scopeFilter)
+        let scopedReadyTrackIDs = try database.fetchScopedReadyTrackIDs(
+            matching: scopeFilter,
+            profileID: profileID
+        )
+
+        #expect(scopedTrackIDs == Set([warmupTrack.id, peakTrack.id, rekordboxOnlyTrack.id]))
+        #expect(scopedReadyTrackIDs == Set([warmupTrack.id, peakTrack.id]))
+    }
+
+    @Test func scoreSessionRetentionKeepsLatestThirtySessionsPerProfileAndKind() throws {
+        let directory = try makeTemporaryDirectory()
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let database = try LibraryDatabase(databaseURL: databaseURL)
+
+        for index in 0..<31 {
+            try database.insertScoreSession(
+                session: ScoreSession(
+                    id: UUID(),
+                    kind: .search,
+                    embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding001.id,
+                    searchMode: "text",
+                    queryText: "query-\(index)",
+                    seedTrackID: nil,
+                    referenceTrackIDs: [],
+                    scopeFilter: LibraryScopeFilter(),
+                    candidateCountBeforeScope: 10,
+                    candidateCountAfterScope: 5,
+                    resultLimit: 5,
+                    createdAt: Date(timeIntervalSince1970: Double(index))
+                ),
+                candidates: [
+                    ScoreSessionCandidateRecord(
+                        trackID: UUID(),
+                        rank: 1,
+                        finalScore: 0.9,
+                        vectorBreakdown: .zero,
+                        embeddingSimilarity: nil,
+                        bpmCompatibility: nil,
+                        harmonicCompatibility: nil,
+                        energyFlow: nil,
+                        transitionRegionMatch: nil,
+                        externalMetadataScore: nil,
+                        matchedMemberships: [],
+                        matchReasons: [],
+                        snapshot: ScoreSessionCandidateSnapshot(
+                            vectorBreakdown: .zero,
+                            matchedMemberships: [],
+                            matchReasons: [],
+                            analysisFocus: nil,
+                            mixabilityTags: [],
+                            queryMode: "text"
+                        )
+                    )
+                ]
+            )
+        }
+
+        #expect(try sqliteInt(at: databaseURL, sql: "SELECT COUNT(*) FROM score_sessions;") == 30)
+        #expect(try sqliteInt(at: databaseURL, sql: "SELECT COUNT(*) FROM score_session_candidates;") == 30)
+        #expect(try sqliteInt(at: databaseURL, sql: "SELECT COUNT(*) FROM score_sessions WHERE query_text = 'query-0';") == 0)
+        #expect(try sqliteInt(at: databaseURL, sql: "SELECT COUNT(*) FROM score_sessions WHERE query_text = 'query-30';") == 1)
+    }
+
+    @Test func rekordboxPlaylistsPreserveNestedFullPaths() throws {
+        let directory = try makeTemporaryDirectory()
+        let databaseURL = directory.appendingPathComponent("networkRecommend.db")
+        try createSQLiteDatabase(
+            at: databaseURL,
+            statements: [
+                """
+                CREATE TABLE manage_tbl (
+                    SongFilePath TEXT,
+                    AnalyzeFilePath TEXT,
+                    AnalyzeStatus INTEGER,
+                    AnalyzeKey INTEGER,
+                    AnalyzeBPMRange INTEGER,
+                    TrackID TEXT,
+                    TrackCheckSum TEXT,
+                    Duration REAL,
+                    RekordboxVersion TEXT,
+                    AnalyzeVersion TEXT
+                );
+                """,
+                """
+                INSERT INTO manage_tbl VALUES (
+                    '/Users/test/Music/Nested Playlist Track.mp3',
+                    NULL,
+                    NULL,
+                    NULL,
+                    NULL,
+                    'rk-1',
+                    'checksum-1',
+                    240000,
+                    '7.2.8',
+                    '6'
+                );
+                """
+            ]
+        )
+
+        let playlistsURL = directory.appendingPathComponent("masterPlaylists6.xml")
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <DJ_PLAYLISTS>
+          <PLAYLISTS>
+            <NODE Name="root">
+              <NODE Name="Festival">
+                <NODE Name="Day 1">
+                  <NODE Name="Sunrise">
+                    <TRACK Location="/Users/test/Music/Nested Playlist Track.mp3" />
+                  </NODE>
+                </NODE>
+                <NODE Name="Day 2">
+                  <NODE Name="Sunrise">
+                    <TRACK Location="/Users/test/Music/Nested Playlist Track.mp3" />
+                  </NODE>
+                </NODE>
+              </NODE>
+            </NODE>
+          </PLAYLISTS>
+        </DJ_PLAYLISTS>
+        """.write(to: playlistsURL, atomically: true, encoding: .utf8)
+
+        let service = RekordboxLibraryService()
+        let tracks = try service.loadTracks(from: directory)
+
+        #expect(tracks.count == 1)
+        #expect(
+            Set(tracks[0].metadata.playlistMemberships)
+                == Set(["Festival / Day 1 / Sunrise", "Festival / Day 2 / Sunrise"])
+        )
     }
 }
 
@@ -959,4 +1223,67 @@ private func createSQLiteDatabase(at url: URL, statements: [String]) throws {
             throw DatabaseError.queryFailed
         }
     }
+}
+
+private func makeReadyTrack(
+    in database: LibraryDatabase,
+    path: String,
+    title: String,
+    profileID: String
+) throws -> Track {
+    let track = makeTrack(
+        path: path,
+        title: title,
+        analyzedAt: Date()
+    )
+    try database.upsertTrack(track)
+    let segments = [
+        TrackSegment(
+            id: UUID(),
+            trackID: track.id,
+            type: .intro,
+            startSec: 0,
+            endSec: 32,
+            energyScore: 0.5,
+            descriptorText: "intro",
+            vector: [0.1, 0.2, 0.3]
+        )
+    ]
+    try database.replaceSegments(
+        trackID: track.id,
+        segments: segments,
+        analysisSummary: TrackAnalysisSummary(
+            trackID: track.id,
+            segments: segments,
+            trackEmbedding: [0.2, 0.3, 0.4],
+            estimatedBPM: 122,
+            estimatedKey: "8A",
+            brightness: 0.4,
+            onsetDensity: 0.5,
+            rhythmicDensity: 0.6,
+            lowMidHighBalance: [0.3, 0.4, 0.3],
+            waveformPreview: [0.1, 0.2, 0.3]
+        )
+    )
+    try database.markTrackEmbeddingIndexed(trackID: track.id, embeddingProfileID: profileID)
+    return track
+}
+
+private func sqliteInt(at url: URL, sql: String) throws -> Int {
+    var db: OpaquePointer?
+    guard sqlite3_open(url.path, &db) == SQLITE_OK else {
+        throw DatabaseError.openFailed
+    }
+    defer { sqlite3_close(db) }
+
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+        throw DatabaseError.queryFailed
+    }
+    defer { sqlite3_finalize(statement) }
+
+    guard sqlite3_step(statement) == SQLITE_ROW else {
+        throw DatabaseError.queryFailed
+    }
+    return Int(sqlite3_column_int64(statement, 0))
 }

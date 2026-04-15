@@ -502,6 +502,17 @@ final class LibraryDatabase {
                     }
                 }
             }
+
+            let membershipPaths = Array(
+                Set(
+                    entries
+                        .flatMap(\.playlistMemberships)
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+                )
+            ).sorted()
+            try replaceTrackMemberships(trackID: trackID, source: source, membershipPaths: membershipPaths)
+            try rebuildMembershipCatalog()
         }
     }
 
@@ -555,6 +566,266 @@ final class LibraryDatabase {
             }
             return results
         }
+    }
+
+    func fetchMembershipFacets(source: ExternalDJMetadata.Source) throws -> [MembershipFacet] {
+        let sql = """
+        SELECT source, membership_path, display_name, parent_path, depth, track_count
+        FROM membership_catalog
+        WHERE source = ?
+        ORDER BY membership_path COLLATE NOCASE;
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, index: 1, text: source.rawValue)
+            var results: [MembershipFacet] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let sourceText = sqliteString(statement, index: 0),
+                    let facetSource = ExternalDJMetadata.Source(rawValue: sourceText),
+                    let membershipPath = sqliteString(statement, index: 1),
+                    let displayName = sqliteString(statement, index: 2)
+                else {
+                    continue
+                }
+                results.append(
+                    MembershipFacet(
+                        source: facetSource,
+                        membershipPath: membershipPath,
+                        displayName: displayName,
+                        parentPath: sqliteString(statement, index: 3),
+                        depth: Int(sqlite3_column_int64(statement, 4)),
+                        trackCount: Int(sqlite3_column_int64(statement, 5))
+                    )
+                )
+            }
+            return results
+        }
+    }
+
+    func fetchTrackMembershipSnapshots(trackIDs: [UUID]) throws -> [UUID: TrackMembershipSnapshot] {
+        guard !trackIDs.isEmpty else { return [:] }
+
+        let placeholders = Array(repeating: "?", count: trackIDs.count).joined(separator: ", ")
+        let sql = """
+        SELECT track_id, source, membership_path
+        FROM track_memberships
+        WHERE track_id IN (\(placeholders))
+        ORDER BY membership_path COLLATE NOCASE;
+        """
+
+        return try withStatement(sql) { statement in
+            for (offset, trackID) in trackIDs.enumerated() {
+                bind(statement, index: Int32(offset + 1), text: trackID.uuidString)
+            }
+
+            var results: [UUID: TrackMembershipSnapshot] = [:]
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let trackIDText = sqliteString(statement, index: 0),
+                    let trackID = UUID(uuidString: trackIDText),
+                    let sourceText = sqliteString(statement, index: 1),
+                    let source = ExternalDJMetadata.Source(rawValue: sourceText),
+                    let membershipPath = sqliteString(statement, index: 2)
+                else {
+                    continue
+                }
+
+                var snapshot = results[trackID] ?? TrackMembershipSnapshot()
+                switch source {
+                case .serato:
+                    snapshot.seratoMembershipPaths.append(membershipPath)
+                case .rekordbox:
+                    snapshot.rekordboxMembershipPaths.append(membershipPath)
+                }
+                results[trackID] = snapshot
+            }
+
+            return results.mapValues { snapshot in
+                TrackMembershipSnapshot(
+                    seratoMembershipPaths: Array(Set(snapshot.seratoMembershipPaths)).sorted(),
+                    rekordboxMembershipPaths: Array(Set(snapshot.rekordboxMembershipPaths)).sorted()
+                )
+            }
+        }
+    }
+
+    func fetchTrackIDs(matching scopeFilter: LibraryScopeFilter) throws -> Set<UUID> {
+        if scopeFilter.isEmpty {
+            let sql = "SELECT id FROM tracks;"
+            return try withStatement(sql) { statement in
+                var output: Set<UUID> = []
+                while sqlite3_step(statement) == SQLITE_ROW {
+                    guard let idText = sqliteString(statement, index: 0), let id = UUID(uuidString: idText) else {
+                        continue
+                    }
+                    output.insert(id)
+                }
+                return output
+            }
+        }
+
+        let predicate = membershipScopePredicate(for: scopeFilter)
+        let sql = """
+        SELECT DISTINCT track_id
+        FROM track_memberships
+        WHERE \(predicate.sql);
+        """
+
+        return try withStatement(sql) { statement in
+            bindAll(statement, values: predicate.values)
+            var output: Set<UUID> = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let idText = sqliteString(statement, index: 0), let id = UUID(uuidString: idText) else {
+                    continue
+                }
+                output.insert(id)
+            }
+            return output
+        }
+    }
+
+    func fetchTracks(matching scopeFilter: LibraryScopeFilter) throws -> [Track] {
+        if scopeFilter.isEmpty {
+            return try fetchAllTracks()
+        }
+
+        let trackIDs = try fetchTrackIDs(matching: scopeFilter)
+        guard !trackIDs.isEmpty else { return [] }
+        let placeholders = Array(repeating: "?", count: trackIDs.count).joined(separator: ", ")
+        let sql = """
+        SELECT \(trackSelectColumns)
+        FROM tracks
+        WHERE id IN (\(placeholders))
+        ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE;
+        """
+
+        return try withStatement(sql) { statement in
+            bindAll(statement, values: trackIDs.map(\.uuidString))
+            var tracks: [Track] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let track = track(from: statement) {
+                    tracks.append(track)
+                }
+            }
+            return tracks
+        }
+    }
+
+    func fetchScopedReadyTrackIDs(
+        matching scopeFilter: LibraryScopeFilter,
+        profileID: String
+    ) throws -> Set<UUID> {
+        if scopeFilter.isEmpty {
+            return try fetchReadyTrackIDs(profileID: profileID)
+        }
+
+        let predicate = membershipScopePredicate(for: scopeFilter)
+        let sql = """
+        SELECT DISTINCT tracks.id
+        FROM tracks
+        INNER JOIN track_memberships ON track_memberships.track_id = tracks.id
+        WHERE tracks.embedding_profile_id = ?
+          AND tracks.embedding_updated_at IS NOT NULL
+          AND tracks.track_embedding_json IS NOT NULL
+          AND tracks.track_embedding_json <> ''
+          AND tracks.track_embedding_json <> '[]'
+          AND EXISTS (
+            SELECT 1
+            FROM segments
+            WHERE segments.track_id = tracks.id
+              AND segments.embedding_json IS NOT NULL
+              AND segments.embedding_json <> ''
+              AND segments.embedding_json <> '[]'
+          )
+          AND (\(predicate.sql));
+        """
+
+        return try withStatement(sql) { statement in
+            bind(statement, index: 1, text: profileID)
+            bindAll(statement, values: predicate.values, startingAt: 2)
+            var output: Set<UUID> = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let idText = sqliteString(statement, index: 0), let id = UUID(uuidString: idText) else {
+                    continue
+                }
+                output.insert(id)
+            }
+            return output
+        }
+    }
+
+    func insertScoreSession(
+        session: ScoreSession,
+        candidates: [ScoreSessionCandidateRecord],
+        retentionLimit: Int = 30
+    ) throws -> UUID {
+        try withTransaction {
+            let insertSessionSQL = """
+            INSERT INTO score_sessions (
+                id, kind, embedding_profile_id, search_mode, query_text, seed_track_id,
+                reference_track_ids_json, scope_filter_json, candidate_count_before_scope,
+                candidate_count_after_scope, result_limit, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """
+            try withStatement(insertSessionSQL) { statement in
+                bind(statement, index: 1, text: session.id.uuidString)
+                bind(statement, index: 2, text: session.kind.rawValue)
+                bind(statement, index: 3, text: session.embeddingProfileID)
+                bind(statement, index: 4, text: session.searchMode)
+                bind(statement, index: 5, text: session.queryText)
+                bind(statement, index: 6, text: session.seedTrackID?.uuidString)
+                bind(statement, index: 7, text: jsonString(session.referenceTrackIDs.map(\.uuidString)))
+                bind(statement, index: 8, text: jsonString(session.scopeFilter))
+                bind(statement, index: 9, int: session.candidateCountBeforeScope)
+                bind(statement, index: 10, int: session.candidateCountAfterScope)
+                bind(statement, index: 11, int: session.resultLimit)
+                bind(statement, index: 12, text: Self.iso8601.string(from: session.createdAt))
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.writeFailed
+                }
+            }
+
+            let insertCandidateSQL = """
+            INSERT INTO score_session_candidates (
+                session_id, track_id, rank, final_score, vector_fused_score, track_score,
+                intro_score, middle_score, outro_score, embedding_similarity,
+                bpm_compatibility, harmonic_compatibility, energy_flow,
+                transition_region_match, external_metadata_score, best_matched_collection,
+                matched_memberships_json, match_reasons_json, score_snapshot_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """
+            try withStatement(insertCandidateSQL) { statement in
+                for candidate in candidates {
+                    sqlite3_reset(statement)
+                    sqlite3_clear_bindings(statement)
+                    bind(statement, index: 1, text: session.id.uuidString)
+                    bind(statement, index: 2, text: candidate.trackID.uuidString)
+                    bind(statement, index: 3, int: candidate.rank)
+                    sqlite3_bind_double(statement, 4, candidate.finalScore)
+                    sqlite3_bind_double(statement, 5, candidate.vectorBreakdown.fusedScore)
+                    sqlite3_bind_double(statement, 6, candidate.vectorBreakdown.trackScore)
+                    sqlite3_bind_double(statement, 7, candidate.vectorBreakdown.introScore)
+                    sqlite3_bind_double(statement, 8, candidate.vectorBreakdown.middleScore)
+                    sqlite3_bind_double(statement, 9, candidate.vectorBreakdown.outroScore)
+                    bind(statement, index: 10, double: candidate.embeddingSimilarity)
+                    bind(statement, index: 11, double: candidate.bpmCompatibility)
+                    bind(statement, index: 12, double: candidate.harmonicCompatibility)
+                    bind(statement, index: 13, double: candidate.energyFlow)
+                    bind(statement, index: 14, double: candidate.transitionRegionMatch)
+                    bind(statement, index: 15, double: candidate.externalMetadataScore)
+                    bind(statement, index: 16, text: candidate.vectorBreakdown.bestMatchedCollection)
+                    bind(statement, index: 17, text: jsonString(candidate.matchedMemberships))
+                    bind(statement, index: 18, text: jsonString(candidate.matchReasons))
+                    bind(statement, index: 19, text: jsonString(candidate.snapshot))
+                    guard sqlite3_step(statement) == SQLITE_DONE else {
+                        throw DatabaseError.writeFailed
+                    }
+                }
+            }
+
+            try pruneScoreSessions(kind: session.kind, embeddingProfileID: session.embeddingProfileID, retentionLimit: retentionLimit)
+        }
+        return session.id
     }
 
     func fetchLibrarySources() throws -> [LibrarySourceRecord] {
@@ -708,6 +979,68 @@ final class LibraryDatabase {
             last_error TEXT
         );
         """)
+        try exec("""
+        CREATE TABLE IF NOT EXISTS membership_catalog (
+            source TEXT NOT NULL,
+            membership_path TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            parent_path TEXT,
+            depth INTEGER NOT NULL DEFAULT 0,
+            track_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (source, membership_path)
+        );
+        """)
+        try exec("""
+        CREATE TABLE IF NOT EXISTS track_memberships (
+            track_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            membership_path TEXT NOT NULL,
+            PRIMARY KEY (track_id, source, membership_path),
+            FOREIGN KEY(track_id) REFERENCES tracks(id)
+        );
+        """)
+        try exec("""
+        CREATE TABLE IF NOT EXISTS score_sessions (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            embedding_profile_id TEXT NOT NULL,
+            search_mode TEXT,
+            query_text TEXT,
+            seed_track_id TEXT,
+            reference_track_ids_json TEXT NOT NULL DEFAULT '[]',
+            scope_filter_json TEXT NOT NULL DEFAULT '{}',
+            candidate_count_before_scope INTEGER NOT NULL DEFAULT 0,
+            candidate_count_after_scope INTEGER NOT NULL DEFAULT 0,
+            result_limit INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        """)
+        try exec("""
+        CREATE TABLE IF NOT EXISTS score_session_candidates (
+            session_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            rank INTEGER NOT NULL,
+            final_score REAL NOT NULL,
+            vector_fused_score REAL NOT NULL DEFAULT 0,
+            track_score REAL NOT NULL DEFAULT 0,
+            intro_score REAL NOT NULL DEFAULT 0,
+            middle_score REAL NOT NULL DEFAULT 0,
+            outro_score REAL NOT NULL DEFAULT 0,
+            embedding_similarity REAL,
+            bpm_compatibility REAL,
+            harmonic_compatibility REAL,
+            energy_flow REAL,
+            transition_region_match REAL,
+            external_metadata_score REAL,
+            best_matched_collection TEXT NOT NULL,
+            matched_memberships_json TEXT NOT NULL DEFAULT '[]',
+            match_reasons_json TEXT NOT NULL DEFAULT '[]',
+            score_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (session_id, track_id, rank),
+            FOREIGN KEY(session_id) REFERENCES score_sessions(id)
+        );
+        """)
 
         if try !columnExists(table: "tracks", column: "track_embedding_json") {
             try exec("ALTER TABLE tracks ADD COLUMN track_embedding_json TEXT;")
@@ -748,8 +1081,13 @@ final class LibraryDatabase {
         try exec("CREATE INDEX IF NOT EXISTS idx_external_metadata_track ON external_metadata(track_id);")
         try exec("CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(file_path);")
         try exec("CREATE INDEX IF NOT EXISTS idx_library_sources_kind ON library_sources(kind);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_track_memberships_source_path ON track_memberships(source, membership_path);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_track_memberships_track ON track_memberships(track_id);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_score_sessions_kind_profile_created ON score_sessions(kind, embedding_profile_id, created_at DESC);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_score_session_candidates_session ON score_session_candidates(session_id);")
         try migrateLegacyEmbeddingProfileState()
         try invalidateIncompleteEmbeddingState()
+        try rebuildNormalizedMembershipTables()
     }
 
     private func track(from statement: OpaquePointer?) -> Track? {
@@ -956,6 +1294,228 @@ final class LibraryDatabase {
             )
           );
         """)
+    }
+
+    private func replaceTrackMemberships(
+        trackID: UUID,
+        source: ExternalDJMetadata.Source,
+        membershipPaths: [String]
+    ) throws {
+        try withStatement("DELETE FROM track_memberships WHERE track_id = ? AND source = ?;") { statement in
+            bind(statement, index: 1, text: trackID.uuidString)
+            bind(statement, index: 2, text: source.rawValue)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
+        }
+
+        guard !membershipPaths.isEmpty else { return }
+
+        let insertSQL = """
+        INSERT INTO track_memberships (track_id, source, membership_path)
+        VALUES (?, ?, ?);
+        """
+        try withStatement(insertSQL) { statement in
+            for membershipPath in membershipPaths {
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                bind(statement, index: 1, text: trackID.uuidString)
+                bind(statement, index: 2, text: source.rawValue)
+                bind(statement, index: 3, text: membershipPath)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.writeFailed
+                }
+            }
+        }
+    }
+
+    private func rebuildNormalizedMembershipTables() throws {
+        try withTransaction {
+            try exec("DELETE FROM track_memberships;")
+            try exec("DELETE FROM membership_catalog;")
+
+            let sql = """
+            SELECT track_id, source, playlist_memberships_json
+            FROM external_metadata
+            ORDER BY track_id, source;
+            """
+
+            let rows: [(UUID, ExternalDJMetadata.Source, [String])] = try withStatement(sql) { statement in
+                var output: [(UUID, ExternalDJMetadata.Source, [String])] = []
+                while sqlite3_step(statement) == SQLITE_ROW {
+                    guard
+                        let trackIDText = sqliteString(statement, index: 0),
+                        let trackID = UUID(uuidString: trackIDText),
+                        let sourceText = sqliteString(statement, index: 1),
+                        let source = ExternalDJMetadata.Source(rawValue: sourceText)
+                    else {
+                        continue
+                    }
+                    let memberships = Array(
+                        Set(
+                            stringArray(from: sqliteString(statement, index: 2) ?? "[]")
+                                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                                .filter { !$0.isEmpty }
+                        )
+                    ).sorted()
+                    output.append((trackID, source, memberships))
+                }
+                return output
+            }
+
+            for row in rows {
+                try replaceTrackMemberships(trackID: row.0, source: row.1, membershipPaths: row.2)
+            }
+            try rebuildMembershipCatalog()
+        }
+    }
+
+    private func rebuildMembershipCatalog() throws {
+        try exec("DELETE FROM membership_catalog;")
+
+        let nowText = Self.iso8601.string(from: Date())
+        let sql = """
+        SELECT source, membership_path, COUNT(DISTINCT track_id)
+        FROM track_memberships
+        GROUP BY source, membership_path
+        ORDER BY source, membership_path;
+        """
+
+        let rows: [(ExternalDJMetadata.Source, String, Int)] = try withStatement(sql) { statement in
+            var output: [(ExternalDJMetadata.Source, String, Int)] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let sourceText = sqliteString(statement, index: 0),
+                    let source = ExternalDJMetadata.Source(rawValue: sourceText),
+                    let membershipPath = sqliteString(statement, index: 1)
+                else {
+                    continue
+                }
+                output.append((source, membershipPath, Int(sqlite3_column_int64(statement, 2))))
+            }
+            return output
+        }
+
+        guard !rows.isEmpty else { return }
+
+        let insertSQL = """
+        INSERT INTO membership_catalog (
+            source, membership_path, display_name, parent_path, depth, track_count, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?);
+        """
+        try withStatement(insertSQL) { statement in
+            for row in rows {
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                bind(statement, index: 1, text: row.0.rawValue)
+                bind(statement, index: 2, text: row.1)
+                bind(statement, index: 3, text: membershipDisplayName(for: row.1))
+                bind(statement, index: 4, text: membershipParentPath(for: row.1))
+                bind(statement, index: 5, int: membershipDepth(for: row.1))
+                bind(statement, index: 6, int: row.2)
+                bind(statement, index: 7, text: nowText)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.writeFailed
+                }
+            }
+        }
+    }
+
+    private func pruneScoreSessions(
+        kind: ScoreSessionKind,
+        embeddingProfileID: String,
+        retentionLimit: Int
+    ) throws {
+        guard retentionLimit > 0 else { return }
+
+        let sql = """
+        SELECT id
+        FROM score_sessions
+        WHERE kind = ?
+          AND embedding_profile_id = ?
+        ORDER BY created_at DESC
+        LIMIT -1 OFFSET ?;
+        """
+        let doomedSessionIDs = try withStatement(sql) { statement in
+            bind(statement, index: 1, text: kind.rawValue)
+            bind(statement, index: 2, text: embeddingProfileID)
+            bind(statement, index: 3, int: retentionLimit)
+            var output: [String] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let sessionID = sqliteString(statement, index: 0) {
+                    output.append(sessionID)
+                }
+            }
+            return output
+        }
+
+        guard !doomedSessionIDs.isEmpty else { return }
+        let placeholders = Array(repeating: "?", count: doomedSessionIDs.count).joined(separator: ", ")
+
+        try withStatement("DELETE FROM score_session_candidates WHERE session_id IN (\(placeholders));") { statement in
+            bindAll(statement, values: doomedSessionIDs)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
+        }
+        try withStatement("DELETE FROM score_sessions WHERE id IN (\(placeholders));") { statement in
+            bindAll(statement, values: doomedSessionIDs)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
+        }
+    }
+
+    private func membershipDisplayName(for path: String) -> String {
+        let parts = path
+            .split(separator: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return parts.last ?? path
+    }
+
+    private func membershipParentPath(for path: String) -> String? {
+        let parts = path
+            .split(separator: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard parts.count > 1 else { return nil }
+        return parts.dropLast().joined(separator: " / ")
+    }
+
+    private func membershipDepth(for path: String) -> Int {
+        let parts = path
+            .split(separator: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return max(parts.count - 1, 0)
+    }
+
+    private func membershipScopePredicate(for scopeFilter: LibraryScopeFilter) -> (sql: String, values: [String]) {
+        var clauses: [String] = []
+        var values: [String] = []
+
+        func appendClause(source: ExternalDJMetadata.Source, paths: [String]) {
+            guard !paths.isEmpty else { return }
+            let placeholders = Array(repeating: "?", count: paths.count).joined(separator: ", ")
+            clauses.append("(source = ? AND membership_path IN (\(placeholders)))")
+            values.append(source.rawValue)
+            values.append(contentsOf: paths)
+        }
+
+        appendClause(source: .serato, paths: scopeFilter.seratoMembershipPaths)
+        appendClause(source: .rekordbox, paths: scopeFilter.rekordboxMembershipPaths)
+
+        if clauses.isEmpty {
+            return ("1 = 1", [])
+        }
+        return (clauses.joined(separator: " OR "), values)
+    }
+
+    private func bindAll(_ statement: OpaquePointer?, values: [String], startingAt startIndex: Int32 = 1) {
+        for (offset, value) in values.enumerated() {
+            bind(statement, index: startIndex + Int32(offset), text: value)
+        }
     }
 
     static let iso8601: ISO8601DateFormatter = {

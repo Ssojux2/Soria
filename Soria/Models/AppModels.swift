@@ -2,12 +2,327 @@ import Foundation
 
 enum SidebarSection: String, CaseIterable, Identifiable {
     case library = "Library"
-    case search = "Search"
-    case recommendations = "Recommendations"
+    case mixAssistant = "Mix Assistant"
     case exports = "Exports"
     case settings = "Settings"
 
     var id: String { rawValue }
+}
+
+enum MixAssistantMode: String, CaseIterable, Identifiable {
+    case similarTracks = "similar_tracks"
+    case buildMixset = "build_mixset"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .similarTracks:
+            return "Similar Tracks"
+        case .buildMixset:
+            return "Build Mixset"
+        }
+    }
+
+    var helperText: String {
+        switch self {
+        case .similarTracks:
+            return "Use selected library tracks, text, or both together to find matching records."
+        case .buildMixset:
+            return "Use the current selection as the seed for next-track picks and automatic mix paths."
+        }
+    }
+}
+
+enum ScopeFilterTarget: String, Codable, Hashable, Identifiable {
+    case library
+    case search
+    case recommendation
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .library:
+            return "Library"
+        case .search:
+            return "Search"
+        case .recommendation:
+            return "Mix Assistant"
+        }
+    }
+}
+
+struct LibraryScopeFilter: Codable, Hashable {
+    var seratoMembershipPaths: [String] = []
+    var rekordboxMembershipPaths: [String] = []
+
+    var isEmpty: Bool {
+        seratoMembershipPaths.isEmpty && rekordboxMembershipPaths.isEmpty
+    }
+
+    func selectedPaths(for source: ExternalDJMetadata.Source) -> [String] {
+        switch source {
+        case .serato:
+            return seratoMembershipPaths
+        case .rekordbox:
+            return rekordboxMembershipPaths
+        }
+    }
+
+    mutating func setSelectedPaths(_ paths: [String], for source: ExternalDJMetadata.Source) {
+        let normalized = Array(Set(paths)).sorted()
+        switch source {
+        case .serato:
+            seratoMembershipPaths = normalized
+        case .rekordbox:
+            rekordboxMembershipPaths = normalized
+        }
+    }
+}
+
+struct MembershipFacet: Identifiable, Codable, Hashable {
+    let source: ExternalDJMetadata.Source
+    let membershipPath: String
+    let displayName: String
+    let parentPath: String?
+    let depth: Int
+    let trackCount: Int
+
+    var id: String {
+        "\(source.rawValue)::\(membershipPath)"
+    }
+}
+
+struct TrackMembershipSnapshot: Codable, Hashable {
+    var seratoMembershipPaths: [String] = []
+    var rekordboxMembershipPaths: [String] = []
+
+    var isEmpty: Bool {
+        seratoMembershipPaths.isEmpty && rekordboxMembershipPaths.isEmpty
+    }
+
+    var allMembershipPaths: [String] {
+        Array(Set(seratoMembershipPaths + rekordboxMembershipPaths)).sorted()
+    }
+
+    func memberships(for source: ExternalDJMetadata.Source) -> [String] {
+        switch source {
+        case .serato:
+            return seratoMembershipPaths
+        case .rekordbox:
+            return rekordboxMembershipPaths
+        }
+    }
+
+    func matchedPaths(scopeFilter: LibraryScopeFilter) -> [String] {
+        let seratoMatches = Set(seratoMembershipPaths).intersection(scopeFilter.seratoMembershipPaths)
+        let rekordboxMatches = Set(rekordboxMembershipPaths).intersection(scopeFilter.rekordboxMembershipPaths)
+        return Array(seratoMatches.union(rekordboxMatches)).sorted()
+    }
+}
+
+enum ScoreSessionKind: String, Codable, Hashable {
+    case search
+    case recommendation
+    case playlistPath = "playlist_path"
+}
+
+struct VectorScoreBreakdown: Codable, Hashable {
+    var fusedScore: Double
+    var trackScore: Double
+    var introScore: Double
+    var middleScore: Double
+    var outroScore: Double
+    var bestMatchedCollection: String
+
+    static let zero = VectorScoreBreakdown(
+        fusedScore: 0,
+        trackScore: 0,
+        introScore: 0,
+        middleScore: 0,
+        outroScore: 0,
+        bestMatchedCollection: "tracks"
+    )
+}
+
+struct ScoreSessionCandidateSnapshot: Codable, Hashable {
+    var vectorBreakdown: VectorScoreBreakdown
+    var matchedMemberships: [String]
+    var matchReasons: [String]
+    var analysisFocus: AnalysisFocus?
+    var mixabilityTags: [String]
+    var queryMode: String?
+}
+
+struct ScoreSession: Identifiable, Codable, Hashable {
+    let id: UUID
+    let kind: ScoreSessionKind
+    let embeddingProfileID: String
+    let searchMode: String?
+    let queryText: String?
+    let seedTrackID: UUID?
+    let referenceTrackIDs: [UUID]
+    let scopeFilter: LibraryScopeFilter
+    let candidateCountBeforeScope: Int
+    let candidateCountAfterScope: Int
+    let resultLimit: Int
+    let createdAt: Date
+}
+
+struct ScoreSessionCandidateRecord: Codable, Hashable {
+    let trackID: UUID
+    let rank: Int
+    let finalScore: Double
+    let vectorBreakdown: VectorScoreBreakdown
+    let embeddingSimilarity: Double?
+    let bpmCompatibility: Double?
+    let harmonicCompatibility: Double?
+    let energyFlow: Double?
+    let transitionRegionMatch: Double?
+    let externalMetadataScore: Double?
+    let matchedMemberships: [String]
+    let matchReasons: [String]
+    let snapshot: ScoreSessionCandidateSnapshot
+}
+
+enum LibraryTrackFilter: String, CaseIterable, Identifiable {
+    case all = "all"
+    case ready = "ready"
+    case needsAnalysis = "needs_analysis"
+    case needsRefresh = "needs_refresh"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .all:
+            return "All"
+        case .ready:
+            return "Ready"
+        case .needsAnalysis:
+            return "Needs Analysis"
+        case .needsRefresh:
+            return "Needs Refresh"
+        }
+    }
+
+    func matches(_ status: TrackWorkflowStatus) -> Bool {
+        switch self {
+        case .all:
+            return true
+        case .ready:
+            return status == .ready
+        case .needsAnalysis:
+            return status == .needsAnalysis
+        case .needsRefresh:
+            return status == .needsRefresh
+        }
+    }
+}
+
+enum TrackWorkflowStatus: String, Codable, Hashable {
+    case ready = "ready"
+    case needsAnalysis = "needs_analysis"
+    case needsRefresh = "needs_refresh"
+
+    var displayName: String {
+        switch self {
+        case .ready:
+            return "Ready"
+        case .needsAnalysis:
+            return "Needs Analysis"
+        case .needsRefresh:
+            return "Needs Refresh"
+        }
+    }
+
+    var helperText: String {
+        switch self {
+        case .ready:
+            return "This track can be used right away in similarity and mixset flows."
+        case .needsAnalysis:
+            return "This track has not been analyzed yet."
+        case .needsRefresh:
+            return "This track needs to be prepared again for the current similarity setup."
+        }
+    }
+}
+
+struct SelectionReadiness: Equatable {
+    let signature: String
+    let selectedCount: Int
+    let readyCount: Int
+    let needsAnalysisCount: Int
+    let needsRefreshCount: Int
+
+    var pendingCount: Int {
+        needsAnalysisCount + needsRefreshCount
+    }
+
+    var hasSelection: Bool {
+        selectedCount > 0
+    }
+
+    var hasReadyTracks: Bool {
+        readyCount > 0
+    }
+
+    var hasPendingTracks: Bool {
+        pendingCount > 0
+    }
+
+    var isPartiallyReady: Bool {
+        hasReadyTracks && hasPendingTracks
+    }
+
+    var referenceSummaryText: String {
+        guard hasSelection else {
+            return "Select tracks from the library to start."
+        }
+        if selectedCount == 1 {
+            return hasReadyTracks
+                ? "1 selected track is ready to use."
+                : "1 selected track needs preparation before it can drive similarity."
+        }
+        if hasPendingTracks {
+            return "\(selectedCount)-track blend reference: \(readyCount) ready, \(pendingCount) still need preparation."
+        }
+        return "\(selectedCount)-track blend reference is ready."
+    }
+
+    var bannerTitle: String {
+        if isPartiallyReady {
+            return "Finish Preparing This Selection"
+        }
+        return "Prepare This Selection"
+    }
+
+    var bannerMessage: String {
+        if !hasSelection {
+            return "Select one or more tracks in the library first."
+        }
+        if isPartiallyReady {
+            return "\(readyCount) selected track(s) are ready now. \(pendingCount) more need analysis or a refresh for the current setup."
+        }
+        if hasPendingTracks {
+            return "\(pendingCount) selected track(s) need analysis or a refresh before they can be used together."
+        }
+        return "Everything in the current selection is ready."
+    }
+}
+
+struct ScopedTrackStatistics: Equatable {
+    var total: Int = 0
+    var ready: Int = 0
+    var needsAnalysis: Int = 0
+    var needsRefresh: Int = 0
+    var seratoCoverage: Int = 0
+    var rekordboxCoverage: Int = 0
+
+    var needsPreparation: Int {
+        needsAnalysis + needsRefresh
+    }
 }
 
 struct ScanJobProgress {
@@ -66,22 +381,22 @@ enum AnalysisScope: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .selectedTrack:
-            return "Selected Track"
+            return "Selected Tracks"
         case .unanalyzedTracks:
-            return "Unanalyzed / Stale"
+            return "Needs Prep"
         case .allIndexedTracks:
-            return "All Indexed Tracks"
+            return "Re-prepare Library"
         }
     }
 
     var helperText: String {
         switch self {
         case .selectedTrack:
-            return "Analyze currently selected track(s)."
+            return "Analyze the track or tracks you selected in the library."
         case .unanalyzedTracks:
-            return "Process tracks that have never been analyzed or need fresh embeddings for the active profile."
+            return "Process tracks that have never been analyzed or need fresh preparation for the current setup."
         case .allIndexedTracks:
-            return "Rebuild embeddings for the whole indexed library. This can take time and consume API quota."
+            return "Rebuild preparation data for the whole indexed library. This can take time and consume API quota."
         }
     }
 
@@ -328,6 +643,9 @@ struct TrackSearchResult: Identifiable, Hashable {
     let analysisFocus: AnalysisFocus?
     let mixabilityTags: [String]
     let matchReasons: [String]
+    let scoreSessionID: UUID?
+    let matchedMemberships: [String]
+    let vectorBreakdown: VectorScoreBreakdown
 
     var id: UUID { track.id }
 }

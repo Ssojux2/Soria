@@ -221,6 +221,54 @@ def test_embed_descriptors_requires_non_empty_embeddings(monkeypatch: pytest.Mon
         )
 
 
+def test_build_query_embeddings_returns_profile_and_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        worker_main,
+        "_resolve_embedding_profile",
+        lambda payload: {"id": "google/gemini-embedding-2-preview", "model": "gemini-embedding-2-preview"},
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_search_query_embeddings(
+        payload: dict[str, object],
+        profile: dict[str, object],
+        mode: str,
+    ) -> dict[str, list[float]]:
+        captured["payload"] = payload
+        captured["profile"] = profile
+        captured["mode"] = mode
+        return {
+            "tracks": [0.9, 0.1],
+            "intro": [0.7, 0.3],
+        }
+
+    monkeypatch.setattr(worker_main, "_search_query_embeddings", fake_search_query_embeddings)
+
+    payload = {
+        "command": "build_query_embeddings",
+        "mode": "hybrid",
+        "queryText": "warm sunrise opener",
+        "options": {"embeddingProfileID": "google/gemini-embedding-2-preview"},
+    }
+
+    result = worker_main.handle_build_query_embeddings(payload)
+
+    assert result == {
+        "queryEmbeddings": {
+            "tracks": [0.9, 0.1],
+            "intro": [0.7, 0.3],
+        },
+        "embeddingProfileID": "google/gemini-embedding-2-preview",
+    }
+    assert captured["mode"] == "hybrid"
+    assert captured["payload"] == payload
+    assert captured["profile"] == {
+        "id": "google/gemini-embedding-2-preview",
+        "model": "gemini-embedding-2-preview",
+    }
+
+
 def test_search_tracks_applies_deterministic_late_fusion(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _install_fake_chroma(monkeypatch)
 

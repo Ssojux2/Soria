@@ -30,6 +30,7 @@ struct RecommendationEngine {
         embeddingsByTrackID: [UUID: [Double]],
         summariesByTrackID: [UUID: TrackAnalysisSummary],
         vectorSimilarityByPath: [String: Double],
+        vectorBreakdownByPath: [String: VectorScoreBreakdown] = [:],
         constraints: RecommendationConstraints,
         weights: RecommendationWeights,
         limit: Int,
@@ -50,8 +51,15 @@ struct RecommendationEngine {
         return filtered.compactMap { track in
             let trackEmbedding = embeddingsByTrackID[track.id] ?? []
             let fallbackEmbed = cosineSimilarity(seedEmbedding, trackEmbedding)
-            let vectorHint = vectorSimilarityByPath[track.filePath]
-            let embedScore = vectorHint ?? fallbackEmbed
+            let vectorBreakdown = vectorBreakdownByPath[track.filePath] ?? VectorScoreBreakdown(
+                fusedScore: vectorSimilarityByPath[track.filePath] ?? fallbackEmbed,
+                trackScore: vectorSimilarityByPath[track.filePath] ?? fallbackEmbed,
+                introScore: 0,
+                middleScore: 0,
+                outroScore: 0,
+                bestMatchedCollection: "tracks"
+            )
+            let embedScore = vectorBreakdown.fusedScore
             let bpmScore = bpmCompatibility(seed: seed.bpm, next: track.bpm)
             let harmonicScore = keyCompatibility(seed: seed.musicalKey, next: track.musicalKey, strictness: constraints.keyStrictness)
             let energyScore = energyFlow(
@@ -85,13 +93,16 @@ struct RecommendationEngine {
                 track: track,
                 score: breakdown.finalScore(weights: weights),
                 breakdown: breakdown,
+                vectorBreakdown: vectorBreakdown,
                 analysisFocus: summary?.analysisFocus,
                 mixabilityTags: summary?.mixabilityTags ?? [],
                 matchReasons: matchReasons(
                     track: track,
                     summary: summary,
                     breakdown: breakdown
-                )
+                ),
+                matchedMemberships: [],
+                scoreSessionID: nil
             )
         }
         .sorted { $0.score > $1.score }

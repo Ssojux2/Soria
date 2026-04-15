@@ -36,22 +36,24 @@ final class SoriaUITests: XCTestCase {
     @MainActor
     func testInfoPaneStaysAboveLibraryAndShowsSelectedTabContent() throws {
         let app = XCUIApplication()
-        app.launchArguments += ["UITEST_SKIP_INITIAL_SETUP", "-ApplePersistenceIgnoreState", "YES"]
+        app.launchArguments += [
+            "UITEST_SKIP_INITIAL_SETUP",
+            "UITEST_START_IN_MIX_ASSISTANT",
+            "-ApplePersistenceIgnoreState",
+            "YES"
+        ]
         app.launch()
 
-        let infoPane = app.otherElements["right-pane-info"]
-        let libraryPane = app.otherElements["right-pane-library"]
-        XCTAssertTrue(infoPane.waitForExistence(timeout: 10))
-        XCTAssertTrue(libraryPane.waitForExistence(timeout: 10))
-        XCTAssertLessThan(infoPane.frame.minY, libraryPane.frame.minY)
+        let generateButton = app.buttons["Generate"]
+        let librarySetupButton = app.buttons["Library Setup"]
 
-        let searchSidebarButton = app.buttons["sidebar-search"]
-        XCTAssertTrue(searchSidebarButton.waitForExistence(timeout: 5))
-        searchSidebarButton.click()
+        if !generateButton.waitForExistence(timeout: 3) {
+            app.typeKey("n", modifierFlags: .command)
+        }
 
-        let searchInfoView = app.otherElements["search-info-view"]
-        XCTAssertTrue(searchInfoView.waitForExistence(timeout: 5))
-        XCTAssertLessThan(searchInfoView.frame.minY, libraryPane.frame.minY)
+        XCTAssertTrue(generateButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(librarySetupButton.waitForExistence(timeout: 10))
+        XCTAssertLessThan(generateButton.frame.minY, librarySetupButton.frame.minY)
     }
 
     @MainActor

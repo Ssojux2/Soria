@@ -23,9 +23,12 @@ struct RecommendationCandidate: Identifiable, Hashable {
     let track: Track
     let score: Double
     let breakdown: ScoreBreakdown
+    let vectorBreakdown: VectorScoreBreakdown
     let analysisFocus: AnalysisFocus?
     let mixabilityTags: [String]
     let matchReasons: [String]
+    let matchedMemberships: [String]
+    let scoreSessionID: UUID?
 }
 
 struct RecommendationWeights: Codable, Hashable {

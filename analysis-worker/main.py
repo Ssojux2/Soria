@@ -52,6 +52,9 @@ def main() -> int:
         if command == "embed_descriptors":
             _print_json(handle_embed_descriptors(payload))
             return 0
+        if command == "build_query_embeddings":
+            _print_json(handle_build_query_embeddings(payload))
+            return 0
         if command == "search_tracks":
             _print_json(handle_search_tracks(payload))
             return 0
@@ -192,6 +195,16 @@ def handle_search_tracks(payload: dict[str, Any]) -> dict[str, Any]:
         if item.get("filePath") and str(item["filePath"]) not in excluded_paths
     ]
     return {"results": filtered[:limit]}
+
+
+def handle_build_query_embeddings(payload: dict[str, Any]) -> dict[str, Any]:
+    profile = _resolve_embedding_profile(payload)
+    mode = str(payload.get("mode") or "text").strip()
+    query_embeddings = _search_query_embeddings(payload, profile, mode)
+    return {
+        "queryEmbeddings": query_embeddings,
+        "embeddingProfileID": profile["id"],
+    }
 
 
 def handle_healthcheck(payload: dict[str, Any]) -> dict[str, Any]:

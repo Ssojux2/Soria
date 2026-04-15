@@ -560,22 +560,48 @@ final class RekordboxLibraryService {
         guard fileManager.fileExists(atPath: xmlURL.path),
               let data = try? Data(contentsOf: xmlURL),
               let document = try? XMLDocument(data: data),
-              let nodes = try? document.nodes(forXPath: "//PLAYLISTS//NODE[@Name]")
+              let playlistContainers = try? document.nodes(forXPath: "//PLAYLISTS")
         else {
             return [:]
         }
 
         var results: [String: [String]] = [:]
-        for case let element as XMLElement in nodes {
-            guard let playlistName = element.attribute(forName: "Name")?.stringValue else { continue }
-            for member in element.elements(forName: "TRACK") {
-                guard let location = member.attribute(forName: "Location")?.stringValue else { continue }
-                let normalizedPath = TrackPathNormalizer.normalizedAbsolutePath(location)
-                guard !normalizedPath.isEmpty else { continue }
-                results[normalizedPath, default: []].append(playlistName)
+        for case let container as XMLElement in playlistContainers {
+            for child in container.elements(forName: "NODE") {
+                collectPlaylistMemberships(from: child, path: [], results: &results)
             }
         }
         return results
+    }
+
+    private func collectPlaylistMemberships(
+        from node: XMLElement,
+        path: [String],
+        results: inout [String: [String]]
+    ) {
+        let rawName = node.attribute(forName: "Name")?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedName: String? = {
+            guard let rawName, !rawName.isEmpty else { return nil }
+            let lowered = rawName.lowercased()
+            if lowered == "root" || lowered == "playlists" || lowered.hasSuffix(" root") {
+                return nil
+            }
+            return rawName
+        }()
+
+        let currentPath = normalizedName.map { path + [$0] } ?? path
+        let playlistPath = currentPath.joined(separator: " / ")
+
+        for member in node.elements(forName: "TRACK") {
+            guard let location = member.attribute(forName: "Location")?.stringValue else { continue }
+            let normalizedTrackPath = TrackPathNormalizer.normalizedAbsolutePath(location)
+            guard !normalizedTrackPath.isEmpty, !playlistPath.isEmpty else { continue }
+            results[normalizedTrackPath, default: []].append(playlistPath)
+        }
+
+        for child in node.elements(forName: "NODE") {
+            collectPlaylistMemberships(from: child, path: currentPath, results: &results)
+        }
     }
 
     private static func normalizedDuration(_ rawValue: Double?) -> Double? {

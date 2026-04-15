@@ -50,6 +50,11 @@ struct WorkerTrackSearchResponse: Codable {
     let results: [WorkerTrackSearchResult]
 }
 
+struct WorkerQueryEmbeddingsResponse: Codable {
+    let queryEmbeddings: [String: [Double]]
+    let embeddingProfileID: String
+}
+
 struct WorkerValidationResponse: Codable {
     let ok: Bool
     let profileID: String
@@ -164,6 +169,29 @@ final class PythonWorkerClient {
     func healthcheck() async throws -> WorkerHealthcheckResponse {
         let payload = WorkerHealthcheckPayload(
             command: "healthcheck",
+            options: workerOptions()
+        )
+        return try await runGeneric(payload: payload, commandName: payload.command)
+    }
+
+    func buildQueryEmbeddings(
+        mode: WorkerTrackSearchMode,
+        queryText: String?,
+        trackEmbedding: [Double]?,
+        segments: [TrackSegment]
+    ) async throws -> WorkerQueryEmbeddingsResponse {
+        let payload = WorkerBuildQueryEmbeddingsPayload(
+            command: "build_query_embeddings",
+            mode: mode,
+            queryText: queryText,
+            queryTrackEmbedding: trackEmbedding,
+            querySegments: segments.compactMap { segment in
+                guard let vector = segment.vector, !vector.isEmpty else { return nil }
+                return WorkerQuerySegment(
+                    segmentType: segment.type.rawValue,
+                    embedding: vector
+                )
+            },
             options: workerOptions()
         )
         return try await runGeneric(payload: payload, commandName: payload.command)
@@ -663,7 +691,7 @@ final class PythonWorkerClient {
             limit: limit,
             excludeTrackPaths: excludeTrackPaths,
             filters: filters,
-            weights: weights ?? defaultWeights(for: mode),
+            weights: weights ?? defaultSearchWeights(for: mode),
             options: options
         )
     }
@@ -689,7 +717,7 @@ final class PythonWorkerClient {
         "outro": 0.10
     ]
 
-    private static func defaultWeights(for mode: WorkerTrackSearchMode) -> [String: Double] {
+    static func defaultSearchWeights(for mode: WorkerTrackSearchMode) -> [String: Double] {
         switch mode {
         case .text:
             textSearchWeights
@@ -840,6 +868,15 @@ private struct WorkerValidatePayload: Codable {
 
 private struct WorkerHealthcheckPayload: Codable {
     let command: String
+    let options: WorkerOptionsPayload
+}
+
+private struct WorkerBuildQueryEmbeddingsPayload: Codable {
+    let command: String
+    let mode: WorkerTrackSearchMode
+    let queryText: String?
+    let queryTrackEmbedding: [Double]?
+    let querySegments: [WorkerQuerySegment]
     let options: WorkerOptionsPayload
 }
 

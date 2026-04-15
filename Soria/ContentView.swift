@@ -1,7 +1,10 @@
+import AppKit
+import CoreGraphics
 import SwiftUI
 
 struct ContentView: View {
     @StateObject private var viewModel = AppViewModel()
+    @State private var hasScheduledMainWindowRecovery = false
 
     var body: some View {
         NavigationSplitView {
@@ -20,19 +23,25 @@ struct ContentView: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .accessibilityIdentifier("sidebar-\(section.rawValue.lowercased())")
+                    .accessibilityIdentifier(
+                        "sidebar-\(section.rawValue.replacingOccurrences(of: " ", with: "-").lowercased())"
+                    )
                 }
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220)
         } detail: {
             VSplitView {
-                selectedInfoPane
+                ZStack {
+                    selectedInfoPane
+                }
                     .frame(minHeight: selectedInfoPaneMinHeight, idealHeight: selectedInfoPaneIdealHeight)
                     .layoutPriority(1)
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("right-pane-info")
 
-                LibraryView(viewModel: viewModel)
+                ZStack {
+                    LibraryView(viewModel: viewModel)
+                }
                     .frame(minHeight: 340, idealHeight: 420)
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("right-pane-library")
@@ -40,18 +49,76 @@ struct ContentView: View {
             .navigationTitle(viewModel.selectedSection.rawValue)
         }
         .frame(minWidth: 1280, minHeight: 800)
+        .background(
+            WindowAccessor { window in
+                recoverMainWindowIfNeeded(window)
+            }
+        )
         .sheet(isPresented: $viewModel.isShowingInitialSetupSheet) {
             InitialSetupSheet(viewModel: viewModel)
         }
+    }
+
+    private func recoverMainWindowIfNeeded(_ window: NSWindow) {
+        guard !hasScheduledMainWindowRecovery else { return }
+
+        hasScheduledMainWindowRecovery = true
+        window.isRestorable = false
+        window.collectionBehavior.insert(.moveToActiveSpace)
+
+        for delay in [0.0, 0.35, 1.0, 2.0, 4.0, 6.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                recoverMainWindowFrame(window)
+            }
+        }
+    }
+
+    private func recoverMainWindowFrame(_ window: NSWindow) {
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+
+        guard let targetScreen = primaryDisplayScreen() else { return }
+
+        let currentFrame = window.frame
+        let targetFrame = targetScreen.visibleFrame
+        let overlap = currentFrame.intersection(targetFrame)
+        let overlapsPrimaryDisplay = !overlap.isNull && overlap.width >= 180 && overlap.height >= 180
+
+        guard !overlapsPrimaryDisplay else { return }
+
+        let width = min(max(currentFrame.width, 1280), targetFrame.width)
+        let height = min(max(currentFrame.height, 800), targetFrame.height)
+        let origin = NSPoint(
+            x: targetFrame.midX - (width / 2),
+            y: targetFrame.midY - (height / 2)
+        )
+        let adjustedOrigin = NSPoint(
+            x: max(targetFrame.minX, min(origin.x, targetFrame.maxX - width)),
+            y: max(targetFrame.minY, min(origin.y, targetFrame.maxY - height))
+        )
+        let recoveredFrame = NSRect(origin: adjustedOrigin, size: NSSize(width: width, height: height)).integral
+
+        window.setFrame(recoveredFrame, display: true, animate: false)
+        window.orderFrontRegardless()
+    }
+
+    private func primaryDisplayScreen() -> NSScreen? {
+        let mainDisplayID = CGMainDisplayID()
+
+        return NSScreen.screens.first {
+            guard let screenNumber = $0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return false
+            }
+
+            return CGDirectDisplayID(screenNumber.uint32Value) == mainDisplayID
+        } ?? NSScreen.screens.first
     }
 
     private func icon(for section: SidebarSection) -> String {
         switch section {
         case .library:
             return "music.note.list"
-        case .search:
-            return "magnifyingglass"
-        case .recommendations:
+        case .mixAssistant:
             return "sparkles"
         case .exports:
             return "square.and.arrow.up"
@@ -62,9 +129,7 @@ struct ContentView: View {
 
     private var selectedInfoPaneMinHeight: CGFloat {
         switch viewModel.selectedSection {
-        case .search:
-            return 380
-        case .recommendations:
+        case .mixAssistant:
             return 460
         default:
             return 260
@@ -73,9 +138,7 @@ struct ContentView: View {
 
     private var selectedInfoPaneIdealHeight: CGFloat {
         switch viewModel.selectedSection {
-        case .search:
-            return 440
-        case .recommendations:
+        case .mixAssistant:
             return 560
         default:
             return 320
@@ -87,14 +150,32 @@ struct ContentView: View {
         switch viewModel.selectedSection {
         case .library:
             TrackDetailView(viewModel: viewModel)
-        case .search:
-            SearchView(viewModel: viewModel)
-        case .recommendations:
-            RecommendationsView(viewModel: viewModel)
+        case .mixAssistant:
+            MixAssistantView(viewModel: viewModel)
         case .exports:
             ExportsView(viewModel: viewModel)
         case .settings:
             SettingsView(viewModel: viewModel)
+        }
+    }
+}
+
+private struct WindowAccessor: NSViewRepresentable {
+    let onResolveWindow: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { [weak view] in
+            guard let window = view?.window else { return }
+            onResolveWindow(window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { [weak nsView] in
+            guard let window = nsView?.window else { return }
+            onResolveWindow(window)
         }
     }
 }
