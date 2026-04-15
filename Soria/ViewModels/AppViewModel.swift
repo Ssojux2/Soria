@@ -1789,8 +1789,8 @@ final class AppViewModel: ObservableObject {
     }
 
     private func persistAnalysisSettings() throws {
-        AppSettingsStore.savePythonExecutablePath(pythonExecutablePath)
-        AppSettingsStore.saveWorkerScriptPath(workerScriptPath)
+        pythonExecutablePath = AppSettingsStore.savePythonExecutablePath(pythonExecutablePath)
+        workerScriptPath = AppSettingsStore.saveWorkerScriptPath(workerScriptPath)
         AppSettingsStore.saveEmbeddingProfile(embeddingProfile)
         try AppSettingsStore.saveGoogleAIAPIKey(googleAIAPIKey)
     }

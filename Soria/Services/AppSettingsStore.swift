@@ -12,36 +12,73 @@ enum AppSettingsStore {
     private static let lastValidatedAtKey = "settings.lastValidatedAt"
     private static let automaticVectorRepairSignaturePrefix = "settings.vectorRepairSignature."
     private static let automaticVectorRepairAtPrefix = "settings.vectorRepairAt."
+    private static let protectedUserFolders = ["Documents", "Desktop", "Downloads"]
 
     static func loadPythonExecutablePath() -> String {
         if let environmentValue = ProcessInfo.processInfo.environment["SORIA_PYTHON"], !environmentValue.isEmpty {
             return environmentValue
         }
+        let bundledPath = bundledPythonExecutablePath()
+        let detectedProjectPath = detectedProjectPythonExecutablePath()
         if let storedValue = UserDefaults.standard.string(forKey: pythonExecutableKey), !storedValue.isEmpty {
-            return storedValue
+            let resolved = resolvedWorkerRuntimePath(
+                storedValue: storedValue,
+                bundledPath: bundledPath,
+                detectedProjectPath: detectedProjectPath
+            )
+            if resolved != storedValue {
+                UserDefaults.standard.set(resolved, forKey: pythonExecutableKey)
+            }
+            return resolved
         }
-        if let detected = detectedPythonExecutablePath() {
+        if let detected = bundledPath ?? detectedProjectPath {
             return detected
         }
         return "/usr/bin/python3"
     }
 
-    static func savePythonExecutablePath(_ path: String) {
-        UserDefaults.standard.set(path.trimmingCharacters(in: .whitespacesAndNewlines), forKey: pythonExecutableKey)
+    @discardableResult
+    static func savePythonExecutablePath(_ path: String) -> String {
+        let resolved = resolvedWorkerRuntimePath(
+            storedValue: path,
+            bundledPath: bundledPythonExecutablePath(),
+            detectedProjectPath: detectedProjectPythonExecutablePath()
+        )
+        UserDefaults.standard.set(resolved, forKey: pythonExecutableKey)
+        return resolved
     }
 
     static func loadWorkerScriptPath() -> String {
         if let environmentValue = ProcessInfo.processInfo.environment["SORIA_WORKER_SCRIPT"], !environmentValue.isEmpty {
             return environmentValue
         }
+        let bundledPath = bundledWorkerScriptPath()
+        let detectedProjectPath = detectedProjectWorkerScriptPath()
         if let storedValue = UserDefaults.standard.string(forKey: workerScriptKey), !storedValue.isEmpty {
-            return storedValue
+            let resolved = resolvedWorkerRuntimePath(
+                storedValue: storedValue,
+                bundledPath: bundledPath,
+                detectedProjectPath: detectedProjectPath
+            )
+            if resolved != storedValue {
+                UserDefaults.standard.set(resolved, forKey: workerScriptKey)
+            }
+            return resolved
         }
-        return detectedWorkerScriptPath() ?? "\(FileManager.default.currentDirectoryPath)/analysis-worker/main.py"
+        return bundledPath
+            ?? detectedProjectPath
+            ?? "\(FileManager.default.currentDirectoryPath)/analysis-worker/main.py"
     }
 
-    static func saveWorkerScriptPath(_ path: String) {
-        UserDefaults.standard.set(path.trimmingCharacters(in: .whitespacesAndNewlines), forKey: workerScriptKey)
+    @discardableResult
+    static func saveWorkerScriptPath(_ path: String) -> String {
+        let resolved = resolvedWorkerRuntimePath(
+            storedValue: path,
+            bundledPath: bundledWorkerScriptPath(),
+            detectedProjectPath: detectedProjectWorkerScriptPath()
+        )
+        UserDefaults.standard.set(resolved, forKey: workerScriptKey)
+        return resolved
     }
 
     static func loadGoogleAIAPIKey() -> String {
@@ -165,15 +202,53 @@ enum AppSettingsStore {
     }
 
     static func detectedPythonExecutablePath() -> String? {
+        bundledPythonExecutablePath() ?? detectedProjectPythonExecutablePath()
+    }
+
+    static func detectedWorkerScriptPath() -> String? {
+        bundledWorkerScriptPath() ?? detectedProjectWorkerScriptPath()
+    }
+
+    static func bundledPythonExecutablePath(bundle: Bundle = .main) -> String? {
+        guard let resourcesURL = bundle.resourceURL else { return nil }
+        let candidate = resourcesURL.appendingPathComponent("analysis-worker/.venv/bin/python").path
+        return FileManager.default.isExecutableFile(atPath: candidate) ? candidate : nil
+    }
+
+    static func bundledWorkerScriptPath(bundle: Bundle = .main) -> String? {
+        guard let resourcesURL = bundle.resourceURL else { return nil }
+        let candidate = resourcesURL.appendingPathComponent("analysis-worker/main.py").path
+        return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
+    }
+
+    static func detectedProjectPythonExecutablePath() -> String? {
         guard let projectRoot else { return nil }
         let candidate = projectRoot.appendingPathComponent("analysis-worker/.venv/bin/python").path
         return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
     }
 
-    static func detectedWorkerScriptPath() -> String? {
+    static func detectedProjectWorkerScriptPath() -> String? {
         guard let projectRoot else { return nil }
         let candidate = projectRoot.appendingPathComponent("analysis-worker/main.py").path
         return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
+    }
+
+    static func resolvedWorkerRuntimePath(
+        storedValue: String,
+        bundledPath: String?,
+        detectedProjectPath: String?
+    ) -> String {
+        let trimmed = storedValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return bundledPath ?? detectedProjectPath ?? "" }
+        guard let bundledPath else { return trimmed }
+        guard shouldPreferBundledRuntime(
+            storedPath: trimmed,
+            bundledPath: bundledPath,
+            detectedProjectPath: detectedProjectPath
+        ) else {
+            return trimmed
+        }
+        return bundledPath
     }
 
     static var projectRoot: URL? {
@@ -207,5 +282,34 @@ enum AppSettingsStore {
         profileID.unicodeScalars.map { scalar in
             CharacterSet.alphanumerics.contains(scalar) ? String(scalar) : "_"
         }.joined()
+    }
+
+    private static func shouldPreferBundledRuntime(
+        storedPath: String,
+        bundledPath: String,
+        detectedProjectPath: String?
+    ) -> Bool {
+        let standardizedStored = URL(fileURLWithPath: storedPath).standardizedFileURL.path
+        let standardizedBundled = URL(fileURLWithPath: bundledPath).standardizedFileURL.path
+        if standardizedStored == standardizedBundled {
+            return false
+        }
+        if let detectedProjectPath,
+           standardizedStored == URL(fileURLWithPath: detectedProjectPath).standardizedFileURL.path
+        {
+            return true
+        }
+        if !FileManager.default.fileExists(atPath: standardizedStored) {
+            return true
+        }
+        return isProtectedAnalysisWorkerPath(standardizedStored)
+    }
+
+    private static func isProtectedAnalysisWorkerPath(_ path: String) -> Bool {
+        guard path.contains("/analysis-worker/") else { return false }
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).standardizedFileURL.path
+        return protectedUserFolders.contains { folder in
+            path.hasPrefix(home + "/\(folder)/")
+        }
     }
 }

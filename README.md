@@ -131,6 +131,18 @@ xcodebuild build \
   CODE_SIGNING_REQUIRED=NO
 ```
 
+To build and launch the desktop app from Terminal, use:
+```bash
+./Scripts/run_debug_app.sh
+```
+
+If you need a clean rebuild first:
+```bash
+./Scripts/run_debug_app.sh --clean
+```
+
+Use `open .../Soria.app`, not `.../Contents/MacOS/Soria`, when launching from Terminal. The app is a macOS bundle and is more reliable when started through Launch Services.
+
 ### App workflow
 1. Add one or more music root folders in Settings or Library.
 2. Run a scan to index local files and skip unchanged tracks.

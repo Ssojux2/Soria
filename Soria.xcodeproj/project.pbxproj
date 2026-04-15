@@ -102,6 +102,7 @@
 				847E37D42F8DFFD000A8EB7B /* Sources */,
 				847E37D52F8DFFD000A8EB7B /* Frameworks */,
 				847E37D62F8DFFD000A8EB7B /* Resources */,
+				84B5A1D331B91B4200A8EB7B /* Bundle Analysis Worker */,
 			);
 			buildRules = (
 			);
@@ -231,6 +232,32 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		84B5A1D331B91B4200A8EB7B /* Bundle Analysis Worker */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(PROJECT_DIR)/Scripts/copy_analysis_worker.sh",
+				"$(PROJECT_DIR)/analysis-worker/main.py",
+				"$(PROJECT_DIR)/analysis-worker/requirements.txt",
+				"$(PROJECT_DIR)/analysis-worker/.venv/pyvenv.cfg",
+			);
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/analysis-worker/main.py",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/analysis-worker/.venv/pyvenv.cfg",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PROJECT_DIR}/Scripts/copy_analysis_worker.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		847E37D42F8DFFD000A8EB7B /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -306,7 +333,7 @@
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -369,7 +396,7 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;

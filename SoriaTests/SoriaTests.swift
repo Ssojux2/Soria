@@ -6,6 +6,36 @@ import Testing
 @MainActor
 @Suite(.serialized)
 struct SoriaTests {
+    @Test func appSettingsPreferBundledWorkerRuntimeForProtectedLegacyPath() {
+        let bundledPath = "/tmp/Soria.app/Contents/Resources/analysis-worker/.venv/bin/python"
+        let legacyPath = "\(NSHomeDirectory())/Documents/BluePenguin/Soriga/Soria/analysis-worker/.venv/bin/python"
+
+        let resolved = AppSettingsStore.resolvedWorkerRuntimePath(
+            storedValue: legacyPath,
+            bundledPath: bundledPath,
+            detectedProjectPath: legacyPath
+        )
+
+        #expect(resolved == bundledPath)
+    }
+
+    @Test func appSettingsKeepCustomWorkerRuntimeOutsideProtectedFolders() throws {
+        let bundledPath = "/tmp/Soria.app/Contents/Resources/analysis-worker/main.py"
+        let customDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: customDirectory, withIntermediateDirectories: true)
+        let customFile = customDirectory.appendingPathComponent("main.py")
+        try Data("print('worker')\n".utf8).write(to: customFile)
+
+        let resolved = AppSettingsStore.resolvedWorkerRuntimePath(
+            storedValue: customFile.path,
+            bundledPath: bundledPath,
+            detectedProjectPath: "\(NSHomeDirectory())/Documents/BluePenguin/Soriga/Soria/analysis-worker/main.py"
+        )
+
+        #expect(resolved == customFile.path)
+    }
+
     @Test func recommendationRankingPrefersCloserBPMAndKey() {
         let engine = RecommendationEngine()
         let seed = makeTrack(

@@ -86,6 +86,10 @@ struct SettingsView: View {
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
+
+                        Text("Bundled worker defaults are preferred so validation does not depend on a Documents-folder source checkout.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
