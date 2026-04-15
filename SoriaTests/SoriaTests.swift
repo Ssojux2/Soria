@@ -359,6 +359,92 @@ struct SoriaTests {
         #expect(tracks.first?.metadata.syncVersion == "7.2.8/6")
     }
 
+    @Test func cuePresentationGroupsBySourceAndUsesDisplayLabels() {
+        let seratoMetadata = ExternalDJMetadata(
+            id: UUID(),
+            trackPath: "/music/serato-track.mp3",
+            source: .serato,
+            bpm: nil,
+            musicalKey: nil,
+            rating: nil,
+            color: nil,
+            tags: [],
+            playCount: nil,
+            lastPlayed: nil,
+            playlistMemberships: [],
+            cueCount: 2,
+            cuePoints: [
+                ExternalDJCuePoint(
+                    kind: .hotcue,
+                    name: "Drop",
+                    index: 3,
+                    startSec: 64.25,
+                    endSec: nil,
+                    color: "#FF9900",
+                    source: "serato:markers2"
+                ),
+                ExternalDJCuePoint(
+                    kind: .cue,
+                    name: "Mix In",
+                    index: nil,
+                    startSec: 12.5,
+                    endSec: nil,
+                    color: nil,
+                    source: "serato:markers2"
+                )
+            ],
+            comment: nil,
+            vendorTrackID: nil,
+            analysisState: nil,
+            analysisCachePath: nil,
+            syncVersion: nil
+        )
+        let rekordboxMetadata = ExternalDJMetadata(
+            id: UUID(),
+            trackPath: "/music/rekordbox-track.mp3",
+            source: .rekordbox,
+            bpm: nil,
+            musicalKey: nil,
+            rating: nil,
+            color: nil,
+            tags: [],
+            playCount: nil,
+            lastPlayed: nil,
+            playlistMemberships: [],
+            cueCount: 1,
+            cuePoints: [
+                ExternalDJCuePoint(
+                    kind: .loop,
+                    name: "Utility Loop",
+                    index: 2,
+                    startSec: 96.0,
+                    endSec: 104.0,
+                    color: "#663399",
+                    source: "rekordbox:anlz_ext"
+                )
+            ],
+            comment: nil,
+            vendorTrackID: nil,
+            analysisState: nil,
+            analysisCachePath: nil,
+            syncVersion: nil
+        )
+
+        let groups = TrackCuePresentation.groups(from: [seratoMetadata, rekordboxMetadata])
+
+        #expect(groups.count == 2)
+        #expect(groups[0].source == .serato)
+        #expect(groups[0].items.map(\.kindLabel) == ["Memory Cue", "Hot Cue"])
+        #expect(groups[0].items.map(\.timeText) == ["0:12.500", "1:04.250"])
+        #expect(groups[0].items[0].indexLabel == nil)
+        #expect(groups[0].items[1].indexLabel == "Slot 3")
+        #expect(groups[0].items[1].noteText == "Drop")
+        #expect(groups[0].items[1].sourceTag == "serato:markers2")
+        #expect(groups[1].source == .rekordbox)
+        #expect(groups[1].items.map(\.kindLabel) == ["Loop"])
+        #expect(groups[1].items[0].indexLabel == "Loop 2")
+    }
+
     @Test func syncMergesSourcesAndPreservesExistingAnalysis() async throws {
         let directory = try makeTemporaryDirectory()
         let databaseURL = directory.appendingPathComponent("library.sqlite")
