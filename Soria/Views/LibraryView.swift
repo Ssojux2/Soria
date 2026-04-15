@@ -13,6 +13,8 @@ struct LibraryView: View {
                 Spacer()
                 Text("Sources: \(activeSourceCount)")
                     .foregroundStyle(.secondary)
+                Text("Selected: \(viewModel.selectedTracks.count)")
+                    .foregroundStyle(.secondary)
                 Text("Tracks: \(viewModel.tracks.count)")
                     .foregroundStyle(.secondary)
             }
@@ -26,6 +28,29 @@ struct LibraryView: View {
             Text("Tip: Cmd/Shift to select multiple tracks.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+
+            if viewModel.scanProgress.isRunning {
+                GroupBox("Library Activity") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ProgressView(
+                            value: Double(viewModel.scanProgress.scannedFiles),
+                            total: Double(max(viewModel.scanProgress.totalFiles, 1))
+                        )
+
+                        Text("Scanned \(viewModel.scanProgress.scannedFiles) / \(viewModel.scanProgress.totalFiles)")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+
+                        if !viewModel.scanProgress.currentFile.isEmpty {
+                            Text(viewModel.scanProgress.currentFile)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
 
             Table(viewModel.tracks, selection: $viewModel.selectedTrackIDs) {
                 TableColumn("Title", value: \.title)
@@ -53,8 +78,10 @@ struct LibraryView: View {
                     Image(systemName: track.hasRekordboxMetadata ? "checkmark.circle.fill" : "circle")
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var activeSourceCount: Int {

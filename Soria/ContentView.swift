@@ -23,26 +23,16 @@ struct ContentView: View {
                 }
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220)
-        } content: {
-            Group {
-                switch viewModel.selectedSection {
-                case .library:
-                    LibraryView(viewModel: viewModel)
-                case .scanJobs:
-                    ScanJobsView(viewModel: viewModel)
-                case .search:
-                    SearchView(viewModel: viewModel)
-                case .recommendations:
-                    RecommendationsView(viewModel: viewModel)
-                case .exports:
-                    ExportsView(viewModel: viewModel)
-                case .settings:
-                    SettingsView(viewModel: viewModel)
-                }
+        } detail: {
+            VSplitView {
+                LibraryView(viewModel: viewModel)
+                    .frame(minHeight: 340)
+                    .layoutPriority(1)
+
+                selectedInfoPane
+                    .frame(minHeight: 260)
             }
             .navigationTitle(viewModel.selectedSection.rawValue)
-        } detail: {
-            TrackDetailView(viewModel: viewModel)
         }
         .frame(minWidth: 1280, minHeight: 800)
         .sheet(isPresented: $viewModel.isShowingInitialSetupSheet) {
@@ -54,8 +44,6 @@ struct ContentView: View {
         switch section {
         case .library:
             return "music.note.list"
-        case .scanJobs:
-            return "arrow.triangle.2.circlepath"
         case .search:
             return "magnifyingglass"
         case .recommendations:
@@ -64,6 +52,22 @@ struct ContentView: View {
             return "square.and.arrow.up"
         case .settings:
             return "gearshape"
+        }
+    }
+
+    @ViewBuilder
+    private var selectedInfoPane: some View {
+        switch viewModel.selectedSection {
+        case .library:
+            TrackDetailView(viewModel: viewModel)
+        case .search:
+            SearchView(viewModel: viewModel)
+        case .recommendations:
+            RecommendationsView(viewModel: viewModel)
+        case .exports:
+            ExportsView(viewModel: viewModel)
+        case .settings:
+            SettingsView(viewModel: viewModel)
         }
     }
 }

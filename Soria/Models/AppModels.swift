@@ -2,7 +2,6 @@ import Foundation
 
 enum SidebarSection: String, CaseIterable, Identifiable {
     case library = "Library"
-    case scanJobs = "Scan Jobs"
     case search = "Search"
     case recommendations = "Recommendations"
     case exports = "Exports"

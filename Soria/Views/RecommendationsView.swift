@@ -20,10 +20,6 @@ struct RecommendationsView: View {
                     .disabled(!viewModel.canRunReferenceTrackFeatures)
             }
 
-            Text("FinalScore = w_embed * embed + w_bpm * bpm + w_key * key + w_energy * energy + w_intro_outro * transition + w_external * external")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-
             HStack {
                 Text("Key Strictness")
                 Slider(value: $viewModel.constraints.keyStrictness, in: 0...1)

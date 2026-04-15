@@ -16,6 +16,7 @@ final class AppViewModel: ObservableObject {
     @Published var selectedTrackSegments: [TrackSegment] = []
     @Published var selectedTrackAnalysis: TrackAnalysisSummary?
     @Published var selectedTrackExternalMetadata: [ExternalDJMetadata] = []
+    @Published var selectedTrackWaveformPreview: [Double] = []
     @Published var selectedRecommendationID: UUID?
     @Published var scanProgress = ScanJobProgress()
     @Published var libraryRoots: [String] = LibraryRootsStore.loadRoots().map(TrackPathNormalizer.normalizedAbsolutePath)
@@ -75,6 +76,7 @@ final class AppViewModel: ObservableObject {
     private let recommendationEngine = RecommendationEngine()
     private let exporter = PlaylistExportService()
     private let externalMetadataImporter = ExternalMetadataService()
+    private let externalVisualizationResolver = ExternalVisualizationResolver()
     private let librarySyncService: DJLibrarySyncService
     private var pendingAnalyzeAllTrackIDs: [UUID] = []
     private var analysisTask: Task<Void, Never>?
@@ -253,7 +255,7 @@ final class AppViewModel: ObservableObject {
         if hasFallbackFolder {
             addLibraryRoots([initialSetupLibraryRoot])
         }
-        selectedSection = .scanJobs
+        selectedSection = .library
         initialSetupStatusMessage = "Detecting DJ libraries..."
         isRunningInitialSetup = true
 
@@ -916,6 +918,7 @@ final class AppViewModel: ObservableObject {
             selectedTrackSegments = []
             selectedTrackAnalysis = nil
             selectedTrackExternalMetadata = []
+            selectedTrackWaveformPreview = []
             return
         }
 
@@ -923,6 +926,34 @@ final class AppViewModel: ObservableObject {
             selectedTrackSegments = try database.fetchSegments(trackID: track.id)
             selectedTrackAnalysis = try database.fetchAnalysisSummary(trackID: track.id)
             selectedTrackExternalMetadata = try database.fetchExternalMetadata(trackID: track.id)
+            selectedTrackWaveformPreview = selectedTrackAnalysis?.waveformPreview ?? []
+
+            let metadataSnapshot = selectedTrackExternalMetadata
+            let shouldResolveExternalPreview =
+                selectedTrackWaveformPreview.isEmpty ||
+                metadataSnapshot.contains(where: { $0.cuePoints.isEmpty })
+
+            guard shouldResolveExternalPreview, !metadataSnapshot.isEmpty else { return }
+            let selectedTrackID = track.id
+            let trackPath = track.filePath
+            let resolver = externalVisualizationResolver
+            let resolution = await Task.detached(priority: .userInitiated) {
+                resolver.enrich(trackPath: trackPath, metadata: metadataSnapshot)
+            }.value
+
+            guard selectedTrack?.id == selectedTrackID else { return }
+
+            if selectedTrackWaveformPreview.isEmpty, !resolution.waveformPreview.isEmpty {
+                selectedTrackWaveformPreview = resolution.waveformPreview
+            }
+
+            if resolution.metadata != metadataSnapshot {
+                selectedTrackExternalMetadata = resolution.metadata
+                for source in Set(resolution.metadata.map(\.source)) {
+                    let entries = resolution.metadata.filter { $0.source == source }
+                    try database.replaceExternalMetadata(trackID: selectedTrackID, source: source, entries: entries)
+                }
+            }
         } catch {
             AppLogger.shared.error("Track detail load failed: \(error.localizedDescription)")
         }
