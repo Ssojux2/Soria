@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 enum TrackPathNormalizer {
-    static func normalizedAbsolutePath(_ input: String) -> String {
+    nonisolated static func normalizedAbsolutePath(_ input: String) -> String {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
 
@@ -19,7 +19,7 @@ enum TrackPathNormalizer {
         return URL(fileURLWithPath: absolute).standardizedFileURL.path
     }
 
-    static func normalizedAbsolutePath(_ url: URL) -> String {
+    nonisolated static func normalizedAbsolutePath(_ url: URL) -> String {
         url.standardizedFileURL.path
     }
 }
@@ -314,10 +314,16 @@ final class SeratoLibraryService {
 final class RekordboxLibraryService {
     private let fileManager: FileManager
     private let cuePointParser: ExternalCuePointParser
+    private let visualizationResolver: ExternalVisualizationResolver
 
-    init(fileManager: FileManager = .default, cuePointParser: ExternalCuePointParser = ExternalCuePointParser()) {
+    init(
+        fileManager: FileManager = .default,
+        cuePointParser: ExternalCuePointParser = ExternalCuePointParser(),
+        visualizationResolver: ExternalVisualizationResolver = ExternalVisualizationResolver()
+    ) {
         self.fileManager = fileManager
         self.cuePointParser = cuePointParser
+        self.visualizationResolver = visualizationResolver
     }
 
     func defaultSettingsURL() -> URL? {
@@ -493,13 +499,8 @@ final class RekordboxLibraryService {
         let normalized = TrackPathNormalizer.normalizedAbsolutePath(path)
         guard !normalized.isEmpty else { return [] }
         let cacheURL = URL(fileURLWithPath: normalized)
-        guard fileManager.fileExists(atPath: cacheURL.path),
-              let data = try? Data(contentsOf: cacheURL),
-              let object = try? JSONSerialization.jsonObject(with: data),
-              !cacheURL.path.isEmpty
-        else { return [] }
-
-        return cuePointParser.parseCuePoints(fromSerialized: object, kind: .cue, sourceName: "rekordbox:analysis_cache")
+        guard fileManager.fileExists(atPath: cacheURL.path) else { return [] }
+        return visualizationResolver.readRekordboxVisualization(analysisURL: cacheURL).cuePoints
     }
 
     private func cuePointTableSpecs() -> [SQLiteCuePointTableSpec] {

@@ -1,7 +1,7 @@
 import Foundation
 
-struct ExternalCuePointParser {
-    private struct ParsedCuePoint: Codable {
+struct ExternalCuePointParser: Sendable {
+    private struct ParsedCuePoint: Codable, Sendable {
         let kind: String?
         let name: String?
         let index: Int?
@@ -12,7 +12,9 @@ struct ExternalCuePointParser {
         let color: String?
     }
 
-    func parseRekordboxCuePoints(from trackElement: XMLElement) -> [ExternalDJCuePoint] {
+    nonisolated init() {}
+
+    nonisolated func parseRekordboxCuePoints(from trackElement: XMLElement) -> [ExternalDJCuePoint] {
         let marks = trackElement.elements(forName: "POSITION_MARK")
         return marks.enumerated().compactMap { index, mark in
             guard let start = parseCueTime(mark.attribute(forName: "Start")?.stringValue)
@@ -33,7 +35,7 @@ struct ExternalCuePointParser {
         }
     }
 
-    func parseSeratoCuePoints(from row: [String: String]) -> [ExternalDJCuePoint] {
+    nonisolated func parseSeratoCuePoints(from row: [String: String]) -> [ExternalDJCuePoint] {
         let cueFieldGroups: [(String, ExternalDJCuePoint.Kind)] = [
             ("cue_points", .cue),
             ("cues", .cue),
@@ -59,7 +61,7 @@ struct ExternalCuePointParser {
         return normalize(points)
     }
 
-    func parseCuePoints(fromSerialized value: Any, kind: ExternalDJCuePoint.Kind, sourceName: String, startIndex: Int = 1) -> [ExternalDJCuePoint] {
+    nonisolated func parseCuePoints(fromSerialized value: Any, kind: ExternalDJCuePoint.Kind, sourceName: String, startIndex: Int = 1) -> [ExternalDJCuePoint] {
         guard let payload = parseCuePointsPayload(from: value) else { return [] }
         return normalize(
             payload
@@ -81,7 +83,7 @@ struct ExternalCuePointParser {
         )
     }
 
-    func parseSQLiteCuePoint(
+    nonisolated func parseSQLiteCuePoint(
         from row: [String: Any?],
         trackIDColumns: [String],
         timeColumns: [String],
@@ -121,7 +123,7 @@ struct ExternalCuePointParser {
         )
     }
 
-    func normalize(_ points: [ExternalDJCuePoint], duration: Double? = nil) -> [ExternalDJCuePoint] {
+    nonisolated func normalize(_ points: [ExternalDJCuePoint], duration: Double? = nil) -> [ExternalDJCuePoint] {
         let maxDuration = duration.flatMap { $0 > 0 ? $0 : nil }
 
         let sanitized = points.compactMap { point -> ExternalDJCuePoint? in
@@ -187,7 +189,7 @@ struct ExternalCuePointParser {
         }
     }
 
-    func parseCueKind(_ value: String?) -> ExternalDJCuePoint.Kind {
+    nonisolated func parseCueKind(_ value: String?) -> ExternalDJCuePoint.Kind {
         switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "0", "cue", "0x", "red", "blue", "cuepoint":
             return .cue
@@ -200,7 +202,7 @@ struct ExternalCuePointParser {
         }
     }
 
-    func parseCueTime(_ value: Any?) -> Double? {
+    nonisolated func parseCueTime(_ value: Any?) -> Double? {
         if let number = value as? Double { return normalizedTime(number) }
         if let number = value as? Float { return normalizedTime(Double(number)) }
         if let number = value as? Int { return normalizedTime(Double(number)) }
@@ -210,7 +212,7 @@ struct ExternalCuePointParser {
         return normalizedTime(text)
     }
 
-    private func parseCueValue(
+    nonisolated private func parseCueValue(
         _ value: String,
         kind: ExternalDJCuePoint.Kind,
         sourceName: String,
@@ -280,7 +282,7 @@ struct ExternalCuePointParser {
         )
     }
 
-    private func parseCuePointsPayload(from value: Any) -> [ParsedCuePoint]? {
+    nonisolated private func parseCuePointsPayload(from value: Any) -> [ParsedCuePoint]? {
         if let serialized = value as? String {
             let trimmed = serialized
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -306,7 +308,7 @@ struct ExternalCuePointParser {
         return parseCuePointsPayloadValues(from: value)
     }
 
-    private func parseCuePointsPayloadValues(from value: Any) -> [ParsedCuePoint]? {
+    nonisolated private func parseCuePointsPayloadValues(from value: Any) -> [ParsedCuePoint]? {
         if let points = value as? [[String: Any]] {
             return points.compactMap { parseParsedCuePoint(from: $0) }
         }
@@ -326,7 +328,7 @@ struct ExternalCuePointParser {
         return nil
     }
 
-    private func parseParsedCuePoint(from dict: [String: Any]) -> ParsedCuePoint? {
+    nonisolated private func parseParsedCuePoint(from dict: [String: Any]) -> ParsedCuePoint? {
         ParsedCuePoint(
             kind: firstNonEmptyString(from: dict, keys: ["type", "kind"]),
             name: firstNonEmptyString(from: dict, keys: ["name", "label"]),
@@ -339,7 +341,7 @@ struct ExternalCuePointParser {
         )
     }
 
-    private func parseJSONPayload(from data: Data) -> [ParsedCuePoint]? {
+    nonisolated private func parseJSONPayload(from data: Data) -> [ParsedCuePoint]? {
         if let payload = try? JSONDecoder().decode([ParsedCuePoint].self, from: data) {
             return payload
         }
@@ -357,7 +359,7 @@ struct ExternalCuePointParser {
         return nil
     }
 
-    private func parseCuePointsFromJSONObject(_ object: Any) -> [[String: Any]]? {
+    nonisolated private func parseCuePointsFromJSONObject(_ object: Any) -> [[String: Any]]? {
         if let points = object as? [[String: Any]] {
             return points
         }
@@ -373,7 +375,7 @@ struct ExternalCuePointParser {
         return nil
     }
 
-    private func normalizedTime(_ text: String) -> Double? {
+    nonisolated private func normalizedTime(_ text: String) -> Double? {
         let cleaned = text
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
@@ -401,21 +403,21 @@ struct ExternalCuePointParser {
         return normalizedTime(value)
     }
 
-    private func normalizedTime(_ value: Double) -> Double {
+    nonisolated private func normalizedTime(_ value: Double) -> Double {
         if value >= 10_000 {
             return value / 1000.0
         }
         return max(0, value)
     }
 
-    private func splitCueText(_ text: String) -> [String] {
+    nonisolated private func splitCueText(_ text: String) -> [String] {
         text
             .split(whereSeparator: { $0 == ";" || $0 == "|" || $0 == "\n" })
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
     }
 
-    private func firstNonEmptyString(from row: [String: Any?], keys: [String]) -> String? {
+    nonisolated private func firstNonEmptyString(from row: [String: Any?], keys: [String]) -> String? {
         let lookup = Dictionary(uniqueKeysWithValues: row.map { key, value in (key.lowercased(), value) })
         for key in keys {
             if let value = lookup[key.lowercased()], let text = parseString(value), !text.isEmpty {
@@ -425,7 +427,7 @@ struct ExternalCuePointParser {
         return nil
     }
 
-    private func firstNonEmptyString(from row: [String: Any], keys: [String]) -> String? {
+    nonisolated private func firstNonEmptyString(from row: [String: Any], keys: [String]) -> String? {
         for key in keys {
             if let value = row[key], let text = parseString(value), !text.isEmpty {
                 return text
@@ -434,7 +436,7 @@ struct ExternalCuePointParser {
         return nil
     }
 
-    private func firstValue(from row: [String: Any?], keys: [String]) -> Any? {
+    nonisolated private func firstValue(from row: [String: Any?], keys: [String]) -> Any? {
         let lookup = Dictionary(uniqueKeysWithValues: row.map { key, value in (key.lowercased(), value) })
         for key in keys {
             if let value = lookup[key.lowercased()] {
@@ -444,7 +446,7 @@ struct ExternalCuePointParser {
         return nil
     }
 
-    private func firstValue(from row: [String: Any], keys: [String]) -> Any? {
+    nonisolated private func firstValue(from row: [String: Any], keys: [String]) -> Any? {
         for key in keys {
             if let value = row[key] {
                 return value
@@ -453,7 +455,7 @@ struct ExternalCuePointParser {
         return nil
     }
 
-    private func parseInt(_ value: Any?) -> Int? {
+    nonisolated private func parseInt(_ value: Any?) -> Int? {
         guard let value else { return nil }
         if let intValue = value as? Int { return intValue }
         if let intValue = value as? Int64 { return Int(intValue) }
@@ -465,7 +467,7 @@ struct ExternalCuePointParser {
         return nil
     }
 
-    private func parseString(_ value: Any?) -> String? {
+    nonisolated private func parseString(_ value: Any?) -> String? {
         guard let value else { return nil }
         if let text = value as? String {
             return text
@@ -484,24 +486,24 @@ struct ExternalCuePointParser {
         return nil
     }
 
-    private func nilIfEmpty(_ value: String?) -> String? {
+    nonisolated private func nilIfEmpty(_ value: String?) -> String? {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
             return nil
         }
         return trimmed
     }
 
-    private func normalizedColor(_ value: String?) -> String {
+    nonisolated private func normalizedColor(_ value: String?) -> String {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
     }
 
-    private func normalizedText(_ value: String?) -> String {
+    nonisolated private func normalizedText(_ value: String?) -> String {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
     }
 }
 
 private extension Array where Element == ExternalDJCuePoint {
-    func withStartOffset(startIndex: Int) -> [ExternalDJCuePoint] {
+    nonisolated func withStartOffset(startIndex: Int) -> [ExternalDJCuePoint] {
         enumerated().map { index, point in
             ExternalDJCuePoint(
                 kind: point.kind,

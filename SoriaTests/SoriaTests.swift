@@ -3,6 +3,8 @@ import SQLite3
 import Testing
 @testable import Soria
 
+@MainActor
+@Suite(.serialized)
 struct SoriaTests {
     @Test func recommendationRankingPrefersCloserBPMAndKey() {
         let engine = RecommendationEngine()
@@ -140,6 +142,95 @@ struct SoriaTests {
         #expect(recommendations.count == 1)
         #expect(recommendations.first?.track.id == vendorOnly.id)
         #expect(recommendations.first?.breakdown.externalMetadataScore ?? 0 >= 0.75)
+    }
+
+    @Test func seratoMarkers2ParserExtractsCueAndHotCue() {
+        let memoryCue = Data([
+            0x00, 0x00,
+            0x00, 0x00, 0x0b, 0xb8,
+            0x00,
+            0xcc, 0x00, 0x00,
+            0x00, 0x00,
+            0x00
+        ])
+        let hotCue = Data([
+            0x00, 0x03,
+            0x00, 0x00, 0x17, 0x70,
+            0x00,
+            0x00, 0xcc, 0x00,
+            0x00, 0x00
+        ]) + Data("Drop".utf8) + Data([0x00])
+
+        var payload = Data([0x01, 0x01])
+        payload.append(Data("CUE".utf8))
+        payload.append(Data([0x00]))
+        payload.append(bigEndian32(memoryCue.count))
+        payload.append(memoryCue)
+        payload.append(Data("CUE".utf8))
+        payload.append(Data([0x00]))
+        payload.append(bigEndian32(hotCue.count))
+        payload.append(hotCue)
+        payload.append(Data([0x00]))
+
+        let encoded = Data([0x01, 0x01]) + Data(payload.base64EncodedString().utf8) + Data([0x00])
+        let points = ExternalVisualizationResolver.parseSeratoMarkers2TagData(encoded)
+
+        #expect(points.count == 2)
+        #expect(points[0].kind == .cue)
+        #expect(abs(points[0].startSec - 3.0) < 0.001)
+        #expect(points[1].kind == .hotcue)
+        #expect(points[1].index == 3)
+        #expect(points[1].name == "Drop")
+        #expect(abs(points[1].startSec - 6.0) < 0.001)
+
+        let overview = Data([0x01, 0x05])
+            + Data(repeating: 0x00, count: 16)
+            + Data(repeating: 0xff, count: 16)
+
+        let waveform = ExternalVisualizationResolver.parseSeratoOverviewTagData(overview)
+
+        #expect(waveform.count == 2)
+        #expect(waveform[0] == 0)
+        #expect(waveform[1] == 1)
+    }
+
+    @Test func rekordboxAnalysisParserExtractsWaveformAndCue() {
+        let waveformChunk = rekordboxChunk(
+            id: "PWV2",
+            headerData: bigEndian32(4) + bigEndian32(0x0001_0000),
+            payload: Data([0x00, 0x10, 0x1f, 0x08])
+        )
+
+        var cueEntry = Data("PCPT".utf8)
+        cueEntry.append(bigEndian32(56))
+        cueEntry.append(bigEndian32(56))
+        cueEntry.append(bigEndian32(2))
+        cueEntry.append(bigEndian32(0))
+        cueEntry.append(bigEndian32(0x0001_0000))
+        cueEntry.append(bigEndian16(0xffff))
+        cueEntry.append(bigEndian16(0xffff))
+        cueEntry.append(Data([0x01, 0x00, 0x00, 0x00]))
+        cueEntry.append(bigEndian32(5_000))
+        cueEntry.append(bigEndian32(0))
+        cueEntry.append(Data(repeating: 0x00, count: 16))
+
+        let cueChunk = rekordboxChunk(
+            id: "PCOB",
+            headerData: bigEndian32(1) + Data([0x00, 0x00]) + bigEndian16(1) + bigEndian32(1),
+            payload: cueEntry
+        )
+
+        let analysisData = rekordboxAnalysisFile(chunks: [waveformChunk, cueChunk])
+        let waveform = ExternalVisualizationResolver.parseRekordboxWaveformPreviewFromAnalysisData(analysisData)
+        let cuePoints = ExternalVisualizationResolver.parseRekordboxCuePointsFromAnalysisData(analysisData)
+
+        #expect(waveform.count == 4)
+        #expect(waveform[0] == 0)
+        #expect(abs(waveform[1] - (16.0 / 31.0)) < 0.001)
+        #expect(cuePoints.count == 1)
+        #expect(cuePoints[0].kind == .hotcue)
+        #expect(cuePoints[0].index == 2)
+        #expect(abs(cuePoints[0].startSec - 5.0) < 0.001)
     }
 
     @Test func seratoLibraryServiceParsesAssetsAndCrates() throws {
@@ -435,6 +526,45 @@ private func makeTrack(
         bpmSource: bpmSource,
         keySource: keySource
     )
+}
+
+private func rekordboxAnalysisFile(chunks: [Data]) -> Data {
+    var data = Data("PMAI".utf8)
+    data.append(bigEndian32(28))
+    data.append(bigEndian32(28 + chunks.reduce(0) { $0 + $1.count }))
+    data.append(bigEndian32(1))
+    data.append(Data(repeating: 0x00, count: 12))
+    for chunk in chunks {
+        data.append(chunk)
+    }
+    return data
+}
+
+private func rekordboxChunk(id: String, headerData: Data, payload: Data) -> Data {
+    var data = Data(id.utf8)
+    let headerLength = 12 + headerData.count
+    let totalLength = headerLength + payload.count
+    data.append(bigEndian32(headerLength))
+    data.append(bigEndian32(totalLength))
+    data.append(headerData)
+    data.append(payload)
+    return data
+}
+
+private func bigEndian16(_ value: Int) -> Data {
+    Data([
+        UInt8((value >> 8) & 0xff),
+        UInt8(value & 0xff)
+    ])
+}
+
+private func bigEndian32(_ value: Int) -> Data {
+    Data([
+        UInt8((value >> 24) & 0xff),
+        UInt8((value >> 16) & 0xff),
+        UInt8((value >> 8) & 0xff),
+        UInt8(value & 0xff)
+    ])
 }
 
 private func makeTemporaryDirectory() throws -> URL {

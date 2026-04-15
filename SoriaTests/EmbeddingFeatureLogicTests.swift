@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import Soria
 
-struct EmbeddingFeatureLogicTests {
+extension SoriaTests {
     @Test
     func validationStatusResetsWhenKeyChanges() {
         let profile = EmbeddingProfile.googleTextEmbedding004
