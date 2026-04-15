@@ -42,6 +42,13 @@ struct RecommendationsView: View {
                     .frame(width: 60)
                 TextField("Max", text: $bpmMaxText)
                     .frame(width: 60)
+                Picker("Focus", selection: $viewModel.constraints.analysisFocus) {
+                    Text("Any Focus").tag(Optional<AnalysisFocus>.none)
+                    ForEach(AnalysisFocus.allCases) { focus in
+                        Text(focus.displayName).tag(Optional(focus))
+                    }
+                }
+                .frame(width: 170)
                 Text("Max Minutes")
                 TextField("Minutes", text: $maxDurationText)
                     .frame(width: 70)
@@ -74,10 +81,14 @@ struct RecommendationsView: View {
 
             Table(viewModel.recommendations, selection: $viewModel.selectedRecommendationID) {
                 TableColumn("Track") { row in
-                    VStack(alignment: .leading) {
-                        Text(row.track.title)
-                        Text(row.track.artist)
-                            .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading) {
+                            Text(row.track.title)
+                            Text(row.track.artist)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 8)
+                        Button("+") { viewModel.appendToPlaylist(row.track) }
                     }
                 }
                 TableColumn("Score") { row in
@@ -89,8 +100,9 @@ struct RecommendationsView: View {
                 TableColumn("Energy") { row in Text(String(format: "%.2f", row.breakdown.energyFlow)) }
                 TableColumn("Transition") { row in Text(String(format: "%.2f", row.breakdown.transitionRegionMatch)) }
                 TableColumn("External") { row in Text(String(format: "%.2f", row.breakdown.externalMetadataScore)) }
-                TableColumn("Add") { row in
-                    Button("+") { viewModel.appendToPlaylist(row.track) }
+                TableColumn("Focus") { row in Text(row.analysisFocus?.displayName ?? "-") }
+                TableColumn("Tags") { row in
+                    Text(row.mixabilityTags.prefix(3).joined(separator: ", ").isEmpty ? "-" : row.mixabilityTags.prefix(3).joined(separator: ", "))
                 }
             }
             .frame(minHeight: 260)
@@ -106,6 +118,11 @@ struct RecommendationsView: View {
                         breakdownRow("Energy Flow", selectedRecommendation.breakdown.energyFlow)
                         breakdownRow("Transition", selectedRecommendation.breakdown.transitionRegionMatch)
                         breakdownRow("External", selectedRecommendation.breakdown.externalMetadataScore)
+                        if !selectedRecommendation.matchReasons.isEmpty {
+                            Text(selectedRecommendation.matchReasons.joined(separator: " • "))
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }

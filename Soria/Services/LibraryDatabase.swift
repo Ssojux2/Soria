@@ -186,7 +186,13 @@ final class LibraryDatabase {
             onsetDensity: existingSummary.onsetDensity,
             rhythmicDensity: existingSummary.rhythmicDensity,
             lowMidHighBalance: existingSummary.lowMidHighBalance,
-            waveformPreview: existingSummary.waveformPreview
+            waveformPreview: existingSummary.waveformPreview,
+            analysisFocus: existingSummary.analysisFocus,
+            introLengthSec: existingSummary.introLengthSec,
+            outroLengthSec: existingSummary.outroLengthSec,
+            energyArc: existingSummary.energyArc,
+            mixabilityTags: existingSummary.mixabilityTags,
+            confidence: existingSummary.confidence
         )
 
         try withTransaction {

@@ -8,6 +8,8 @@ struct SearchView: View {
     @State private var musicalKeyText: String = ""
     @State private var genreText: String = ""
     @State private var maxDurationText: String = ""
+    @State private var mixabilityTagsText: String = ""
+    @State private var searchAnalysisFocus: AnalysisFocus?
 
     var body: some View {
         let canSearch = viewModel.searchMode.canSubmit(
@@ -50,6 +52,8 @@ struct SearchView: View {
                             bpmMax: Double(bpmMaxText),
                             musicalKey: musicalKeyText,
                             genre: genreText,
+                            analysisFocus: searchAnalysisFocus,
+                            mixabilityTags: splitTags(mixabilityTagsText),
                             maxDurationMinutes: Double(maxDurationText)
                         )
                     }
@@ -68,6 +72,19 @@ struct SearchView: View {
                     .frame(width: 120)
                 TextField("Max Minutes", text: $maxDurationText)
                     .frame(width: 100)
+                Picker("Focus", selection: $searchAnalysisFocus) {
+                    Text("Any Focus").tag(Optional<AnalysisFocus>.none)
+                    ForEach(AnalysisFocus.allCases) { focus in
+                        Text(focus.displayName).tag(Optional(focus))
+                    }
+                }
+                .frame(width: 180)
+                Spacer()
+            }
+
+            HStack {
+                TextField("Mixability tags (comma separated)", text: $mixabilityTagsText)
+                    .textFieldStyle(.roundedBorder)
                 Spacer()
             }
 
@@ -132,6 +149,16 @@ struct SearchView: View {
                 TableColumn("Best Match") { row in
                     Text(row.bestMatchedCollection)
                 }
+                TableColumn("Focus") { row in
+                    Text(row.analysisFocus?.displayName ?? "-")
+                }
+                TableColumn("Tags") { row in
+                    Text(row.mixabilityTags.prefix(3).joined(separator: ", ").isEmpty ? "-" : row.mixabilityTags.prefix(3).joined(separator: ", "))
+                }
+                TableColumn("Why") { row in
+                    Text(row.matchReasons.joined(separator: " • "))
+                        .lineLimit(2)
+                }
             }
             .frame(minHeight: 300)
 
@@ -139,5 +166,12 @@ struct SearchView: View {
         }
         .padding()
         .accessibilityIdentifier("search-info-view")
+    }
+
+    private func splitTags(_ input: String) -> [String] {
+        input
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 }

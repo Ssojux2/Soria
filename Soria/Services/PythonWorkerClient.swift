@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct WorkerSegmentResult: Codable {
@@ -24,6 +25,12 @@ struct WorkerAnalysisResult: Codable {
     let rhythmicDensity: Double
     let lowMidHighBalance: [Double]
     let waveformPreview: [Double]
+    let analysisFocus: AnalysisFocus
+    let introLengthSec: Double
+    let outroLengthSec: Double
+    let energyArc: [Double]
+    let mixabilityTags: [String]
+    let confidence: Double
     let segments: [WorkerSegmentResult]
     let embeddingProfileID: String
 }
@@ -57,9 +64,8 @@ struct WorkerProfileStatus: Codable {
 
 struct WorkerVectorIndexState: Codable {
     let trackCount: Int
-    let trackIDs: [String]
-    let trackFilePaths: [String]
     let collectionCounts: [String: Int]
+    let manifestHash: String
 }
 
 struct WorkerHealthcheckResponse: Codable {
@@ -98,13 +104,14 @@ final class PythonWorkerClient {
     func analyze(
         filePath: String,
         track: Track,
+        analysisFocus: AnalysisFocus,
         externalMetadata: [ExternalDJMetadata] = []
     ) async throws -> WorkerAnalysisResult {
         let payload = WorkerAnalyzePayload(
             command: "analyze",
             filePath: filePath,
             trackMetadata: trackMetadata(for: track, externalMetadata: externalMetadata),
-            options: workerOptions()
+            options: workerOptions(analysisFocus: analysisFocus)
         )
         return try await runGeneric(payload: payload)
     }
@@ -252,12 +259,16 @@ final class PythonWorkerClient {
         let _: WorkerMutationResponse = try await runGeneric(payload: payload)
     }
 
-    private func workerOptions(embeddingProfileID overrideProfileID: String? = nil) -> WorkerOptionsPayload {
+    private func workerOptions(
+        embeddingProfileID overrideProfileID: String? = nil,
+        analysisFocus: AnalysisFocus? = nil
+    ) -> WorkerOptionsPayload {
         let config = configProvider()
         return WorkerOptionsPayload(
             googleAIAPIKey: config.googleAIAPIKey,
             cacheDirectory: AppPaths.pythonCacheDirectory.path,
-            embeddingProfileID: overrideProfileID ?? config.embeddingProfile.id
+            embeddingProfileID: overrideProfileID ?? config.embeddingProfile.id,
+            analysisFocus: analysisFocus
         )
     }
 
@@ -329,22 +340,38 @@ final class PythonWorkerClient {
     private func runGeneric<T: Encodable, U: Decodable>(payload: T) async throws -> U {
         let config = configProvider()
         let payloadData = try JSONEncoder().encode(payload)
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                do {
-                    let result: U = try PythonWorkerClient.runGenericBlocking(config: config, payloadData: payloadData)
-                    continuation.resume(returning: result)
-                } catch {
-                    continuation.resume(throwing: error)
+        let controller = WorkerProcessController()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async {
+                    do {
+                        let result: U = try PythonWorkerClient.runGenericBlocking(
+                            config: config,
+                            payloadData: payloadData,
+                            controller: controller
+                        )
+                        continuation.resume(returning: result)
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
                 }
+            }
+        } onCancel: {
+            Task { @MainActor in
+                controller.cancel()
             }
         }
     }
 
-    private static func runGenericBlocking<U: Decodable>(config: WorkerConfig, payloadData: Data) throws -> U {
+    private static func runGenericBlocking<U: Decodable>(
+        config: WorkerConfig,
+        payloadData: Data,
+        controller: WorkerProcessController
+    ) throws -> U {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: config.pythonExecutable)
         process.arguments = [config.workerScriptPath]
+        process.environment = workerEnvironment(from: ProcessInfo.processInfo.environment)
 
         let inputPipe = Pipe()
         let outputPipe = Pipe()
@@ -353,15 +380,54 @@ final class PythonWorkerClient {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
 
+        let terminationSignal = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in
+            terminationSignal.signal()
+        }
+
         try process.run()
+        controller.attach(process)
 
-        try inputPipe.fileHandleForWriting.write(contentsOf: payloadData)
-        try inputPipe.fileHandleForWriting.close()
+        let stdoutBuffer = LockedDataBuffer()
+        let stderrBuffer = LockedDataBuffer()
+        let readGroup = DispatchGroup()
+        readGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            stdoutBuffer.append(outputPipe.fileHandleForReading.readDataToEndOfFile())
+            readGroup.leave()
+        }
+        readGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            stderrBuffer.append(errorPipe.fileHandleForReading.readDataToEndOfFile())
+            readGroup.leave()
+        }
 
-        process.waitUntilExit()
+        do {
+            try inputPipe.fileHandleForWriting.write(contentsOf: payloadData)
+            try inputPipe.fileHandleForWriting.close()
+        } catch {
+            if controller.wasCancelled {
+                throw WorkerError.cancelled
+            }
+            throw error
+        }
 
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        let timeoutSec = Double(ProcessInfo.processInfo.environment["SORIA_WORKER_TIMEOUT_SEC"] ?? "") ?? 120
+        let didExit = terminationSignal.wait(timeout: .now() + timeoutSec) == .success
+        if !didExit {
+            controller.cancel()
+            _ = terminationSignal.wait(timeout: .now() + 3)
+        }
+        _ = readGroup.wait(timeout: .now() + 3)
+
+        let outputData = stdoutBuffer.data
+        let stderrData = stderrBuffer.data
+        if controller.wasCancelled {
+            throw WorkerError.cancelled
+        }
+        if !didExit {
+            throw WorkerError.timedOut(timeoutSec)
+        }
         if process.terminationStatus != 0 {
             let stderr = String(data: stderrData, encoding: .utf8) ?? ""
             throw WorkerError.executionFailed(stderr)
@@ -413,6 +479,7 @@ private struct WorkerOptionsPayload: Codable {
     let googleAIAPIKey: String?
     let cacheDirectory: String
     let embeddingProfileID: String
+    let analysisFocus: AnalysisFocus?
 }
 
 private struct WorkerAnalyzePayload: Codable {
@@ -515,6 +582,8 @@ private struct WorkerErrorResponse: Codable {
 enum WorkerError: Error {
     case executionFailed(String)
     case decodeFailed(String)
+    case cancelled
+    case timedOut(Double)
 }
 
 private extension PythonWorkerClient.WorkerConfig {
@@ -535,6 +604,68 @@ extension WorkerError: LocalizedError {
             return detail.isEmpty ? "Worker execution failed." : detail
         case .decodeFailed(let payload):
             return payload.isEmpty ? "Worker returned unreadable output." : payload
+        case .cancelled:
+            return "Worker request was canceled."
+        case .timedOut(let seconds):
+            return "Worker timed out after \(Int(seconds)) seconds."
         }
+    }
+}
+
+private final class WorkerProcessController: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private(set) var wasCancelled = false
+
+    func attach(_ process: Process) {
+        lock.lock()
+        let shouldCancel = wasCancelled
+        self.process = process
+        lock.unlock()
+
+        if shouldCancel {
+            cancel()
+        }
+    }
+
+    func cancel() {
+        lock.lock()
+        wasCancelled = true
+        let runningProcess = process
+        lock.unlock()
+
+        guard let runningProcess, runningProcess.isRunning else { return }
+        runningProcess.terminate()
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.75) {
+            if runningProcess.isRunning {
+                kill(runningProcess.processIdentifier, SIGKILL)
+            }
+        }
+    }
+}
+
+private final class LockedDataBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = Data()
+
+    var data: Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ data: Data) {
+        lock.lock()
+        storage.append(data)
+        lock.unlock()
+    }
+}
+
+private extension PythonWorkerClient {
+    static func workerEnvironment(from base: [String: String]) -> [String: String] {
+        var environment = base
+        environment["ANONYMIZED_TELEMETRY"] = "FALSE"
+        environment["POSTHOG_DISABLED"] = "true"
+        return environment
     }
 }

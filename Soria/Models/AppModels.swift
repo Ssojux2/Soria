@@ -203,6 +203,7 @@ enum EmbeddingBackendKind: String, Codable, Hashable {
 
 struct EmbeddingProfile: Codable, Hashable, Identifiable {
     static let legacyGoogleTextEmbedding004ID = "google/text-embedding-004"
+    static let legacyGeminiEmbeddingPreviewID = "google/gemini-embedding-2-preview"
 
     let id: String
     let displayName: String
@@ -210,9 +211,17 @@ struct EmbeddingProfile: Codable, Hashable, Identifiable {
     let backendKind: EmbeddingBackendKind
     let requiresAPIKey: Bool
 
+    static let googleGeminiEmbedding001 = EmbeddingProfile(
+        id: "google/gemini-embedding-001",
+        displayName: "Google AI gemini-embedding-001",
+        modelName: "gemini-embedding-001",
+        backendKind: .googleAI,
+        requiresAPIKey: true
+    )
+
     static let googleGeminiEmbedding2Preview = EmbeddingProfile(
-        id: "google/gemini-embedding-2-preview",
-        displayName: "Google AI gemini-embedding-2-preview",
+        id: legacyGeminiEmbeddingPreviewID,
+        displayName: "Google AI gemini-embedding-2-preview (Experimental)",
         modelName: "gemini-embedding-2-preview",
         backendKind: .googleAI,
         requiresAPIKey: true
@@ -227,16 +236,17 @@ struct EmbeddingProfile: Codable, Hashable, Identifiable {
     )
 
     static let all: [EmbeddingProfile] = [
+        .googleGeminiEmbedding001,
         .googleGeminiEmbedding2Preview,
         .clapHTSATUnfused
     ]
 
     static func resolve(id: String?) -> EmbeddingProfile {
-        guard let id else { return .googleGeminiEmbedding2Preview }
+        guard let id else { return .googleGeminiEmbedding001 }
         if id == legacyGoogleTextEmbedding004ID {
-            return .googleGeminiEmbedding2Preview
+            return .googleGeminiEmbedding001
         }
-        return all.first(where: { $0.id == id }) ?? .googleGeminiEmbedding2Preview
+        return all.first(where: { $0.id == id }) ?? .googleGeminiEmbedding001
     }
 }
 
@@ -248,6 +258,9 @@ struct TrackSearchResult: Identifiable, Hashable {
     let middleScore: Double
     let outroScore: Double
     let bestMatchedCollection: String
+    let analysisFocus: AnalysisFocus?
+    let mixabilityTags: [String]
+    let matchReasons: [String]
 
     var id: UUID { track.id }
 }

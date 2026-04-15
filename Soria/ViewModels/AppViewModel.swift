@@ -42,6 +42,8 @@ final class AppViewModel: ObservableObject {
     @Published var playlistTargetCount: Int = 8
     @Published var selectedExportFormat: ExportFormat = .rekordboxXML
     @Published var analysisQueueProgressText: String = ""
+    @Published var analysisStateByTrackID: [UUID: TrackAnalysisState] = [:]
+    @Published var analysisFocus: AnalysisFocus = .balanced
     @Published var googleAIAPIKey: String {
         didSet { refreshValidationStatus() }
     }
@@ -82,7 +84,9 @@ final class AppViewModel: ObservableObject {
     private var analysisTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var workerHealthTask: Task<Void, Never>?
+    private var validationTask: Task<Void, Never>?
     private var readyTrackIDs: Set<UUID> = []
+    private var pendingAnalysisTrackIDs: [UUID] = []
     private lazy var worker: PythonWorkerClient = PythonWorkerClient(
         configProvider: { [unowned self] in
             PythonWorkerClient.WorkerConfig(
@@ -221,6 +225,29 @@ final class AppViewModel: ObservableObject {
 
     func isTrackReadyForActiveProfile(_ track: Track) -> Bool {
         readyTrackIDs.contains(track.id)
+    }
+
+    func analysisState(for track: Track) -> TrackAnalysisState {
+        analysisStateByTrackID[track.id] ?? TrackAnalysisState.idle()
+    }
+
+    func analysisStatusText(for track: Track) -> String {
+        let state = analysisState(for: track)
+        if state.state != .idle {
+            return state.message?.isEmpty == false ? state.message! : state.state.displayName
+        }
+        if readyTrackIDs.contains(track.id) {
+            return "Ready"
+        }
+        if track.analyzedAt != nil {
+            return "Needs Embedding"
+        }
+        return "Needs Analysis"
+    }
+
+    func analysisStatusIsTransient(for track: Track) -> Bool {
+        let state = analysisState(for: track).state
+        return state == .queued || state == .running
     }
 
     func addLibraryRoot() {
@@ -416,46 +443,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func validateEmbeddingProfile() {
-        guard isSelectedEmbeddingProfileSupported else {
-            let message = selectedEmbeddingProfileDependencyMessage ?? "The selected embedding profile is unavailable."
-            validationStatus = .failed(message)
-            settingsStatusMessage = message
-            return
-        }
-        guard !embeddingProfile.requiresAPIKey || !googleAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            validationStatus = .failed("Enter a Google AI API Key first.")
-            settingsStatusMessage = "Enter a Google AI API Key before validating."
-            return
-        }
-
-        do {
-            try persistAnalysisSettings()
-        } catch {
-            validationStatus = .failed(error.localizedDescription)
-            settingsStatusMessage = "Failed to save settings before validation: \(error.localizedDescription)"
-            return
-        }
-
-        validationStatus = .validating
-        settingsStatusMessage = "Validating \(embeddingProfile.displayName)..."
-
-        Task {
-            do {
-                let response = try await worker.validateEmbeddingProfile()
-                let validatedAt = Date()
-                AppSettingsStore.markValidationSuccess(
-                    apiKey: googleAIAPIKey,
-                    profile: embeddingProfile,
-                    date: validatedAt
-                )
-                validationStatus = .validated(validatedAt)
-                settingsStatusMessage = "Validated \(response.modelName)."
-            } catch {
-                validationStatus = .failed(error.localizedDescription)
-                settingsStatusMessage = "Validation failed: \(error.localizedDescription)"
-                AppLogger.shared.error("Embedding validation failed: \(error.localizedDescription)")
-            }
-        }
+        startRuntimeValidation(userInitiated: true)
     }
 
     func runScan() {
@@ -496,6 +484,10 @@ final class AppViewModel: ObservableObject {
             return
         }
 
+        pendingAnalysisTrackIDs = targets.map(\.id)
+        for trackID in pendingAnalysisTrackIDs {
+            updateAnalysisState(trackID: trackID, state: .queued, message: "Queued")
+        }
         analysisTask?.cancel()
         analysisTask = Task {
             await analyzeTracks(targets, mode: .batch)
@@ -506,6 +498,10 @@ final class AppViewModel: ObservableObject {
         let targets = tracks.filter { pendingAnalyzeAllTrackIDs.contains($0.id) }
         pendingAnalyzeAllTrackIDs = []
         isShowingAnalyzeAllConfirmation = false
+        pendingAnalysisTrackIDs = targets.map(\.id)
+        for trackID in pendingAnalysisTrackIDs {
+            updateAnalysisState(trackID: trackID, state: .queued, message: "Queued")
+        }
         analysisTask?.cancel()
         analysisTask = Task {
             await analyzeTracks(targets, mode: .batch)
@@ -522,6 +518,12 @@ final class AppViewModel: ObservableObject {
         analysisTask?.cancel()
         isCancellingAnalysis = true
         analysisErrorMessage = "Cancelling analysis..."
+        for trackID in pendingAnalysisTrackIDs {
+            let currentState = analysisStateByTrackID[trackID]?.state
+            if currentState == .queued || currentState == .running {
+                updateAnalysisState(trackID: trackID, state: .canceled, message: "Canceled")
+            }
+        }
         analysisTask = nil
     }
 
@@ -546,6 +548,7 @@ final class AppViewModel: ObservableObject {
         Task {
             do {
                 let embeddingsByTrackID = try loadTrackEmbeddings()
+                let summariesByTrackID = try loadAnalysisSummaries(trackIDs: Array(readyTrackIDs))
                 let similarityMap = try await workerSimilarityMap(
                     seed: seed,
                     embeddingsByTrackID: embeddingsByTrackID,
@@ -556,6 +559,7 @@ final class AppViewModel: ObservableObject {
                     seed: seed,
                     candidates: tracks.filter { readyTrackIDs.contains($0.id) },
                     embeddingsByTrackID: embeddingsByTrackID,
+                    summariesByTrackID: summariesByTrackID,
                     vectorSimilarityByPath: similarityMap,
                     constraints: constraints,
                     weights: weights,
@@ -593,6 +597,7 @@ final class AppViewModel: ObservableObject {
         Task {
             do {
                 let embeddingsByTrackID = try loadTrackEmbeddings()
+                let summariesByTrackID = try loadAnalysisSummaries(trackIDs: Array(readyTrackIDs))
                 var pathTracks: [Track] = [seed]
                 var current = seed
                 let targetCount = max(2, playlistTargetCount)
@@ -608,6 +613,7 @@ final class AppViewModel: ObservableObject {
                         seed: current,
                         candidates: tracks.filter { readyTrackIDs.contains($0.id) },
                         embeddingsByTrackID: embeddingsByTrackID,
+                        summariesByTrackID: summariesByTrackID,
                         vectorSimilarityByPath: similarityMap,
                         constraints: constraints,
                         weights: weights,
@@ -693,6 +699,8 @@ final class AppViewModel: ObservableObject {
         bpmMax: Double?,
         musicalKey: String,
         genre: String,
+        analysisFocus: AnalysisFocus?,
+        mixabilityTags: [String],
         maxDurationMinutes: Double?,
         limit: Int = 25
     ) {
@@ -772,8 +780,20 @@ final class AppViewModel: ObservableObject {
                 }
 
                 let trackIndex = Dictionary(uniqueKeysWithValues: tracks.map { ($0.filePath, $0) })
+                let candidateTrackIDs = response.results.compactMap { item in trackIndex[item.filePath]?.id }
+                let summariesByTrackID = try loadAnalysisSummaries(trackIDs: candidateTrackIDs)
                 searchResults = response.results.compactMap { item in
                     guard let track = trackIndex[item.filePath] else { return nil }
+                    let summary = summariesByTrackID[track.id]
+                    if let analysisFocus, summary?.analysisFocus != analysisFocus {
+                        return nil
+                    }
+                    if !mixabilityTags.isEmpty {
+                        let trackTags = Set(summary?.mixabilityTags ?? [])
+                        if !mixabilityTags.allSatisfy(trackTags.contains) {
+                            return nil
+                        }
+                    }
                     return TrackSearchResult(
                         track: track,
                         score: item.fusedScore,
@@ -781,7 +801,13 @@ final class AppViewModel: ObservableObject {
                         introScore: item.introScore,
                         middleScore: item.middleScore,
                         outroScore: item.outroScore,
-                        bestMatchedCollection: collectionDisplayName(item.bestMatchedCollection)
+                        bestMatchedCollection: collectionDisplayName(item.bestMatchedCollection),
+                        analysisFocus: summary?.analysisFocus,
+                        mixabilityTags: summary?.mixabilityTags ?? [],
+                        matchReasons: searchMatchReasons(
+                            summary: summary,
+                            result: item
+                        )
                     )
                 }
                 searchStatusMessage = searchResults.isEmpty ? "No semantic matches found." : "Found \(searchResults.count) semantic matches."
@@ -815,6 +841,7 @@ final class AppViewModel: ObservableObject {
             tracks = try database.fetchAllTracks()
             readyTrackIDs = try database.fetchReadyTrackIDs(profileID: embeddingProfile.id)
             let availableIDs = Set(tracks.map(\.id))
+            analysisStateByTrackID = analysisStateByTrackID.filter { availableIDs.contains($0.key) }
             if selectedTrackIDs.isEmpty {
                 selectedTrackIDs = tracks.first.map { Set([$0.id]) } ?? []
             } else {
@@ -846,6 +873,7 @@ final class AppViewModel: ObservableObject {
         defer {
             isAnalyzing = false
             analysisTask = nil
+            pendingAnalysisTrackIDs = []
             if Task.isCancelled {
                 analysisErrorMessage = "Analysis was canceled."
             }
@@ -854,10 +882,15 @@ final class AppViewModel: ObservableObject {
         for (index, track) in tracksToAnalyze.enumerated() {
             if Task.isCancelled {
                 analysisQueueProgressText = "Canceled: \(index) / \(tracksToAnalyze.count)"
+                for pendingTrack in tracksToAnalyze[index...] {
+                    updateAnalysisState(trackID: pendingTrack.id, state: .canceled, message: "Canceled")
+                }
                 break
             }
 
             do {
+                updateAnalysisState(trackID: track.id, state: .running, message: "Analyzing")
+                analysisQueueProgressText = "Analyzing \(track.title) (\(index + 1) / \(tracksToAnalyze.count))"
                 let externalMetadata = try database.fetchExternalMetadata(trackID: track.id)
                 let existingSegments = try database.fetchSegments(trackID: track.id)
                 let existingSummary = try database.fetchAnalysisSummary(trackID: track.id)
@@ -865,6 +898,7 @@ final class AppViewModel: ObservableObject {
                     && !readyTrackIDs.contains(track.id)
                     && !existingSegments.isEmpty
                     && existingSummary != nil
+                    && existingSummary?.analysisFocus == analysisFocus
 
                 if canReembed {
                     let result = try await worker.embedDescriptors(
@@ -890,10 +924,12 @@ final class AppViewModel: ObservableObject {
                     )
                     try await worker.upsertTrackVectors(track: track, segments: refreshedSegments, trackEmbedding: trackEmbedding)
                     try database.markTrackEmbeddingIndexed(trackID: track.id, embeddingProfileID: result.embeddingProfileID)
+                    updateAnalysisState(trackID: track.id, state: .succeeded, message: "Done")
                 } else {
                     let result = try await worker.analyze(
                         filePath: track.filePath,
                         track: track,
+                        analysisFocus: analysisFocus,
                         externalMetadata: externalMetadata
                     )
                     let segments = result.segments.compactMap { item -> TrackSegment? in
@@ -923,7 +959,13 @@ final class AppViewModel: ObservableObject {
                         onsetDensity: result.onsetDensity,
                         rhythmicDensity: result.rhythmicDensity,
                         lowMidHighBalance: result.lowMidHighBalance,
-                        waveformPreview: result.waveformPreview
+                        waveformPreview: result.waveformPreview,
+                        analysisFocus: result.analysisFocus,
+                        introLengthSec: result.introLengthSec,
+                        outroLengthSec: result.outroLengthSec,
+                        energyArc: result.energyArc,
+                        mixabilityTags: result.mixabilityTags,
+                        confidence: result.confidence
                     )
                     try database.replaceSegments(
                         trackID: track.id,
@@ -957,12 +999,19 @@ final class AppViewModel: ObservableObject {
                         try await worker.upsertTrackVectors(track: updatedTrack, segments: segments, trackEmbedding: trackEmbedding)
                         try database.markTrackEmbeddingIndexed(trackID: track.id, embeddingProfileID: result.embeddingProfileID)
                     }
+                    updateAnalysisState(trackID: track.id, state: .succeeded, message: "Done")
                 }
 
                 if mode == .batch {
                     analysisQueueProgressText = "Processed \(index + 1) / \(tracksToAnalyze.count)"
                 }
             } catch {
+                if Task.isCancelled || (error as? WorkerError).map({ if case .cancelled = $0 { return true } else { return false } }) == true {
+                    updateAnalysisState(trackID: track.id, state: .canceled, message: "Canceled")
+                    analysisQueueProgressText = "Canceled: \(index + 1) / \(tracksToAnalyze.count)"
+                    continue
+                }
+                updateAnalysisState(trackID: track.id, state: .failed, message: error.localizedDescription)
                 analysisErrorMessage = error.localizedDescription
                 AppLogger.shared.error("Analyze failed for \(track.filePath): \(error.localizedDescription)")
             }
@@ -1073,6 +1122,16 @@ final class AppViewModel: ObservableObject {
         for track in tracks where readyTrackIDs.contains(track.id) {
             if let embedding = try database.fetchTrackEmbedding(trackID: track.id), !embedding.isEmpty {
                 output[track.id] = embedding
+            }
+        }
+        return output
+    }
+
+    private func loadAnalysisSummaries(trackIDs: [UUID]) throws -> [UUID: TrackAnalysisSummary] {
+        var output: [UUID: TrackAnalysisSummary] = [:]
+        for trackID in trackIDs {
+            if let summary = try database.fetchAnalysisSummary(trackID: trackID) {
+                output[trackID] = summary
             }
         }
         return output
@@ -1208,6 +1267,65 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    private func startRuntimeValidation(userInitiated: Bool) {
+        guard isSelectedEmbeddingProfileSupported else {
+            let message = selectedEmbeddingProfileDependencyMessage ?? "The selected embedding profile is unavailable."
+            validationStatus = .failed(message)
+            settingsStatusMessage = message
+            return
+        }
+
+        let trimmedKey = googleAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !embeddingProfile.requiresAPIKey || !trimmedKey.isEmpty else {
+            if userInitiated {
+                validationStatus = .failed("Enter a Google AI API Key first.")
+                settingsStatusMessage = "Enter a Google AI API Key before validating."
+            } else {
+                validationStatus = .unvalidated
+                settingsStatusMessage = "Enter a Google AI API Key to enable runtime validation."
+            }
+            return
+        }
+
+        do {
+            try persistAnalysisSettings()
+        } catch {
+            validationStatus = .failed(error.localizedDescription)
+            settingsStatusMessage = "Failed to save settings before validation: \(error.localizedDescription)"
+            return
+        }
+
+        validationTask?.cancel()
+        let validatingProfile = embeddingProfile
+        validationStatus = .validating
+        settingsStatusMessage = userInitiated
+            ? "Validating \(validatingProfile.displayName)..."
+            : "Checking \(validatingProfile.displayName)..."
+
+        validationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let response = try await worker.validateEmbeddingProfile()
+                guard !Task.isCancelled, validatingProfile.id == self.embeddingProfile.id else { return }
+                let validatedAt = Date()
+                AppSettingsStore.markValidationSuccess(
+                    apiKey: self.googleAIAPIKey,
+                    profile: validatingProfile,
+                    date: validatedAt
+                )
+                self.validationStatus = .validated(validatedAt)
+                self.settingsStatusMessage = "Validated \(response.modelName)."
+            } catch {
+                guard !Task.isCancelled, validatingProfile.id == self.embeddingProfile.id else { return }
+                self.validationStatus = .failed(error.localizedDescription)
+                self.settingsStatusMessage = userInitiated
+                    ? "Validation failed: \(error.localizedDescription)"
+                    : "Runtime validation failed: \(error.localizedDescription)"
+                AppLogger.shared.error("Embedding validation failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func scheduleWorkerHealthRefresh() {
         workerHealthTask?.cancel()
         workerHealthTask = Task { @MainActor [weak self] in
@@ -1226,10 +1344,12 @@ final class AppViewModel: ObservableObject {
             readyTrackIDs = try database.fetchReadyTrackIDs(profileID: embeddingProfile.id)
 
             guard workerProfileStatuses[embeddingProfile.id]?.supported ?? true else {
+                validationStatus = .failed(selectedEmbeddingProfileDependencyMessage ?? "The active embedding profile is unavailable.")
                 return
             }
 
             try await repairVectorIndexIfNeeded(healthcheck: healthcheck)
+            startRuntimeValidation(userInitiated: false)
         } catch {
             if Task.isCancelled {
                 return
@@ -1240,17 +1360,17 @@ final class AppViewModel: ObservableObject {
 
     private func repairVectorIndexIfNeeded(healthcheck: WorkerHealthcheckResponse) async throws {
         let readyTracks = tracks.filter { readyTrackIDs.contains($0.id) }
-        let readyTrackPaths = Set(readyTracks.map(\.filePath))
-        let indexedTrackPaths = Set(healthcheck.vectorIndexState?.trackFilePaths ?? [])
+        let readyManifestHash = vectorIndexManifestHash(for: readyTracks)
         let indexedTrackCount = healthcheck.vectorIndexState?.trackCount ?? 0
-        let hasDrift = indexedTrackCount != readyTracks.count || indexedTrackPaths != readyTrackPaths
+        let indexedManifestHash = healthcheck.vectorIndexState?.manifestHash ?? ""
+        let hasDrift = indexedTrackCount != readyTracks.count || indexedManifestHash != readyManifestHash
 
         if !hasDrift {
             AppSettingsStore.clearAutomaticVectorRepair(profileID: embeddingProfile.id)
             return
         }
 
-        let repairSignature = vectorRepairSignature(profileID: embeddingProfile.id, trackPaths: readyTrackPaths)
+        let repairSignature = vectorRepairSignature(profileID: embeddingProfile.id, manifestHash: readyManifestHash)
         if AppSettingsStore.automaticVectorRepairSignature(profileID: embeddingProfile.id) == repairSignature {
             return
         }
@@ -1279,9 +1399,17 @@ final class AppViewModel: ObservableObject {
         AppLogger.shared.info("Automatically rebuilt the \(embeddingProfile.id) vector index.")
     }
 
-    private func vectorRepairSignature(profileID: String, trackPaths: Set<String>) -> String {
-        let joined = ([profileID] + trackPaths.sorted()).joined(separator: "\n")
+    private func vectorRepairSignature(profileID: String, manifestHash: String) -> String {
+        let joined = [profileID, manifestHash].joined(separator: "\n")
         let digest = SHA256.hash(data: Data(joined.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func vectorIndexManifestHash(for tracks: [Track]) -> String {
+        let lines = tracks.map {
+            "\($0.id.uuidString)|\($0.filePath)|\($0.contentHash)|\(LibraryDatabase.iso8601.string(from: $0.modifiedTime))"
+        }.sorted()
+        let digest = SHA256.hash(data: Data(lines.joined(separator: "\n").utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
@@ -1433,6 +1561,19 @@ final class AppViewModel: ObservableObject {
         return refreshed
     }
 
+    private func updateAnalysisState(
+        trackID: UUID,
+        state: AnalysisTaskState,
+        message: String? = nil,
+        updatedAt: Date = Date()
+    ) {
+        analysisStateByTrackID[trackID] = TrackAnalysisState(
+            state: state,
+            message: message,
+            updatedAt: updatedAt
+        )
+    }
+
     private func collectionDisplayName(_ collection: String) -> String {
         switch collection {
         case "tracks":
@@ -1446,6 +1587,24 @@ final class AppViewModel: ObservableObject {
         default:
             return collection.capitalized
         }
+    }
+
+    private func searchMatchReasons(
+        summary: TrackAnalysisSummary?,
+        result: WorkerTrackSearchResult
+    ) -> [String] {
+        var reasons: [String] = [collectionDisplayName(result.bestMatchedCollection)]
+        if result.trackScore >= 0.7 {
+            reasons.append("Strong full-track match")
+        }
+        if let summary {
+            reasons.append(summary.analysisFocus.displayName)
+            reasons.append(contentsOf: summary.mixabilityTags.prefix(2).map {
+                $0.replacingOccurrences(of: "_", with: " ").capitalized
+            })
+        }
+        let ordered = NSOrderedSet(array: reasons).array as? [String] ?? reasons
+        return Array(ordered.prefix(3))
     }
 }
 

@@ -5,7 +5,7 @@ import Testing
 extension SoriaTests {
     @Test
     func validationStatusResetsWhenKeyChanges() {
-        let profile = EmbeddingProfile.googleGeminiEmbedding2Preview
+        let profile = EmbeddingProfile.googleGeminiEmbedding001
         let validatedAt = Date(timeIntervalSince1970: 1_716_000_000)
         let storedHash = AppSettingsStore.hashAPIKey("valid-key")
 
@@ -40,24 +40,24 @@ extension SoriaTests {
                 apiKey: "same-key",
                 profile: .clapHTSATUnfused,
                 storedKeyHash: storedHash,
-                storedProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+                storedProfileID: EmbeddingProfile.googleGeminiEmbedding001.id,
                 storedAt: validatedAt
             ) == .unvalidated
         )
     }
 
     @Test
-    func legacyProfileIDResolvesToGeminiPreview() {
+    func legacyProfileIDResolvesToGeminiStable() {
         #expect(
             EmbeddingProfile.resolve(id: EmbeddingProfile.legacyGoogleTextEmbedding004ID)
-                == .googleGeminiEmbedding2Preview
+                == .googleGeminiEmbedding001
         )
     }
 
     @Test
     func analysisScopeMappingFollowsSelectedUnanalyzedAndAllRules() {
         let selectedID = UUID()
-        let currentProfile = EmbeddingProfile.googleGeminiEmbedding2Preview.id
+        let currentProfile = EmbeddingProfile.googleGeminiEmbedding001.id
         let selectedTrack = makeTrack(
             id: selectedID,
             analyzedAt: Date(timeIntervalSince1970: 10),
@@ -106,7 +106,7 @@ extension SoriaTests {
     func unvalidatedStateDisablesAnalysisAndSearch() {
         let selectedTrack = makeTrack(
             analyzedAt: Date(timeIntervalSince1970: 10),
-            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding001.id,
             embeddingUpdatedAt: Date(timeIntervalSince1970: 20)
         )
         let tracks = [selectedTrack]
@@ -121,7 +121,7 @@ extension SoriaTests {
                 tracks: tracks,
                 selectedTrackID: selectedTrack.id,
                 readyTrackIDs: Set([selectedTrack.id]),
-                activeProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id
+                activeProfileID: EmbeddingProfile.googleGeminiEmbedding001.id
             ) == false
         )
 
@@ -176,6 +176,34 @@ extension SoriaTests {
                 hasReferenceTrackEmbedding: true
             )
         )
+    }
+
+    @Test
+    func legacyAnalysisSummaryDecodesWithNewDefaults() throws {
+        let trackID = UUID()
+        let json = """
+        {
+          "trackID": "\(trackID.uuidString)",
+          "segments": [],
+          "trackEmbedding": [0.2, 0.3],
+          "estimatedBPM": 124.0,
+          "estimatedKey": "8A",
+          "brightness": 0.5,
+          "onsetDensity": 0.4,
+          "rhythmicDensity": 0.6,
+          "lowMidHighBalance": [0.2, 0.5, 0.3],
+          "waveformPreview": [0.1, 0.2, 0.3]
+        }
+        """
+
+        let summary = try JSONDecoder().decode(TrackAnalysisSummary.self, from: Data(json.utf8))
+
+        #expect(summary.analysisFocus == .balanced)
+        #expect(summary.introLengthSec == 0)
+        #expect(summary.outroLengthSec == 0)
+        #expect(summary.energyArc.isEmpty)
+        #expect(summary.mixabilityTags.isEmpty)
+        #expect(summary.confidence == 0.5)
     }
 
     private func makeTrack(

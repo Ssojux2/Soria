@@ -30,6 +30,17 @@ struct AnalysisView: View {
                     Text(viewModel.analysisScope.helperText)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+
+                    Picker("Analysis Focus", selection: $viewModel.analysisFocus) {
+                        ForEach(AnalysisFocus.allCases) { focus in
+                            Text(focus.displayName).tag(focus)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
+                    Text(viewModel.analysisFocus.helperText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -75,6 +86,28 @@ struct AnalysisView: View {
                     .foregroundStyle(.red)
             }
 
+            if !viewModel.selectedTracks.isEmpty {
+                GroupBox("Selected Track Status") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(viewModel.selectedTracks, id: \.id) { track in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(track.title)
+                                    Text(track.artist.isEmpty ? "Unknown artist" : track.artist)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(viewModel.analysisStatusText(for: track))
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(viewModel.analysisStatusIsTransient(for: track) ? .blue : .secondary)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
             if let analysis = viewModel.selectedTrackAnalysis {
                 GroupBox("Latest Feature Summary") {
                     VStack(alignment: .leading, spacing: 6) {
@@ -86,6 +119,12 @@ struct AnalysisView: View {
                         .font(.system(.body, design: .monospaced))
                         .foregroundStyle(.secondary)
 
+                        Text("Focus: \(analysis.analysisFocus.displayName)")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Text("Tags: \(analysis.mixabilityTags.isEmpty ? "-" : analysis.mixabilityTags.joined(separator: ", "))")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                         Text("Embedding Profile: \(viewModel.selectedTrack?.embeddingProfileID ?? "None")")
                             .font(.footnote)
                             .foregroundStyle(.secondary)

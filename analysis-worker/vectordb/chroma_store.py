@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -129,31 +130,29 @@ class ChromaVectorStore:
         track_collection = self.collections["tracks"]
         response = track_collection.get(include=["metadatas"])
         metadatas = response.get("metadatas") or []
-        track_ids = sorted(
+        manifest_entries = sorted(
             {
-                str(metadata.get("track_id") or metadata.get("app_track_id") or "")
+                (
+                    str(metadata.get("track_id") or metadata.get("app_track_id") or ""),
+                    str(metadata.get("file_path") or ""),
+                    str(metadata.get("scan_version") or ""),
+                )
                 for metadata in metadatas
                 if isinstance(metadata, dict)
             }
-            - {""}
+            - {("", "", "")}
         )
-        file_paths = sorted(
-            {
-                str(metadata.get("file_path") or "")
-                for metadata in metadatas
-                if isinstance(metadata, dict)
-            }
-            - {""}
-        )
+        manifest_hash = hashlib.sha256(
+            "\n".join("|".join(entry) for entry in manifest_entries).encode("utf-8")
+        ).hexdigest()
 
         return {
             "trackCount": int(track_collection.count()),
-            "trackIDs": track_ids,
-            "trackFilePaths": file_paths,
             "collectionCounts": {
                 key: int(collection.count())
                 for key, collection in self.collections.items()
             },
+            "manifestHash": manifest_hash,
         }
 
     def search(

@@ -18,7 +18,18 @@ struct TrackDetailView: View {
                             }
                             .pickerStyle(.segmented)
 
+                            Picker("Analysis Focus", selection: $viewModel.analysisFocus) {
+                                ForEach(AnalysisFocus.allCases) { focus in
+                                    Text(focus.displayName).tag(focus)
+                                }
+                            }
+                            .pickerStyle(.menu)
+
                             Text(viewModel.analysisScope.helperText)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+
+                            Text(viewModel.analysisFocus.helperText)
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
 
@@ -78,6 +89,9 @@ struct TrackDetailView: View {
                 .font(.title2.bold())
             Text(track.artist.isEmpty ? "Unknown artist" : track.artist)
                 .foregroundStyle(.secondary)
+            Text(viewModel.analysisStatusText(for: track))
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(viewModel.analysisStatusIsTransient(for: track) ? .blue : .secondary)
             Text(track.filePath)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -153,12 +167,24 @@ struct TrackDetailView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         analysisRow("Estimated BPM", analysis.estimatedBPM.map { String(format: "%.1f", $0) } ?? "-")
                         analysisRow("Estimated Key", analysis.estimatedKey ?? "-")
+                        analysisRow("Analysis Focus", analysis.analysisFocus.displayName)
+                        analysisRow("Confidence", String(format: "%.2f", analysis.confidence))
+                        analysisRow("Intro Length", String(format: "%.1fs", analysis.introLengthSec))
+                        analysisRow("Outro Length", String(format: "%.1fs", analysis.outroLengthSec))
                         analysisRow("Brightness", String(format: "%.3f", analysis.brightness))
                         analysisRow("Onset Density", String(format: "%.3f", analysis.onsetDensity))
                         analysisRow("Rhythmic Density", String(format: "%.3f", analysis.rhythmicDensity))
                         analysisRow(
                             "Band Balance",
                             analysis.lowMidHighBalance.map { String(format: "%.2f", $0) }.joined(separator: " / ")
+                        )
+                        analysisRow(
+                            "Energy Arc",
+                            analysis.energyArc.map { String(format: "%.2f", $0) }.joined(separator: " / ")
+                        )
+                        analysisRow(
+                            "Mixability Tags",
+                            analysis.mixabilityTags.isEmpty ? "-" : analysis.mixabilityTags.joined(separator: ", ")
                         )
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -302,9 +328,9 @@ struct TrackDetailView: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Text(viewModel.isTrackReadyForActiveProfile(track) ? "Ready" : "Needs Analysis")
+                        Text(viewModel.analysisStatusText(for: track))
                             .font(.footnote)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(viewModel.analysisStatusIsTransient(for: track) ? .blue : .secondary)
                     }
                 }
 

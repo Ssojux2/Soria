@@ -14,6 +14,11 @@ import numpy as np
 LOGGER = logging.getLogger("soria.worker")
 VALIDATION_PROBE_TEXT = "Soria validation probe for semantic DJ track search."
 EMBEDDING_PROFILES: dict[str, dict[str, Any]] = {
+    "google/gemini-embedding-001": {
+        "backend": "google_ai",
+        "model": "gemini-embedding-001",
+        "requires_api_key": True,
+    },
     "google/gemini-embedding-2-preview": {
         "backend": "google_ai",
         "model": "gemini-embedding-2-preview",
@@ -29,6 +34,7 @@ EMBEDDING_PROFILES: dict[str, dict[str, Any]] = {
 
 def main() -> int:
     try:
+        _disable_telemetry_noise()
         payload = json.loads(sys.stdin.read() or "{}")
         cache_dir = payload.get("options", {}).get("cacheDirectory") or str(Path.home() / ".soria-cache")
         _configure_logging(cache_dir)
@@ -88,7 +94,8 @@ def handle_analyze(payload: dict[str, Any]) -> dict[str, Any]:
     analyze_track = _load_analyze_track()
 
     file_path = payload["filePath"]
-    track_metadata = payload.get("trackMetadata") or {}
+    track_metadata = dict(payload.get("trackMetadata") or {})
+    track_metadata["analysisFocus"] = (payload.get("options") or {}).get("analysisFocus")
     analysis = analyze_track(file_path=file_path, track_metadata=track_metadata)
     segments = [
         {
@@ -116,6 +123,12 @@ def handle_analyze(payload: dict[str, Any]) -> dict[str, Any]:
         "rhythmicDensity": analysis["rhythmic_density"],
         "lowMidHighBalance": analysis["low_mid_high_balance"],
         "waveformPreview": analysis["waveform_preview"],
+        "analysisFocus": analysis.get("analysis_focus", "balanced"),
+        "introLengthSec": analysis.get("intro_length_sec", 0.0),
+        "outroLengthSec": analysis.get("outro_length_sec", 0.0),
+        "energyArc": analysis.get("energy_arc", []),
+        "mixabilityTags": analysis.get("mixability_tags", []),
+        "confidence": analysis.get("confidence", 0.5),
         "trackEmbedding": embedding_result["trackEmbedding"],
         "segments": embedding_result["segments"],
         "embeddingProfileID": embedding_result["embeddingProfileID"],
@@ -165,7 +178,7 @@ def handle_search_tracks(payload: dict[str, Any]) -> dict[str, Any]:
 def handle_healthcheck(payload: dict[str, Any]) -> dict[str, Any]:
     requested_profile_id = str(payload.get("options", {}).get("embeddingProfileID") or "").strip()
     if not requested_profile_id:
-        requested_profile_id = "google/gemini-embedding-2-preview"
+        requested_profile_id = "google/gemini-embedding-001"
     api_key = _resolve_google_ai_api_key(payload.get("options") or {})
     profile_status_by_id = _profile_statuses(payload)
     vector_index_state = None
@@ -497,7 +510,7 @@ def _vector_index_state(payload: dict[str, Any], profile_id: str) -> dict[str, A
 def _resolve_embedding_profile(payload: dict[str, Any]) -> dict[str, Any]:
     requested_profile_id = str(payload.get("options", {}).get("embeddingProfileID") or "").strip()
     if not requested_profile_id:
-        requested_profile_id = "google/gemini-embedding-2-preview"
+        requested_profile_id = "google/gemini-embedding-001"
     profile = EMBEDDING_PROFILES.get(requested_profile_id)
     if profile is None:
         raise ValueError(f"Unsupported embedding profile: {requested_profile_id}")
@@ -563,6 +576,19 @@ def _configure_logging(cache_dir: str) -> None:
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     LOGGER.setLevel(logging.INFO)
     LOGGER.addHandler(handler)
+
+
+def _disable_telemetry_noise() -> None:
+    os.environ["ANONYMIZED_TELEMETRY"] = "FALSE"
+    os.environ["CHROMA_PRODUCT_TELEMETRY_IMPL"] = "chromadb.telemetry.product.posthog.Posthog"
+    os.environ["POSTHOG_DISABLED"] = "true"
+    try:
+        import posthog
+
+        posthog.disabled = True
+        posthog.capture = lambda *args, **kwargs: None
+    except Exception:
+        return
 
 
 def _module_available(module_name: str) -> bool:

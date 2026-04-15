@@ -26,6 +26,12 @@ struct SettingsView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
 
+                        if viewModel.embeddingProfile == .googleGeminiEmbedding2Preview {
+                            Text("Experimental preview profile. Prefer gemini-embedding-001 for stable day-to-day analysis.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+
                         if let dependencyMessage = viewModel.selectedEmbeddingProfileDependencyMessage {
                             Text(dependencyMessage)
                                 .font(.footnote)

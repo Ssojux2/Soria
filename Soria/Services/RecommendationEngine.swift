@@ -5,6 +5,7 @@ struct RecommendationEngine {
         seed: Track,
         candidates: [Track],
         embeddingsByTrackID: [UUID: [Double]],
+        summariesByTrackID: [UUID: TrackAnalysisSummary],
         vectorSimilarityByPath: [String: Double],
         constraints: RecommendationConstraints,
         weights: RecommendationWeights,
@@ -13,16 +14,25 @@ struct RecommendationEngine {
     ) -> [RecommendationCandidate] {
         let filtered = candidates.filter { track in
             guard !excludeTrackIDs.contains(track.id), track.id != seed.id else { return false }
+            if let focus = constraints.analysisFocus, summariesByTrackID[track.id]?.analysisFocus != focus { return false }
             if let min = constraints.targetBPMMin, let bpm = track.bpm, bpm < min { return false }
             if let max = constraints.targetBPMMax, let bpm = track.bpm, bpm > max { return false }
             if let maxMinutes = constraints.maxDurationMinutes, track.duration > maxMinutes * 60 { return false }
             if !constraints.includeFolders.isEmpty && !constraints.includeFolders.contains(where: { track.filePath.hasPrefix($0) }) { return false }
             if constraints.excludeFolders.contains(where: { track.filePath.hasPrefix($0) }) { return false }
-            if !matchesTagFilters(track: track, includeTags: constraints.includeTags, excludeTags: constraints.excludeTags) { return false }
+            if !matchesTagFilters(
+                track: track,
+                summary: summariesByTrackID[track.id],
+                includeTags: constraints.includeTags,
+                excludeTags: constraints.excludeTags
+            ) {
+                return false
+            }
             return true
         }
 
         let seedEmbedding = embeddingsByTrackID[seed.id] ?? []
+        let seedSummary = summariesByTrackID[seed.id]
 
         return filtered.compactMap { track in
             let trackEmbedding = embeddingsByTrackID[track.id] ?? []
@@ -31,9 +41,22 @@ struct RecommendationEngine {
             let embedScore = vectorHint ?? fallbackEmbed
             let bpmScore = bpmCompatibility(seed: seed.bpm, next: track.bpm)
             let harmonicScore = keyCompatibility(seed: seed.musicalKey, next: track.musicalKey, strictness: constraints.keyStrictness)
-            let energyScore = energyFlow(seed: seed, next: track, continuity: constraints.genreContinuity)
-            let transitionScore = transitionSuitability(seed: seed, next: track, continuity: constraints.genreContinuity)
+            let energyScore = energyFlow(
+                seed: seed,
+                seedSummary: seedSummary,
+                next: track,
+                nextSummary: summariesByTrackID[track.id],
+                continuity: constraints.genreContinuity
+            )
+            let transitionScore = transitionSuitability(
+                seed: seed,
+                seedSummary: seedSummary,
+                next: track,
+                nextSummary: summariesByTrackID[track.id],
+                continuity: constraints.genreContinuity
+            )
             let externalScore = externalMetadataConfidence(for: track, prioritize: constraints.prioritizeExternalMetadata)
+            let summary = summariesByTrackID[track.id]
 
             let breakdown = ScoreBreakdown(
                 embeddingSimilarity: embedScore,
@@ -48,7 +71,14 @@ struct RecommendationEngine {
                 id: track.id,
                 track: track,
                 score: breakdown.finalScore(weights: weights),
-                breakdown: breakdown
+                breakdown: breakdown,
+                analysisFocus: summary?.analysisFocus,
+                mixabilityTags: summary?.mixabilityTags ?? [],
+                matchReasons: matchReasons(
+                    track: track,
+                    summary: summary,
+                    breakdown: breakdown
+                )
             )
         }
         .sorted { $0.score > $1.score }
@@ -116,7 +146,13 @@ struct RecommendationEngine {
         return lhs.0 == rhs.0 && lhs.1 != rhs.1
     }
 
-    private func energyFlow(seed: Track, next: Track, continuity: Double) -> Double {
+    private func energyFlow(
+        seed: Track,
+        seedSummary: TrackAnalysisSummary?,
+        next: Track,
+        nextSummary: TrackAnalysisSummary?,
+        continuity: Double
+    ) -> Double {
         let s = seed.bpm ?? 120
         let n = next.bpm ?? 120
         let ratio = n / max(1, s)
@@ -125,14 +161,41 @@ struct RecommendationEngine {
         else if ratio >= 0.90, ratio <= 1.15 { base = 0.7 }
         else { base = 0.4 }
         let energyBias = 0.15 * (1 - continuity)
-        return min(1.0, base + (ratio >= 1.0 ? energyBias : 0))
+        let energyArcBonus: Double
+        if
+            let seedMiddle = seedSummary?.energyArc.dropFirst().first,
+            let nextIntro = nextSummary?.energyArc.first
+        {
+            energyArcBonus = max(0, 0.12 - abs(seedMiddle - nextIntro))
+        } else {
+            energyArcBonus = 0
+        }
+        return min(1.0, base + (ratio >= 1.0 ? energyBias : 0) + energyArcBonus)
     }
 
-    private func transitionSuitability(seed: Track, next: Track, continuity: Double) -> Double {
+    private func transitionSuitability(
+        seed: Track,
+        seedSummary: TrackAnalysisSummary?,
+        next: Track,
+        nextSummary: TrackAnalysisSummary?,
+        continuity: Double
+    ) -> Double {
         let seedGenre = seed.genre.lowercased()
         let nextGenre = next.genre.lowercased()
-        if !seedGenre.isEmpty, seedGenre == nextGenre { return 0.65 + 0.35 * continuity }
-        return 0.45 + 0.40 * (1 - continuity)
+        var score = !seedGenre.isEmpty && seedGenre == nextGenre
+            ? 0.65 + 0.35 * continuity
+            : 0.45 + 0.40 * (1 - continuity)
+
+        if let seedSummary, seedSummary.outroLengthSec >= 24 {
+            score += 0.08
+        }
+        if let nextSummary, nextSummary.introLengthSec >= 24 {
+            score += 0.08
+        }
+        if let nextSummary, nextSummary.mixabilityTags.contains("clean_outro") || nextSummary.mixabilityTags.contains("long_intro") {
+            score += 0.05
+        }
+        return min(1.0, score)
     }
 
     private func externalMetadataConfidence(for track: Track, prioritize: Bool) -> Double {
@@ -142,8 +205,19 @@ struct RecommendationEngine {
         return 0.35
     }
 
-    private func matchesTagFilters(track: Track, includeTags: [String], excludeTags: [String]) -> Bool {
-        let searchable = [track.genre, track.artist, track.album, track.title].joined(separator: " ").lowercased()
+    private func matchesTagFilters(
+        track: Track,
+        summary: TrackAnalysisSummary?,
+        includeTags: [String],
+        excludeTags: [String]
+    ) -> Bool {
+        let searchable = (
+            [track.genre, track.artist, track.album, track.title]
+            + (summary?.mixabilityTags ?? [])
+            + [summary?.analysisFocus.displayName ?? ""]
+        )
+        .joined(separator: " ")
+        .lowercased()
         if !includeTags.isEmpty {
             let hasInclude = includeTags.contains { tag in
                 searchable.contains(tag.lowercased())
@@ -154,5 +228,27 @@ struct RecommendationEngine {
             searchable.contains(tag.lowercased())
         }
         return !hasExcluded
+    }
+
+    private func matchReasons(
+        track: Track,
+        summary: TrackAnalysisSummary?,
+        breakdown: ScoreBreakdown
+    ) -> [String] {
+        var reasons: [String] = []
+        if let summary {
+            reasons.append(summary.analysisFocus.displayName)
+            reasons.append(contentsOf: summary.mixabilityTags.prefix(2).map { $0.replacingOccurrences(of: "_", with: " ").capitalized })
+        }
+        if breakdown.transitionRegionMatch >= 0.75 {
+            reasons.append("Blend-friendly intro/outro")
+        }
+        if breakdown.embeddingSimilarity >= 0.75 {
+            reasons.append("High embedding match")
+        }
+        if reasons.isEmpty, !track.genre.isEmpty {
+            reasons.append(track.genre)
+        }
+        return Array(reasons.prefix(3))
     }
 }

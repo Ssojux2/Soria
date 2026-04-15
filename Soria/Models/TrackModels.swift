@@ -105,7 +105,83 @@ struct TrackSegment: Identifiable, Codable, Hashable {
     let vector: [Double]?
 }
 
-struct TrackAnalysisSummary: Codable {
+enum AnalysisFocus: String, Codable, CaseIterable, Identifiable {
+    case balanced = "balanced"
+    case transitionSafe = "transition_safe"
+    case peakTime = "peak_time"
+    case warmUpDeep = "warm_up_deep"
+    case outroFriendly = "outro_friendly"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .balanced:
+            return "Balanced"
+        case .transitionSafe:
+            return "Transition-safe"
+        case .peakTime:
+            return "Peak-time"
+        case .warmUpDeep:
+            return "Warm-up / Deep"
+        case .outroFriendly:
+            return "Outro-friendly"
+        }
+    }
+
+    var helperText: String {
+        switch self {
+        case .balanced:
+            return "Balanced read across groove, energy, and transition utility."
+        case .transitionSafe:
+            return "Favor smooth handoff points, stable rhythm, and cleaner intro/outro structure."
+        case .peakTime:
+            return "Favor energetic, brighter tracks that feel ready for bigger moments."
+        case .warmUpDeep:
+            return "Favor lower-intensity, deeper, and more patient grooves."
+        case .outroFriendly:
+            return "Favor clean exits and longer blend-friendly endings."
+        }
+    }
+}
+
+enum AnalysisTaskState: String, Codable, Hashable {
+    case idle
+    case queued
+    case running
+    case succeeded
+    case failed
+    case canceled
+
+    var displayName: String {
+        switch self {
+        case .idle:
+            return "Idle"
+        case .queued:
+            return "Queued"
+        case .running:
+            return "Analyzing"
+        case .succeeded:
+            return "Done"
+        case .failed:
+            return "Failed"
+        case .canceled:
+            return "Canceled"
+        }
+    }
+}
+
+struct TrackAnalysisState: Hashable {
+    var state: AnalysisTaskState
+    var message: String?
+    var updatedAt: Date
+
+    static func idle(at date: Date = Date()) -> TrackAnalysisState {
+        TrackAnalysisState(state: .idle, message: nil, updatedAt: date)
+    }
+}
+
+struct TrackAnalysisSummary: Codable, Hashable {
     let trackID: UUID
     let segments: [TrackSegment]
     let trackEmbedding: [Double]?
@@ -116,6 +192,89 @@ struct TrackAnalysisSummary: Codable {
     let rhythmicDensity: Double
     let lowMidHighBalance: [Double]
     let waveformPreview: [Double]
+    let analysisFocus: AnalysisFocus
+    let introLengthSec: Double
+    let outroLengthSec: Double
+    let energyArc: [Double]
+    let mixabilityTags: [String]
+    let confidence: Double
+
+    init(
+        trackID: UUID,
+        segments: [TrackSegment],
+        trackEmbedding: [Double]?,
+        estimatedBPM: Double?,
+        estimatedKey: String?,
+        brightness: Double,
+        onsetDensity: Double,
+        rhythmicDensity: Double,
+        lowMidHighBalance: [Double],
+        waveformPreview: [Double],
+        analysisFocus: AnalysisFocus = .balanced,
+        introLengthSec: Double = 0,
+        outroLengthSec: Double = 0,
+        energyArc: [Double] = [],
+        mixabilityTags: [String] = [],
+        confidence: Double = 0.5
+    ) {
+        self.trackID = trackID
+        self.segments = segments
+        self.trackEmbedding = trackEmbedding
+        self.estimatedBPM = estimatedBPM
+        self.estimatedKey = estimatedKey
+        self.brightness = brightness
+        self.onsetDensity = onsetDensity
+        self.rhythmicDensity = rhythmicDensity
+        self.lowMidHighBalance = lowMidHighBalance
+        self.waveformPreview = waveformPreview
+        self.analysisFocus = analysisFocus
+        self.introLengthSec = introLengthSec
+        self.outroLengthSec = outroLengthSec
+        self.energyArc = energyArc
+        self.mixabilityTags = mixabilityTags
+        self.confidence = confidence
+    }
+}
+
+extension TrackAnalysisSummary {
+    private enum CodingKeys: String, CodingKey {
+        case trackID
+        case segments
+        case trackEmbedding
+        case estimatedBPM
+        case estimatedKey
+        case brightness
+        case onsetDensity
+        case rhythmicDensity
+        case lowMidHighBalance
+        case waveformPreview
+        case analysisFocus
+        case introLengthSec
+        case outroLengthSec
+        case energyArc
+        case mixabilityTags
+        case confidence
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        trackID = try container.decode(UUID.self, forKey: .trackID)
+        segments = try container.decode([TrackSegment].self, forKey: .segments)
+        trackEmbedding = try container.decodeIfPresent([Double].self, forKey: .trackEmbedding)
+        estimatedBPM = try container.decodeIfPresent(Double.self, forKey: .estimatedBPM)
+        estimatedKey = try container.decodeIfPresent(String.self, forKey: .estimatedKey)
+        brightness = try container.decode(Double.self, forKey: .brightness)
+        onsetDensity = try container.decode(Double.self, forKey: .onsetDensity)
+        rhythmicDensity = try container.decode(Double.self, forKey: .rhythmicDensity)
+        lowMidHighBalance = try container.decode([Double].self, forKey: .lowMidHighBalance)
+        waveformPreview = try container.decode([Double].self, forKey: .waveformPreview)
+        analysisFocus = try container.decodeIfPresent(AnalysisFocus.self, forKey: .analysisFocus) ?? .balanced
+        introLengthSec = try container.decodeIfPresent(Double.self, forKey: .introLengthSec) ?? 0
+        outroLengthSec = try container.decodeIfPresent(Double.self, forKey: .outroLengthSec) ?? 0
+        energyArc = try container.decodeIfPresent([Double].self, forKey: .energyArc) ?? []
+        mixabilityTags = try container.decodeIfPresent([String].self, forKey: .mixabilityTags) ?? []
+        confidence = try container.decodeIfPresent(Double.self, forKey: .confidence) ?? 0.5
+    }
 }
 
 func shouldAdoptMetadataValue<Value>(

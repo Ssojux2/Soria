@@ -28,6 +28,7 @@ class SegmentFeature:
 def analyze_track(file_path: str, track_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     _ensure_librosa()
     track_metadata = track_metadata or {}
+    analysis_focus = _normalized_analysis_focus(track_metadata.get("analysisFocus"))
 
     y, sr = librosa.load(file_path, sr=22050, mono=True)
     if y.size == 0:
@@ -44,6 +45,16 @@ def analyze_track(file_path: str, track_metadata: dict[str, Any] | None = None) 
     combined_energy = 0.72 * _normalize_array(rms) + 0.28 * _normalize_array(spectral_flux)
     middle_start, middle_end = _detect_middle_region(duration, sr, hop_length, combined_energy, frame_times)
     intro_start, intro_end, outro_start, outro_end = _derive_transition_regions(duration, middle_start, middle_end)
+    intro_start, intro_end, middle_start, middle_end, outro_start, outro_end = _apply_analysis_focus(
+        analysis_focus,
+        duration,
+        intro_start,
+        intro_end,
+        middle_start,
+        middle_end,
+        outro_start,
+        outro_end,
+    )
 
     segments = [
         ("intro", intro_start, intro_end),
@@ -58,6 +69,23 @@ def analyze_track(file_path: str, track_metadata: dict[str, Any] | None = None) 
     has_rekordbox = bool(track_metadata.get("hasRekordboxMetadata") or False)
     overall_features = _extract_segment_features(y, sr)
     waveform_preview = _waveform_preview(y)
+    energy_arc = _energy_arc_for_segments(segments, combined_energy, frame_times)
+    mixability_tags = _build_mixability_tags(
+        intro_length_sec=intro_end - intro_start,
+        outro_length_sec=outro_end - outro_start,
+        estimated_bpm=estimated_bpm,
+        brightness=float(overall_features["brightness"]),
+        rhythmic_density=float(overall_features["rhythmic_density"]),
+        energy_arc=energy_arc,
+        comment=track_metadata.get("comment"),
+    )
+    confidence = _estimate_confidence(
+        duration=duration,
+        estimated_bpm=estimated_bpm,
+        estimated_key=estimated_key,
+        cue_count=track_metadata.get("cueCount"),
+        energy_arc=energy_arc,
+    )
 
     segment_features: list[SegmentFeature] = []
     for segment_type, start_sec, end_sec in segments:
@@ -82,6 +110,8 @@ def analyze_track(file_path: str, track_metadata: dict[str, Any] | None = None) 
             playlist_memberships=track_metadata.get("playlistMemberships") or [],
             cue_count=track_metadata.get("cueCount"),
             comment=track_metadata.get("comment"),
+            analysis_focus=analysis_focus,
+            mixability_tags=mixability_tags,
         )
 
         segment_features.append(
@@ -107,6 +137,12 @@ def analyze_track(file_path: str, track_metadata: dict[str, Any] | None = None) 
             float(overall_features["high_balance"]),
         ],
         "waveform_preview": waveform_preview,
+        "analysis_focus": analysis_focus,
+        "intro_length_sec": float(max(0.0, intro_end - intro_start)),
+        "outro_length_sec": float(max(0.0, outro_end - outro_start)),
+        "energy_arc": energy_arc,
+        "mixability_tags": mixability_tags,
+        "confidence": confidence,
         "segments": segment_features,
     }
 
@@ -160,6 +196,47 @@ def _derive_transition_regions(duration: float, middle_start: float, middle_end:
     intro_end = min(intro_end, middle_start)
     outro_start = max(outro_start, middle_end)
     return 0.0, intro_end, outro_start, duration
+
+
+def _normalized_analysis_focus(raw_value: Any) -> str:
+    value = str(raw_value or "balanced").strip().lower()
+    allowed = {"balanced", "transition_safe", "peak_time", "warm_up_deep", "outro_friendly"}
+    return value if value in allowed else "balanced"
+
+
+def _apply_analysis_focus(
+    analysis_focus: str,
+    duration: float,
+    intro_start: float,
+    intro_end: float,
+    middle_start: float,
+    middle_end: float,
+    outro_start: float,
+    outro_end: float,
+) -> tuple[float, float, float, float, float, float]:
+    intro_length = max(0.0, intro_end - intro_start)
+    outro_length = max(0.0, outro_end - outro_start)
+
+    if analysis_focus == "transition_safe":
+        intro_end = min(middle_start, intro_start + intro_length * 1.15 + 4.0)
+        outro_start = max(middle_end, outro_end - (outro_length * 1.15 + 4.0))
+    elif analysis_focus == "peak_time":
+        intro_end = min(middle_start, max(8.0, intro_start + intro_length * 0.82))
+        outro_start = max(middle_end, min(duration - 6.0, outro_end - outro_length * 0.82))
+    elif analysis_focus == "warm_up_deep":
+        intro_end = min(middle_start, intro_start + intro_length * 1.20 + 6.0)
+    elif analysis_focus == "outro_friendly":
+        outro_start = max(middle_end, outro_end - (outro_length * 1.28 + 6.0))
+
+    intro_end = max(intro_start + 4.0, min(intro_end, middle_start))
+    outro_start = min(outro_end - 4.0, max(outro_start, middle_end))
+    middle_start = max(intro_end, middle_start)
+    middle_end = min(outro_start, middle_end)
+    if middle_end <= middle_start:
+        midpoint = duration / 2.0
+        middle_start = min(max(intro_end, midpoint - 8.0), max(intro_end, duration * 0.4))
+        middle_end = max(min(outro_start, midpoint + 8.0), min(outro_start, duration * 0.6))
+    return intro_start, intro_end, middle_start, middle_end, outro_start, outro_end
 
 
 def _estimate_bpm(y: np.ndarray, sr: int) -> float | None:
@@ -254,12 +331,16 @@ def _descriptor_text(
     playlist_memberships: list[str],
     cue_count: int | None,
     comment: str | None,
+    analysis_focus: str,
+    mixability_tags: list[str],
 ) -> str:
     bpm_value = f"{bpm:.2f}" if bpm is not None else "unknown"
     tag_text = "|".join(tags) if tags else "unknown"
     playlists_text = "|".join(playlist_memberships) if playlist_memberships else "unknown"
+    mixability_text = "|".join(mixability_tags) if mixability_tags else "unknown"
     return (
         f"segment_type={segment_type}; "
+        f"analysis_focus={analysis_focus}; "
         f"bpm={bpm_value}; "
         f"key={musical_key or 'unknown'}; "
         f"genre={genre or 'unknown'}; "
@@ -276,10 +357,74 @@ def _descriptor_text(
         f"play_count={play_count if play_count is not None else 'unknown'}; "
         f"playlists={playlists_text}; "
         f"cue_count={cue_count if cue_count is not None else 'unknown'}; "
+        f"mixability_tags={mixability_text}; "
         f"comment_present={int(bool(comment))}; "
         f"serato_metadata_detected={int(has_serato)}; "
         f"rekordbox_metadata_detected={int(has_rekordbox)}"
     )
+
+
+def _energy_arc_for_segments(
+    segments: list[tuple[str, float, float]],
+    combined_energy: np.ndarray,
+    frame_times: np.ndarray,
+) -> list[float]:
+    output: list[float] = []
+    for _, start_sec, end_sec in segments:
+        indices = np.where((frame_times >= start_sec) & (frame_times <= end_sec))[0]
+        if indices.size == 0:
+            output.append(0.0)
+            continue
+        output.append(float(np.mean(combined_energy[indices])))
+    return [_clamp(value) for value in output]
+
+
+def _build_mixability_tags(
+    intro_length_sec: float,
+    outro_length_sec: float,
+    estimated_bpm: float | None,
+    brightness: float,
+    rhythmic_density: float,
+    energy_arc: list[float],
+    comment: Any,
+) -> list[str]:
+    tags: list[str] = []
+    if intro_length_sec >= 28:
+        tags.append("long_intro")
+    if outro_length_sec >= 28:
+        tags.append("clean_outro")
+    if brightness >= 0.34:
+        tags.append("high_brightness")
+    if rhythmic_density >= 0.22:
+        tags.append("percussive")
+    if len(energy_arc) == 3 and abs(energy_arc[1] - energy_arc[0]) <= 0.18 and abs(energy_arc[2] - energy_arc[1]) <= 0.18:
+        tags.append("steady_groove")
+    if estimated_bpm is not None and estimated_bpm < 118:
+        tags.append("warmup_ready")
+    if isinstance(comment, str) and any(token in comment.lower() for token in ("vocal", "lyrics", "vox", "acapella")):
+        tags.append("vocal_heavy")
+    return tags
+
+
+def _estimate_confidence(
+    duration: float,
+    estimated_bpm: float | None,
+    estimated_key: str | None,
+    cue_count: Any,
+    energy_arc: list[float],
+) -> float:
+    score = 0.4
+    if duration >= 60:
+        score += 0.15
+    if estimated_bpm is not None:
+        score += 0.2
+    if estimated_key:
+        score += 0.1
+    if isinstance(cue_count, int) and cue_count > 0:
+        score += 0.1
+    if len(energy_arc) == 3 and max(energy_arc) - min(energy_arc) > 0.08:
+        score += 0.1
+    return _clamp(score)
 
 
 def _normalize_array(values: np.ndarray) -> np.ndarray:

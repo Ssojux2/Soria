@@ -497,7 +497,7 @@ def test_vector_maintenance_commands_update_profile_index(monkeypatch: pytest.Mo
         }
     )
     assert health["vectorIndexState"]["trackCount"] == 1
-    assert health["vectorIndexState"]["trackFilePaths"] == ["/tracks/one.mp3"]
+    assert health["vectorIndexState"]["manifestHash"]
 
     delete_result = worker_main.handle_delete_track_vectors(
         {
@@ -510,7 +510,11 @@ def test_vector_maintenance_commands_update_profile_index(monkeypatch: pytest.Mo
             },
         }
     )
-    assert delete_result["deletedProfileIDs"] == ["google/gemini-embedding-2-preview", "local/clap-htsat-unfused"]
+    assert delete_result["deletedProfileIDs"] == [
+        "google/gemini-embedding-001",
+        "google/gemini-embedding-2-preview",
+        "local/clap-htsat-unfused",
+    ]
 
     rebuilt = worker_main.handle_rebuild_vector_index(
         {

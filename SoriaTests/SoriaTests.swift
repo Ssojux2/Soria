@@ -44,6 +44,7 @@ struct SoriaTests {
                 good.id: [0.95, 0.1, 0],
                 weak.id: [0.2, 0.8, 0]
             ],
+            summariesByTrackID: [:],
             vectorSimilarityByPath: [:],
             constraints: RecommendationConstraints(),
             weights: RecommendationWeights(),
@@ -95,6 +96,7 @@ struct SoriaTests {
                 seed.id: [1, 0, 0],
                 doubleTempo.id: [0.9, 0.1, 0]
             ],
+            summariesByTrackID: [:],
             vectorSimilarityByPath: [:],
             constraints: RecommendationConstraints(),
             weights: RecommendationWeights(),
@@ -132,6 +134,7 @@ struct SoriaTests {
             seed: seed,
             candidates: [vendorOnly],
             embeddingsByTrackID: [seed.id: [1, 0, 0]],
+            summariesByTrackID: [:],
             vectorSimilarityByPath: [:],
             constraints: RecommendationConstraints(),
             weights: RecommendationWeights(),
@@ -142,6 +145,84 @@ struct SoriaTests {
         #expect(recommendations.count == 1)
         #expect(recommendations.first?.track.id == vendorOnly.id)
         #expect(recommendations.first?.breakdown.externalMetadataScore ?? 0 >= 0.75)
+    }
+
+    @Test func recommendationFiltersByAnalysisFocusAndCarriesMixabilityMetadata() {
+        let engine = RecommendationEngine()
+        let seed = makeTrack(
+            path: "/a/seed.mp3",
+            title: "Seed",
+            genre: "House",
+            bpm: 122,
+            musicalKey: "8A",
+            analyzedAt: Date()
+        )
+        let warmup = makeTrack(
+            path: "/a/warmup.mp3",
+            title: "Warmup",
+            genre: "House",
+            bpm: 123,
+            musicalKey: "9A",
+            analyzedAt: Date()
+        )
+        let peak = makeTrack(
+            path: "/a/peak.mp3",
+            title: "Peak",
+            genre: "House",
+            bpm: 124,
+            musicalKey: "9A",
+            analyzedAt: Date()
+        )
+
+        var constraints = RecommendationConstraints()
+        constraints.analysisFocus = .warmUpDeep
+
+        let recommendations = engine.recommendNextTracks(
+            seed: seed,
+            candidates: [warmup, peak],
+            embeddingsByTrackID: [
+                seed.id: [1, 0, 0],
+                warmup.id: [0.96, 0.04, 0],
+                peak.id: [0.92, 0.08, 0]
+            ],
+            summariesByTrackID: [
+                seed.id: makeSummary(
+                    trackID: seed.id,
+                    analysisFocus: .balanced,
+                    introLengthSec: 16,
+                    outroLengthSec: 32,
+                    energyArc: [0.42, 0.54, 0.61],
+                    mixabilityTags: ["steady_groove"]
+                ),
+                warmup.id: makeSummary(
+                    trackID: warmup.id,
+                    analysisFocus: .warmUpDeep,
+                    introLengthSec: 32,
+                    outroLengthSec: 24,
+                    energyArc: [0.34, 0.44, 0.52],
+                    mixabilityTags: ["long_intro", "clean_outro"]
+                ),
+                peak.id: makeSummary(
+                    trackID: peak.id,
+                    analysisFocus: .peakTime,
+                    introLengthSec: 8,
+                    outroLengthSec: 8,
+                    energyArc: [0.72, 0.84, 0.93],
+                    mixabilityTags: ["high_brightness"]
+                )
+            ],
+            vectorSimilarityByPath: [:],
+            constraints: constraints,
+            weights: RecommendationWeights(),
+            limit: 2,
+            excludeTrackIDs: []
+        )
+
+        #expect(recommendations.count == 1)
+        #expect(recommendations.first?.track.id == warmup.id)
+        #expect(recommendations.first?.analysisFocus == .warmUpDeep)
+        #expect(recommendations.first?.mixabilityTags == ["long_intro", "clean_outro"])
+        #expect(recommendations.first?.matchReasons.contains("Warm-up / Deep") == true)
     }
 
     @Test func seratoMarkers2ParserExtractsCueAndHotCue() {
@@ -698,6 +779,35 @@ private func makeTrack(
         hasRekordboxMetadata: hasRekordboxMetadata,
         bpmSource: bpmSource,
         keySource: keySource
+    )
+}
+
+private func makeSummary(
+    trackID: UUID,
+    analysisFocus: AnalysisFocus = .balanced,
+    introLengthSec: Double = 0,
+    outroLengthSec: Double = 0,
+    energyArc: [Double] = [],
+    mixabilityTags: [String] = [],
+    confidence: Double = 0.5
+) -> TrackAnalysisSummary {
+    TrackAnalysisSummary(
+        trackID: trackID,
+        segments: [],
+        trackEmbedding: [0.2, 0.3],
+        estimatedBPM: 122,
+        estimatedKey: "8A",
+        brightness: 0.4,
+        onsetDensity: 0.5,
+        rhythmicDensity: 0.6,
+        lowMidHighBalance: [0.3, 0.4, 0.3],
+        waveformPreview: [0.1, 0.2, 0.3],
+        analysisFocus: analysisFocus,
+        introLengthSec: introLengthSec,
+        outroLengthSec: outroLengthSec,
+        energyArc: energyArc,
+        mixabilityTags: mixabilityTags,
+        confidence: confidence
     )
 }
 

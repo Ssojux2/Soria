@@ -65,8 +65,9 @@ struct LibraryView: View {
                     Text(formatDuration(track.duration))
                 }
                 TableColumn("Genre", value: \.genre)
-                TableColumn("Analyzed") { track in
-                    Text(track.analyzedAt == nil ? "No" : "Yes")
+                TableColumn("Analysis Status") { track in
+                    Text(viewModel.analysisStatusText(for: track))
+                        .foregroundStyle(viewModel.analysisStatusIsTransient(for: track) ? Color.blue : Color.secondary)
                 }
                 TableColumn("BPM Source") { track in
                     Text(track.bpmSource?.displayName ?? "-")

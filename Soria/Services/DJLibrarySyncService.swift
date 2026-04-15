@@ -178,7 +178,7 @@ final class SeratoLibraryService {
         SELECT * FROM \(spec.table)
         """
         return try reader.query(query) { statement in
-            guard let row = try? reader.rowDictionary(statement) else { return nil }
+            let row = reader.rowDictionary(statement)
             return cuePointParser.parseSQLiteCuePoint(
                 from: row,
                 trackIDColumns: spec.trackIDColumns,

@@ -23,6 +23,9 @@ struct RecommendationCandidate: Identifiable, Hashable {
     let track: Track
     let score: Double
     let breakdown: ScoreBreakdown
+    let analysisFocus: AnalysisFocus?
+    let mixabilityTags: [String]
+    let matchReasons: [String]
 }
 
 struct RecommendationWeights: Codable, Hashable {
@@ -37,6 +40,7 @@ struct RecommendationWeights: Codable, Hashable {
 struct RecommendationConstraints: Codable, Hashable {
     var targetBPMMin: Double?
     var targetBPMMax: Double?
+    var analysisFocus: AnalysisFocus?
     var keyStrictness: Double = 0.6
     var genreContinuity: Double = 0.5
     var maxDurationMinutes: Double?
