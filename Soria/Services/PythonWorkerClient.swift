@@ -94,12 +94,18 @@ enum WorkerTrackSearchMode: String, Codable, Equatable {
 }
 
 final class PythonWorkerClient {
+    typealias WorkerProgressHandler = @Sendable (WorkerProgressEvent) -> Void
+
     struct WorkerConfig {
         var pythonExecutable: String
         var workerScriptPath: String
         var googleAIAPIKey: String?
         var embeddingProfile: EmbeddingProfile
     }
+
+    static let workerProgressPrefix = "SORIA_PROGRESS "
+    static let defaultWorkerTimeoutSec =
+        Double(ProcessInfo.processInfo.environment["SORIA_WORKER_TIMEOUT_SEC"] ?? "") ?? 120
 
     private let configProvider: () -> WorkerConfig
 
@@ -111,7 +117,8 @@ final class PythonWorkerClient {
         filePath: String,
         track: Track,
         analysisFocus: AnalysisFocus,
-        externalMetadata: [ExternalDJMetadata] = []
+        externalMetadata: [ExternalDJMetadata] = [],
+        progress: WorkerProgressHandler? = nil
     ) async throws -> WorkerAnalysisResult {
         let payload = WorkerAnalyzePayload(
             command: "analyze",
@@ -119,13 +126,14 @@ final class PythonWorkerClient {
             trackMetadata: trackMetadata(for: track, externalMetadata: externalMetadata),
             options: workerOptions(analysisFocus: analysisFocus)
         )
-        return try await runGeneric(payload: payload)
+        return try await runGeneric(payload: payload, progress: progress)
     }
 
     func embedDescriptors(
         track: Track,
         segments: [TrackSegment],
-        externalMetadata: [ExternalDJMetadata] = []
+        externalMetadata: [ExternalDJMetadata] = [],
+        progress: WorkerProgressHandler? = nil
     ) async throws -> WorkerEmbeddingResult {
         let payload = WorkerEmbedDescriptorsPayload(
             command: "embed_descriptors",
@@ -142,7 +150,7 @@ final class PythonWorkerClient {
             },
             options: workerOptions()
         )
-        return try await runGeneric(payload: payload)
+        return try await runGeneric(payload: payload, progress: progress)
     }
 
     func validateEmbeddingProfile() async throws -> WorkerValidationResponse {
@@ -342,7 +350,10 @@ final class PythonWorkerClient {
         )
     }
 
-    private func runGeneric<T: Encodable, U: Decodable>(payload: T) async throws -> U {
+    private func runGeneric<T: Encodable, U: Decodable>(
+        payload: T,
+        progress: WorkerProgressHandler? = nil
+    ) async throws -> U {
         let config = configProvider()
         let payloadData = try JSONEncoder().encode(payload)
         let controller = WorkerProcessController()
@@ -353,7 +364,8 @@ final class PythonWorkerClient {
                         let result: U = try PythonWorkerClient.runGenericBlocking(
                             config: config,
                             payloadData: payloadData,
-                            controller: controller
+                            controller: controller,
+                            progress: progress
                         )
                         continuation.resume(returning: result)
                     } catch {
@@ -371,7 +383,8 @@ final class PythonWorkerClient {
     private static func runGenericBlocking<U: Decodable>(
         config: WorkerConfig,
         payloadData: Data,
-        controller: WorkerProcessController
+        controller: WorkerProcessController,
+        progress: WorkerProgressHandler?
     ) throws -> U {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: config.pythonExecutable)
@@ -394,7 +407,7 @@ final class PythonWorkerClient {
         controller.attach(process)
 
         let stdoutBuffer = LockedDataBuffer()
-        let stderrBuffer = LockedDataBuffer()
+        let stderrRouter = WorkerStderrRouter(progress: progress)
         let readGroup = DispatchGroup()
         readGroup.enter()
         DispatchQueue.global(qos: .utility).async {
@@ -403,7 +416,15 @@ final class PythonWorkerClient {
         }
         readGroup.enter()
         DispatchQueue.global(qos: .utility).async {
-            stderrBuffer.append(errorPipe.fileHandleForReading.readDataToEndOfFile())
+            let handle = errorPipe.fileHandleForReading
+            while true {
+                let data = handle.availableData
+                if data.isEmpty {
+                    break
+                }
+                stderrRouter.append(data)
+            }
+            stderrRouter.finish()
             readGroup.leave()
         }
 
@@ -417,7 +438,7 @@ final class PythonWorkerClient {
             throw error
         }
 
-        let timeoutSec = Double(ProcessInfo.processInfo.environment["SORIA_WORKER_TIMEOUT_SEC"] ?? "") ?? 120
+        let timeoutSec = defaultWorkerTimeoutSec
         let didExit = terminationSignal.wait(timeout: .now() + timeoutSec) == .success
         if !didExit {
             controller.cancel()
@@ -426,16 +447,15 @@ final class PythonWorkerClient {
         _ = readGroup.wait(timeout: .now() + 3)
 
         let outputData = stdoutBuffer.data
-        let stderrData = stderrBuffer.data
+        let stderrText = stderrRouter.plainText
         if controller.wasCancelled {
             throw WorkerError.cancelled
         }
         if !didExit {
-            throw WorkerError.timedOut(timeoutSec)
+            throw WorkerError.timedOut(timeoutSec, detail: stderrText)
         }
         if process.terminationStatus != 0 {
-            let stderr = String(data: stderrData, encoding: .utf8) ?? ""
-            throw WorkerError.executionFailed(stderr)
+            throw WorkerError.executionFailed(stderrText)
         }
 
         if let parsedError = try? JSONDecoder().decode(WorkerErrorResponse.self, from: outputData), !parsedError.error.isEmpty {
@@ -446,8 +466,7 @@ final class PythonWorkerClient {
             return try JSONDecoder().decode(U.self, from: outputData)
         } catch {
             let text = String(data: outputData, encoding: .utf8) ?? ""
-            let errorText = String(data: stderrData, encoding: .utf8) ?? ""
-            throw WorkerError.decodeFailed([text, errorText].filter { !$0.isEmpty }.joined(separator: "\n"))
+            throw WorkerError.decodeFailed([text, stderrText].filter { !$0.isEmpty }.joined(separator: "\n"))
         }
     }
 
@@ -676,11 +695,77 @@ private struct WorkerErrorResponse: Codable {
     let error: String
 }
 
+final class WorkerStderrRouter {
+    private var buffer = Data()
+    private let decoder = JSONDecoder()
+    private let progress: PythonWorkerClient.WorkerProgressHandler?
+    private(set) var plainText = ""
+
+    init(progress: PythonWorkerClient.WorkerProgressHandler?) {
+        self.progress = progress
+    }
+
+    func append(_ data: Data) {
+        buffer.append(data)
+        consumeAvailableLines()
+    }
+
+    func finish() {
+        consumeAvailableLines(flushRemainder: true)
+    }
+
+    private func consumeAvailableLines(flushRemainder: Bool = false) {
+        while let newlineRange = buffer.range(of: Data([0x0A])) {
+            let lineData = buffer.subdata(in: 0..<newlineRange.lowerBound)
+            buffer.removeSubrange(0...newlineRange.lowerBound)
+            consumeLine(lineData)
+        }
+
+        if flushRemainder, !buffer.isEmpty {
+            let lineData = buffer
+            buffer.removeAll(keepingCapacity: false)
+            consumeLine(lineData)
+        }
+    }
+
+    private func consumeLine(_ data: Data) {
+        guard var line = String(data: data, encoding: .utf8) else { return }
+        if line.hasSuffix("\r") {
+            line.removeLast()
+        }
+        guard !line.isEmpty else { return }
+
+        if let event = Self.parseProgressEvent(from: line, decoder: decoder) {
+            progress?(event)
+            return
+        }
+
+        if !plainText.isEmpty {
+            plainText.append("\n")
+        }
+        plainText.append(line)
+    }
+
+    static func parseProgressEvent(from line: String) -> WorkerProgressEvent? {
+        parseProgressEvent(from: line, decoder: JSONDecoder())
+    }
+
+    private static func parseProgressEvent(
+        from line: String,
+        decoder: JSONDecoder
+    ) -> WorkerProgressEvent? {
+        guard line.hasPrefix(PythonWorkerClient.workerProgressPrefix) else { return nil }
+        let payload = String(line.dropFirst(PythonWorkerClient.workerProgressPrefix.count))
+        guard let data = payload.data(using: .utf8) else { return nil }
+        return try? decoder.decode(WorkerProgressEvent.self, from: data)
+    }
+}
+
 enum WorkerError: Error {
     case executionFailed(String)
     case decodeFailed(String)
     case cancelled
-    case timedOut(Double)
+    case timedOut(Double, detail: String)
 }
 
 private extension PythonWorkerClient.WorkerConfig {
@@ -703,8 +788,10 @@ extension WorkerError: LocalizedError {
             return payload.isEmpty ? "Worker returned unreadable output." : payload
         case .cancelled:
             return "Worker request was canceled."
-        case .timedOut(let seconds):
-            return "Worker timed out after \(Int(seconds)) seconds."
+        case .timedOut(let seconds, let detail):
+            let summary = "Worker timed out after \(Int(seconds)) seconds."
+            let trimmedDetail = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmedDetail.isEmpty ? summary : "\(summary)\n\(trimmedDetail)"
         }
     }
 }

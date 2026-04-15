@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -25,11 +25,17 @@ class SegmentFeature:
     numeric_features: dict[str, float]
 
 
-def analyze_track(file_path: str, track_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+def analyze_track(
+    file_path: str,
+    track_metadata: dict[str, Any] | None = None,
+    progress_callback: Callable[[str, str, float | None], None] | None = None,
+) -> dict[str, Any]:
     _ensure_librosa()
     track_metadata = track_metadata or {}
     analysis_focus = _normalized_analysis_focus(track_metadata.get("analysisFocus"))
 
+    if progress_callback:
+        progress_callback("loading_audio", "Loading audio file", 0.10)
     y, sr = librosa.load(file_path, sr=22050, mono=True)
     if y.size == 0:
         raise ValueError("Empty audio file")
@@ -37,6 +43,8 @@ def analyze_track(file_path: str, track_metadata: dict[str, Any] | None = None) 
     frame_length = 2048
     hop_length = 512
     duration = y.size / sr
+    if progress_callback:
+        progress_callback("extracting_features", "Extracting rhythmic and spectral features", 0.30)
     rms = librosa.feature.rms(y=y, frame_length=frame_length, hop_length=hop_length)[0]
     onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
     spectral_flux = np.abs(np.diff(onset_env, prepend=onset_env[:1]))
@@ -61,6 +69,9 @@ def analyze_track(file_path: str, track_metadata: dict[str, Any] | None = None) 
         ("middle", middle_start, middle_end),
         ("outro", outro_start, outro_end),
     ]
+
+    if progress_callback:
+        progress_callback("building_segments", "Building intro, middle, and outro segments", 0.55)
 
     estimated_bpm = _safe_float(_estimate_bpm(y, sr))
     estimated_key = _estimate_key(y, sr)
@@ -88,7 +99,14 @@ def analyze_track(file_path: str, track_metadata: dict[str, Any] | None = None) 
     )
 
     segment_features: list[SegmentFeature] = []
-    for segment_type, start_sec, end_sec in segments:
+    total_segments = max(1, len(segments))
+    for segment_index, (segment_type, start_sec, end_sec) in enumerate(segments, start=1):
+        if progress_callback:
+            progress_callback(
+                "building_segments",
+                f"Describing {segment_type} segment ({segment_index}/{total_segments})",
+                0.58 + (0.12 * (segment_index - 1) / total_segments),
+            )
         start_sample = int(start_sec * sr)
         end_sample = int(end_sec * sr)
         segment_y = y[start_sample:end_sample]
