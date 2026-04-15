@@ -15,6 +15,47 @@ struct TrackDetailView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
 
+                GroupBox("Analysis Controls") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Picker("Analysis Scope", selection: $viewModel.analysisScope) {
+                            ForEach(AnalysisScope.allCases) { scope in
+                                Text(scope.displayName).tag(scope)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
+                        Text(viewModel.analysisScope.helperText)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+
+                        HStack {
+                            Button(viewModel.isAnalyzing ? "Processing..." : "Analyze") {
+                                viewModel.requestAnalysis()
+                            }
+                            .disabled(!viewModel.canRunAnalysis)
+
+                            Button("Cancel") {
+                                viewModel.cancelAnalysis()
+                            }
+                            .disabled(!viewModel.isAnalyzing)
+                            .tint(.red)
+                        }
+
+                        if !viewModel.analysisQueueProgressText.isEmpty {
+                            Text(viewModel.analysisQueueProgressText)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        if !viewModel.analysisErrorMessage.isEmpty {
+                            Text(viewModel.analysisErrorMessage)
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
                 GroupBox("Waveform Preview") {
                     VStack(alignment: .leading, spacing: 10) {
                         let cuePoints = viewModel.selectedTrackExternalMetadata.flatMap(\.cuePoints)

@@ -8,7 +8,7 @@ struct AnalysisView: View {
             validationStatus: viewModel.validationStatus,
             isBusy: viewModel.isAnalyzing,
             tracks: viewModel.tracks,
-            selectedTrackID: viewModel.selectedTrackID,
+            selectedTrackIDs: viewModel.selectedTrackIDs,
             activeProfileID: viewModel.embeddingProfile.id
         )
 
@@ -16,11 +16,11 @@ struct AnalysisView: View {
             Text("Analysis")
                 .font(.title2.bold())
 
-            if let track = viewModel.selectedTrack {
-                Text("Selected: \(track.title) - \(track.artist)")
+            if !viewModel.selectedTracks.isEmpty {
+                Text("Selected: \(viewModel.selectedTrackSummaryLabel)")
                     .foregroundStyle(.secondary)
             } else {
-                Text("Select a track from Library to analyze or use as a reference.")
+                Text("Select one or more tracks from Library to analyze.")
                     .foregroundStyle(.secondary)
             }
 
@@ -55,6 +55,12 @@ struct AnalysisView: View {
                     viewModel.requestAnalysis()
                 }
                 .disabled(!canAnalyze)
+
+                Button("Cancel") {
+                    viewModel.cancelAnalysis()
+                }
+                .disabled(!viewModel.isAnalyzing)
+                .tint(.red)
 
                 if !viewModel.hasValidatedEmbeddingProfile {
                     Text("Validate the active embedding profile in Settings before running analysis.")

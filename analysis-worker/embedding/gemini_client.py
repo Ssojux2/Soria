@@ -11,7 +11,7 @@ import requests
 
 
 class GeminiEmbeddingClient:
-    def __init__(self, api_key: str | None, cache_dir: str, model: str = "text-embedding-004") -> None:
+    def __init__(self, api_key: str | None, cache_dir: str, model: str = "gemini-embedding-2-preview") -> None:
         self.api_key = api_key
         self.model = model
         self.api_version = "v1beta"
@@ -20,11 +20,13 @@ class GeminiEmbeddingClient:
         self.batch_size = max(1, int(os.environ.get("SORIA_EMBED_BATCH_SIZE", "8")))
         self.session = requests.Session()
         self.timeout_sec = float(os.environ.get("SORIA_EMBED_TIMEOUT_SEC", "30"))
+        self._last_error: str | None = None
 
     def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
         if not texts:
             return []
         if not self.api_key:
+            self._last_error = "Google API key is missing."
             return [None for _ in texts]
 
         outputs: list[list[float] | None] = [None] * len(texts)
@@ -47,6 +49,7 @@ class GeminiEmbeddingClient:
 
     def validate(self, probe_text: str) -> list[float] | None:
         if not self.api_key:
+            self._last_error = "Google API key is missing."
             return None
         return self._embed_single_with_retry(probe_text)
 
@@ -68,12 +71,64 @@ class GeminiEmbeddingClient:
         cache_file = self.cache_path / f"{h}.json"
         cache_file.write_text(json.dumps(vector), encoding="utf-8")
 
+    def _set_error(self, message: str | None) -> None:
+        self._last_error = message
+
+    def _read_api_error(self, response: requests.Response) -> str:
+        try:
+            body = response.json()
+            if isinstance(body, dict):
+                error = body.get("error")
+                if isinstance(error, dict):
+                    message = error.get("message")
+                    if isinstance(message, str) and message:
+                        return message
+                    code = error.get("code")
+                    status = error.get("status")
+                    if code is not None or status is not None:
+                        return f"code={code or ''} status={status or ''}".strip()
+                if isinstance(error, str) and error:
+                    return error
+        except Exception:
+            pass
+
+        text = response.text.strip()
+        if text:
+            return text[:300]
+        return f"HTTP {response.status_code}"
+
+    def _api_versions(self) -> tuple[str, ...]:
+        if self.api_version == "v1":
+            return ("v1",)
+        return ("v1", self.api_version)
+
+    def _candidate_models(self) -> tuple[str, ...]:
+        return (self.model,)
+
+    def _build_url(self, api_version: str, operation: str, model: str) -> str:
+        base = f"https://generativelanguage.googleapis.com/{api_version}/models"
+        return f"{base}/{model}:{operation}?key={self.api_key}"
+
+    def _extract_values(self, payload: dict[str, Any] | Any) -> list[float] | None:
+        if not isinstance(payload, dict):
+            return None
+
+        values = payload.get("values")
+        if isinstance(values, list):
+            return [float(x) for x in values]
+
+        nested = payload.get("embedding")
+        if isinstance(nested, dict):
+            values = nested.get("values")
+            if isinstance(values, list):
+                return [float(x) for x in values]
+        return None
+
     def _embed_batch_with_retry(self, texts: list[str]) -> list[list[float] | None]:
         # 한국어: 배치 요청으로 API 호출 횟수를 줄이고 대형 라이브러리 처리량을 높입니다.
         if len(texts) == 1:
             return [self._embed_single_with_retry(texts[0])]
-        base = f"https://generativelanguage.googleapis.com/{self.api_version}/models"
-        url = f"{base}/{self.model}:batchEmbedContents?key={self.api_key}"
+        self._set_error(None)
         requests_payload = [
             {
                 "model": f"models/{self.model}",
@@ -81,76 +136,105 @@ class GeminiEmbeddingClient:
             }
             for text in texts
         ]
-        payload = {"requests": requests_payload}
-
         retries = 4
-        for i in range(retries):
-            try:
-                r = self.session.post(url, json=payload, timeout=self.timeout_sec)
-                if r.status_code == 429:
-                    time.sleep(1.5 * (i + 1))
-                    continue
-                if r.status_code >= 500:
-                    if i == retries - 1:
-                        return [None for _ in texts]
-                    time.sleep(1.0 * (i + 1))
-                    continue
-                if r.status_code >= 400:
-                    if r.status_code in (404, 405, 501):
-                        return [self._embed_single_with_retry(text) for text in texts]
-                    if i == retries - 1:
-                        return [None for _ in texts]
-                    time.sleep(0.7 * (i + 1))
-                    continue
-                body: dict[str, Any] = r.json()
-                embeddings = body.get("embeddings")
-                if not isinstance(embeddings, list):
-                    return [None for _ in texts]
-                output: list[list[float] | None] = []
-                for item in embeddings:
-                    values = (item or {}).get("values")
-                    if isinstance(values, list):
-                        output.append([float(x) for x in values])
-                    else:
-                        output.append(None)
-                if len(output) != len(texts):
-                    output.extend([None] * max(0, len(texts) - len(output)))
-                return output
-            except Exception:
-                if i == retries - 1:
-                    return [None for _ in texts]
-                time.sleep(0.8 * (i + 1))
+        should_fallback_to_single = False
+        for model in self._candidate_models():
+            payload = {"requests": [{"model": f"models/{model}", "content": {"parts": [{"text": text}]}} for text in texts]}
+            for api_version in self._api_versions():
+                url = self._build_url(api_version, "batchEmbedContents", model)
+                for i in range(retries):
+                    try:
+                        r = self.session.post(url, json=payload, timeout=self.timeout_sec)
+                        if r.status_code == 429:
+                            self._set_error(f"Google API rate limited (HTTP {r.status_code})")
+                            time.sleep(1.5 * (i + 1))
+                            continue
+                        if r.status_code >= 500:
+                            if i == retries - 1:
+                                return [None for _ in texts]
+                            time.sleep(1.0 * (i + 1))
+                            continue
+                        if r.status_code >= 400:
+                            if r.status_code in (404, 405, 501):
+                                should_fallback_to_single = True
+                                self._set_error(f"Batch endpoint not supported on model {model} version {api_version} (HTTP {r.status_code})")
+                                break
+                            self._set_error(f"Google API returned {r.status_code}: {self._read_api_error(r)}")
+                            if i == retries - 1:
+                                return [None for _ in texts]
+                            time.sleep(0.7 * (i + 1))
+                            continue
+                        body: dict[str, Any] = r.json()
+                        embeddings = body.get("embeddings")
+                        if not isinstance(embeddings, list):
+                            return [None for _ in texts]
+                        output: list[list[float] | None] = []
+                        for item in embeddings:
+                            values = self._extract_values(item)
+                            output.append(values)
+                        if len(output) != len(texts):
+                            output.extend([None] * max(0, len(texts) - len(output)))
+                        self._set_error(None)
+                        return output
+                    except Exception as exc:
+                        self._set_error(f"Batch request error: {exc!s}")
+                        if i == retries - 1:
+                            return [None for _ in texts]
+                        time.sleep(0.8 * (i + 1))
+                if should_fallback_to_single:
+                    break
+                if self._last_error and not should_fallback_to_single:
+                    break
+
+        if should_fallback_to_single:
+            return [self._embed_single_with_retry(text) for text in texts]
+
         return [None for _ in texts]
 
     def _embed_single_with_retry(self, text: str) -> list[float] | None:
-        base = f"https://generativelanguage.googleapis.com/{self.api_version}/models"
-        url = f"{base}/{self.model}:embedContent?key={self.api_key}"
         payload = {"model": f"models/{self.model}", "content": {"parts": [{"text": text}]}}
 
         retries = 4
-        for i in range(retries):
-            try:
-                r = self.session.post(url, json=payload, timeout=self.timeout_sec)
-                if r.status_code == 429:
-                    time.sleep(1.5 * (i + 1))
-                    continue
-                if r.status_code >= 500:
-                    if i == retries - 1:
+        self._set_error(None)
+        for model in self._candidate_models():
+            payload["model"] = f"models/{model}"
+            for api_version in self._api_versions():
+                url = self._build_url(api_version, "embedContent", model)
+                for i in range(retries):
+                    try:
+                        r = self.session.post(url, json=payload, timeout=self.timeout_sec)
+                        if r.status_code == 429:
+                            self._set_error(f"Google API rate limited (HTTP {r.status_code})")
+                            time.sleep(1.5 * (i + 1))
+                            continue
+                        if r.status_code >= 500:
+                            if i == retries - 1:
+                                self._set_error(f"Google API returned {r.status_code}")
+                                return None
+                            time.sleep(1.0 * (i + 1))
+                            continue
+                        if r.status_code >= 400:
+                            if r.status_code in (404, 405, 501):
+                                self._set_error(f"Endpoint not supported on model {model} version {api_version} (HTTP {r.status_code})")
+                                break
+                            self._set_error(f"Google API returned {r.status_code}: {self._read_api_error(r)}")
+                            if i == retries - 1:
+                                return None
+                            time.sleep(0.7 * (i + 1))
+                            continue
+                        body: dict[str, Any] = r.json()
+                        values = self._extract_values(body)
+                        if values is not None:
+                            self._set_error(None)
+                            return values
                         return None
-                    time.sleep(1.0 * (i + 1))
-                    continue
-                if r.status_code >= 400:
-                    if i == retries - 1:
-                        return None
-                    time.sleep(0.7 * (i + 1))
-                    continue
-                body: dict[str, Any] = r.json()
-                values = body.get("embedding", {}).get("values")
-                if isinstance(values, list):
-                    return [float(x) for x in values]
-                return None
-            except Exception:
-                if i == retries - 1:
-                    return None
-                time.sleep(0.8 * (i + 1))
+                    except Exception as exc:
+                        self._set_error(f"Single request error: {exc!s}")
+                        if i == retries - 1:
+                            return None
+                        time.sleep(0.8 * (i + 1))
+            # Try next model when the previous one is not available
+            if self._last_error and "not supported" not in self._last_error.lower():
+                break
+
         return None

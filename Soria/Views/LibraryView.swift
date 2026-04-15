@@ -23,7 +23,11 @@ struct LibraryView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Table(viewModel.tracks, selection: $viewModel.selectedTrackID) {
+            Text("Tip: Cmd/Shift to select multiple tracks.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            Table(viewModel.tracks, selection: $viewModel.selectedTrackIDs) {
                 TableColumn("Title", value: \.title)
                 TableColumn("Artist", value: \.artist)
                 TableColumn("BPM") { track in

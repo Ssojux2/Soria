@@ -14,9 +14,9 @@ import numpy as np
 LOGGER = logging.getLogger("soria.worker")
 VALIDATION_PROBE_TEXT = "Soria validation probe for semantic DJ track search."
 EMBEDDING_PROFILES: dict[str, dict[str, Any]] = {
-    "google/text-embedding-004": {
+    "google/gemini-embedding-2-preview": {
         "backend": "google_ai",
-        "model": "text-embedding-004",
+        "model": "gemini-embedding-2-preview",
         "requires_api_key": True,
     },
     "local/clap-htsat-unfused": {
@@ -63,6 +63,9 @@ def handle_validate_embedding_profile(payload: dict[str, Any]) -> dict[str, Any]
     client = _build_embedding_client(payload, profile)
     vector = client.validate(VALIDATION_PROBE_TEXT)
     if not vector:
+        detail = getattr(client, "_last_error", None)
+        if detail:
+            raise ValueError(f"Failed to validate the active embedding profile. {detail}")
         raise ValueError("Failed to validate the active embedding profile.")
 
     return {
@@ -340,7 +343,7 @@ def _stable_track_id(file_path: str) -> str:
 def _resolve_embedding_profile(payload: dict[str, Any]) -> dict[str, Any]:
     requested_profile_id = str(payload.get("options", {}).get("embeddingProfileID") or "").strip()
     if not requested_profile_id:
-        requested_profile_id = "google/text-embedding-004"
+        requested_profile_id = "google/gemini-embedding-2-preview"
     profile = EMBEDDING_PROFILES.get(requested_profile_id)
     if profile is None:
         raise ValueError(f"Unsupported embedding profile: {requested_profile_id}")
@@ -348,12 +351,16 @@ def _resolve_embedding_profile(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_google_ai_api_key(options: dict[str, Any]) -> str | None:
-    return (
-        options.get("googleAIAPIKey")
-        or os.environ.get("GOOGLE_AI_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
-        or os.environ.get("GEMINI_API_KEY")
-    )
+    if isinstance(options.get("googleAIAPIKey"), str):
+        trimmed = options["googleAIAPIKey"].strip()
+        if trimmed:
+            return trimmed
+
+    for key in ("GOOGLE_AI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"):
+        raw_value = os.environ.get(key, "").strip()
+        if raw_value:
+            return raw_value
+    return None
 
 
 def _build_embedding_client(payload: dict[str, Any], profile: dict[str, Any]):

@@ -43,10 +43,16 @@ enum AppSettingsStore {
     }
 
     static func loadGoogleAIAPIKey() -> String {
+        let saved = AppKeychain.load(account: googleAIAPIKeyAccount)
+            ?? AppKeychain.load(account: legacyGeminiAPIKeyAccount)
+        if let saved, !saved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return saved.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
         let environment = ProcessInfo.processInfo.environment
         for key in ["GOOGLE_AI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"] {
-            if let value = environment[key], !value.isEmpty {
-                return value
+            if let rawValue = environment[key], !rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
         return AppKeychain.load(account: googleAIAPIKeyAccount)

@@ -158,13 +158,13 @@ def test_validate_embedding_profile_success(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(worker_main, "_build_embedding_client", lambda payload, profile: FakeEmbeddingClient())
 
     result = worker_main.handle_validate_embedding_profile(
-        {"options": {"embeddingProfileID": "google/text-embedding-004"}}
+        {"options": {"embeddingProfileID": "google/gemini-embedding-2-preview"}}
     )
 
     assert result == {
         "ok": True,
-        "profileID": "google/text-embedding-004",
-        "modelName": "text-embedding-004",
+        "profileID": "google/gemini-embedding-2-preview",
+        "modelName": "gemini-embedding-2-preview",
     }
 
 
@@ -177,7 +177,7 @@ def test_validate_embedding_profile_failure(monkeypatch: pytest.MonkeyPatch) -> 
 
     with pytest.raises(ValueError, match="Failed to validate"):
         worker_main.handle_validate_embedding_profile(
-            {"options": {"embeddingProfileID": "google/text-embedding-004"}}
+            {"options": {"embeddingProfileID": "google/gemini-embedding-2-preview"}}
         )
 
 
@@ -193,7 +193,7 @@ def test_search_tracks_applies_deterministic_late_fusion(monkeypatch: pytest.Mon
 
     store = chroma_store.ChromaVectorStore(
         persist_dir=str(tmp_path / "vectordb"),
-        profile_id="google/text-embedding-004",
+        profile_id="google/gemini-embedding-2-preview",
     )
     store.upsert_track_embeddings(
         track_id="track-a",
@@ -246,7 +246,7 @@ def test_search_tracks_applies_deterministic_late_fusion(monkeypatch: pytest.Mon
             },
             "options": {
                 "cacheDirectory": str(tmp_path),
-                "embeddingProfileID": "google/text-embedding-004",
+                "embeddingProfileID": "google/gemini-embedding-2-preview",
             },
         }
     )
@@ -270,7 +270,7 @@ def test_profile_namespace_separates_collections(monkeypatch: pytest.MonkeyPatch
 
     google_store = chroma_store.ChromaVectorStore(
         persist_dir=str(tmp_path / "vectordb"),
-        profile_id="google/text-embedding-004",
+        profile_id="google/gemini-embedding-2-preview",
     )
     clap_store = chroma_store.ChromaVectorStore(
         persist_dir=str(tmp_path / "vectordb"),
@@ -310,10 +310,10 @@ def test_profile_namespace_separates_collections(monkeypatch: pytest.MonkeyPatch
     assert google_results[0]["trackID"] == "app-google"
     assert google_results[0]["trackScore"] > clap_results[0]["trackScore"]
     assert set(FakePersistentClient.stores[str(tmp_path / "vectordb")].keys()) == {
-        "tracks__google_text-embedding-004",
-        "intro__google_text-embedding-004",
-        "middle__google_text-embedding-004",
-        "outro__google_text-embedding-004",
+        "tracks__google_gemini-embedding-2-preview",
+        "intro__google_gemini-embedding-2-preview",
+        "middle__google_gemini-embedding-2-preview",
+        "outro__google_gemini-embedding-2-preview",
         "tracks__local_clap-htsat-unfused",
         "intro__local_clap-htsat-unfused",
         "middle__local_clap-htsat-unfused",
@@ -326,7 +326,7 @@ def test_reembedding_replaces_existing_profile_entries(monkeypatch: pytest.Monke
 
     store = chroma_store.ChromaVectorStore(
         persist_dir=str(tmp_path / "vectordb"),
-        profile_id="google/text-embedding-004",
+        profile_id="google/gemini-embedding-2-preview",
     )
     track_metadata = _make_track_metadata("app-track", "/tracks/reembed.mp3")
 

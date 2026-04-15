@@ -31,7 +31,7 @@ struct SearchView: View {
                 .frame(width: 240)
             }
 
-            Text("Semantic search uses the active embedding profile. Reference mode searches from the currently selected analyzed track.")
+            Text("Semantic search uses the active embedding profile. Reference mode searches from selected tracks.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
@@ -40,15 +40,19 @@ struct SearchView: View {
                 .textFieldStyle(.roundedBorder)
                 .disabled(!viewModel.searchMode.isQueryEditable)
 
-                Button(viewModel.isSearching ? "Searching..." : "Search") {
-                    viewModel.searchTracks(
-                        queryText: queryText,
-                        bpmMin: Double(bpmMinText),
-                        bpmMax: Double(bpmMaxText),
-                        musicalKey: musicalKeyText,
-                        genre: genreText,
-                        maxDurationMinutes: Double(maxDurationText)
-                    )
+                Button(viewModel.isSearching ? "Cancel" : "Search") {
+                    if viewModel.isSearching {
+                        viewModel.cancelSearch()
+                    } else {
+                        viewModel.searchTracks(
+                            queryText: queryText,
+                            bpmMin: Double(bpmMinText),
+                            bpmMax: Double(bpmMaxText),
+                            musicalKey: musicalKeyText,
+                            genre: genreText,
+                            maxDurationMinutes: Double(maxDurationText)
+                        )
+                    }
                 }
                 .disabled(!canSearch)
             }
@@ -68,21 +72,32 @@ struct SearchView: View {
             }
 
             if viewModel.searchMode == .referenceTrack {
-                if let selectedTrack = viewModel.selectedTrack {
-                    HStack {
-                        Text("Reference: \(selectedTrack.title) - \(selectedTrack.artist)")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+                if !viewModel.selectedTracks.isEmpty {
+                    Text("Reference tracks: \(viewModel.selectedTracks.count)")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Text(
+                        viewModel.selectedTracks
+                            .prefix(3)
+                            .map { "\($0.title) - \($0.artist)" }
+                            .joined(separator: ", ")
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
 
-                        if !selectedTrack.hasCurrentEmbedding(profileID: viewModel.embeddingProfile.id) {
-                            Button("Analyze Selected Track First") {
-                                viewModel.analyzeSelectedTrackForSearch()
+                    if viewModel.selectedReferenceTracksMissingEmbeddingCount > 0 {
+                        HStack {
+                            Text("Some selected tracks are not analyzed for this profile yet.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            Button("Analyze Selected Tracks First") {
+                                viewModel.analyzeSelectedTracksForSearch()
                             }
                             .disabled(!viewModel.hasValidatedEmbeddingProfile || viewModel.isAnalyzing)
                         }
                     }
                 } else {
-                    Text("Select a library track to use Reference Track search.")
+                    Text("Select one or more library tracks to use reference search.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

@@ -74,7 +74,7 @@ final class PythonWorkerClient {
             trackMetadata: trackMetadata(for: track, externalMetadata: externalMetadata),
             options: workerOptions()
         )
-        return try runGeneric(payload: payload)
+        return try await runGeneric(payload: payload)
     }
 
     func embedDescriptors(
@@ -97,7 +97,7 @@ final class PythonWorkerClient {
             },
             options: workerOptions()
         )
-        return try runGeneric(payload: payload)
+        return try await runGeneric(payload: payload)
     }
 
     func validateEmbeddingProfile() async throws -> WorkerValidationResponse {
@@ -105,7 +105,7 @@ final class PythonWorkerClient {
             command: "validate_embedding_profile",
             options: workerOptions()
         )
-        return try runGeneric(payload: payload)
+        return try await runGeneric(payload: payload)
     }
 
     func searchTracksText(
@@ -131,7 +131,7 @@ final class PythonWorkerClient {
             ],
             options: workerOptions()
         )
-        return try runGeneric(payload: payload)
+        return try await runGeneric(payload: payload)
     }
 
     func searchTracksReference(
@@ -165,7 +165,7 @@ final class PythonWorkerClient {
             ],
             options: workerOptions()
         )
-        return try runGeneric(payload: payload)
+        return try await runGeneric(payload: payload)
     }
 
     private func workerOptions() -> WorkerOptionsPayload {
@@ -213,28 +213,43 @@ final class PythonWorkerClient {
         )
     }
 
-    private func runGeneric<T: Encodable, U: Decodable>(payload: T) throws -> U {
+    private func runGeneric<T: Encodable, U: Decodable>(payload: T) async throws -> U {
         let config = configProvider()
+        let payloadData = try JSONEncoder().encode(payload)
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                do {
+                    let result: U = try PythonWorkerClient.runGenericBlocking(config: config, payloadData: payloadData)
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private static func runGenericBlocking<U: Decodable>(config: WorkerConfig, payloadData: Data) throws -> U {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: config.pythonExecutable)
         process.arguments = [config.workerScriptPath]
 
         let inputPipe = Pipe()
         let outputPipe = Pipe()
+        let errorPipe = Pipe()
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
-        process.standardError = Pipe()
+        process.standardError = errorPipe
 
         try process.run()
 
-        let payloadData = try JSONEncoder().encode(payload)
-        inputPipe.fileHandleForWriting.write(payloadData)
+        try inputPipe.fileHandleForWriting.write(contentsOf: payloadData)
         try inputPipe.fileHandleForWriting.close()
 
         process.waitUntilExit()
+
         let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = errorPipe.fileHandleForReading.readDataToEndOfFile()
         if process.terminationStatus != 0 {
-            let stderrData = (process.standardError as? Pipe)?.fileHandleForReading.readDataToEndOfFile() ?? Data()
             let stderr = String(data: stderrData, encoding: .utf8) ?? ""
             throw WorkerError.executionFailed(stderr)
         }
@@ -247,7 +262,8 @@ final class PythonWorkerClient {
             return try JSONDecoder().decode(U.self, from: outputData)
         } catch {
             let text = String(data: outputData, encoding: .utf8) ?? ""
-            throw WorkerError.decodeFailed(text)
+            let errorText = String(data: stderrData, encoding: .utf8) ?? ""
+            throw WorkerError.decodeFailed([text, errorText].filter { !$0.isEmpty }.joined(separator: "\n"))
         }
     }
 }

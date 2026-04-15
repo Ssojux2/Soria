@@ -30,8 +30,6 @@ struct ContentView: View {
                     LibraryView(viewModel: viewModel)
                 case .scanJobs:
                     ScanJobsView(viewModel: viewModel)
-                case .analysis:
-                    AnalysisView(viewModel: viewModel)
                 case .search:
                     SearchView(viewModel: viewModel)
                 case .recommendations:
@@ -58,8 +56,6 @@ struct ContentView: View {
             return "music.note.list"
         case .scanJobs:
             return "arrow.triangle.2.circlepath"
-        case .analysis:
-            return "waveform.path.ecg"
         case .search:
             return "magnifyingglass"
         case .recommendations:

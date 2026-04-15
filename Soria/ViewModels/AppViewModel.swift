@@ -8,7 +8,7 @@ import UniformTypeIdentifiers
 final class AppViewModel: ObservableObject {
     @Published var selectedSection: SidebarSection = .library
     @Published var tracks: [Track] = []
-    @Published var selectedTrackID: UUID? {
+    @Published var selectedTrackIDs: Set<UUID> = [] {
         didSet {
             Task { await loadSelectedTrackDetails() }
         }
@@ -66,6 +66,8 @@ final class AppViewModel: ObservableObject {
     @Published var initialSetupStatusMessage: String = ""
     @Published var isRunningInitialSetup = false
     @Published var analysisScope: AnalysisScope = .selectedTrack
+    @Published var isCancellingAnalysis: Bool = false
+    @Published var isCancellingSearch: Bool = false
 
     private let database: LibraryDatabase
     private let scanner: LibraryScannerService
@@ -75,6 +77,8 @@ final class AppViewModel: ObservableObject {
     private let externalMetadataImporter = ExternalMetadataService()
     private let librarySyncService: DJLibrarySyncService
     private var pendingAnalyzeAllTrackIDs: [UUID] = []
+    private var analysisTask: Task<Void, Never>?
+    private var searchTask: Task<Void, Never>?
 
     init() {
         AppPaths.ensureDirectories()
@@ -119,8 +123,23 @@ final class AppViewModel: ObservableObject {
     }
 
     var selectedTrack: Track? {
-        guard let selectedTrackID else { return nil }
-        return tracks.first(where: { $0.id == selectedTrackID })
+        selectedTracks.first
+    }
+
+    var selectedTrackIDsInOrder: [UUID] {
+        selectedTracks.map(\.id)
+    }
+
+    var selectedTrackID: UUID? {
+        selectedTracks.first?.id
+    }
+
+    var selectedTracks: [Track] {
+        tracks.filter { selectedTrackIDs.contains($0.id) }
+    }
+
+    var selectedTrackSummaryLabel: String {
+        selectedTracks.map { "\($0.title) - \($0.artist)" }.joined(separator: ", ")
     }
 
     var selectedRecommendation: RecommendationCandidate? {
@@ -149,8 +168,26 @@ final class AppViewModel: ObservableObject {
     }
 
     var canRunReferenceTrackFeatures: Bool {
-        guard let selectedTrack else { return false }
-        return hasValidatedEmbeddingProfile && selectedTrack.hasCurrentEmbedding(profileID: embeddingProfile.id)
+        guard hasValidatedEmbeddingProfile else { return false }
+        return selectedTracks.contains(where: { $0.hasCurrentEmbedding(profileID: embeddingProfile.id) })
+    }
+
+    var selectedReferenceTracksMissingEmbeddingCount: Int {
+        selectedTracks.filter { !$0.hasCurrentEmbedding(profileID: embeddingProfile.id) }.count
+    }
+
+    var canRunAnalysis: Bool {
+        analysisScope.canRun(
+            validationStatus: validationStatus,
+            isBusy: isAnalyzing || isCancellingAnalysis,
+            tracks: tracks,
+            selectedTrackIDs: selectedTrackIDs,
+            activeProfileID: embeddingProfile.id
+        )
+    }
+
+    var hasSelectedTrackForSearchReference: Bool {
+        hasValidatedEmbeddingProfile && !selectedTracks.isEmpty
     }
 
     func addLibraryRoot() {
@@ -390,10 +427,14 @@ final class AppViewModel: ObservableObject {
             analysisErrorMessage = "Validate the active embedding profile before analyzing tracks."
             return
         }
+        if isAnalyzing {
+            analysisErrorMessage = "Analysis is running. Cancel it first."
+            return
+        }
 
         let targets = analysisScope.resolveTracks(
             from: tracks,
-            selectedTrackID: selectedTrackID,
+            selectedTrackIDs: selectedTrackIDs,
             activeProfileID: embeddingProfile.id
         )
         guard !targets.isEmpty else {
@@ -410,7 +451,8 @@ final class AppViewModel: ObservableObject {
             return
         }
 
-        Task {
+        analysisTask?.cancel()
+        analysisTask = Task {
             await analyzeTracks(targets, mode: .batch)
         }
     }
@@ -419,7 +461,8 @@ final class AppViewModel: ObservableObject {
         let targets = tracks.filter { pendingAnalyzeAllTrackIDs.contains($0.id) }
         pendingAnalyzeAllTrackIDs = []
         isShowingAnalyzeAllConfirmation = false
-        Task {
+        analysisTask?.cancel()
+        analysisTask = Task {
             await analyzeTracks(targets, mode: .batch)
         }
     }
@@ -427,6 +470,14 @@ final class AppViewModel: ObservableObject {
     func cancelAnalyzeAllTracks() {
         pendingAnalyzeAllTrackIDs = []
         isShowingAnalyzeAllConfirmation = false
+        cancelAnalysis()
+    }
+
+    func cancelAnalysis() {
+        analysisTask?.cancel()
+        isCancellingAnalysis = true
+        analysisErrorMessage = "Cancelling analysis..."
+        analysisTask = nil
     }
 
     func generateRecommendations(limit: Int = 20) {
@@ -605,14 +656,22 @@ final class AppViewModel: ObservableObject {
             genre: genre.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : genre
         )
 
+        searchTask?.cancel()
         isSearching = true
         searchResults = []
         searchStatusMessage = ""
 
-        Task {
-            defer { isSearching = false }
+        searchTask = Task {
+            defer {
+                isSearching = false
+                isCancellingSearch = false
+            }
 
             do {
+                if Task.isCancelled {
+                    return
+                }
+
                 let response: WorkerTrackSearchResponse
                 switch searchMode {
                 case .text:
@@ -629,27 +688,30 @@ final class AppViewModel: ObservableObject {
                     )
 
                 case .referenceTrack:
-                    guard let selectedTrack else {
-                        searchStatusMessage = "Select a library track first."
+                    let selectedReferenceTracks = selectedTracks.filter {
+                        $0.hasCurrentEmbedding(profileID: embeddingProfile.id)
+                    }
+                    guard !selectedReferenceTracks.isEmpty else {
+                        searchStatusMessage = "Select one or more reference tracks."
                         return
                     }
-                    guard selectedTrack.hasCurrentEmbedding(profileID: embeddingProfile.id) else {
-                        searchStatusMessage = "Analyze the selected track for the active embedding profile first."
+                    guard let referenceData = buildReferenceTrackSearchPayload(from: selectedReferenceTracks) else {
+                        searchStatusMessage = "Selected track(s) do not have active embeddings yet."
                         return
                     }
-                    let segments = try database.fetchSegments(trackID: selectedTrack.id)
-                    guard let trackEmbedding = try database.fetchTrackEmbedding(trackID: selectedTrack.id), !trackEmbedding.isEmpty else {
-                        searchStatusMessage = "The selected track does not have an active embedding yet."
-                        return
-                    }
+
                     response = try await worker.searchTracksReference(
-                        track: selectedTrack,
-                        segments: segments,
-                        trackEmbedding: trackEmbedding,
+                        track: selectedReferenceTracks[0],
+                        segments: referenceData.segments,
+                        trackEmbedding: referenceData.trackEmbedding,
                         limit: limit,
-                        excludeTrackPaths: [selectedTrack.filePath],
+                        excludeTrackPaths: Array(referenceData.excludeTrackPaths),
                         filters: filters
                     )
+                }
+
+                if Task.isCancelled {
+                    return
                 }
 
                 let trackIndex = Dictionary(uniqueKeysWithValues: tracks.map { ($0.filePath, $0) })
@@ -667,6 +729,9 @@ final class AppViewModel: ObservableObject {
                 }
                 searchStatusMessage = searchResults.isEmpty ? "No semantic matches found." : "Found \(searchResults.count) semantic matches."
             } catch {
+                if Task.isCancelled {
+                    return
+                }
                 searchStatusMessage = "Search failed: \(error.localizedDescription)"
                 AppLogger.shared.error("Search failed: \(error.localizedDescription)")
             }
@@ -678,14 +743,32 @@ final class AppViewModel: ObservableObject {
         requestAnalysis()
     }
 
+    func analyzeSelectedTracksForSearch() {
+        analyzeSelectedTrackForSearch()
+    }
+
+    func cancelSearch() {
+        searchTask?.cancel()
+        isCancellingSearch = true
+        searchStatusMessage = "Canceling search..."
+    }
+
     func refreshTracks() async {
         do {
             tracks = try database.fetchAllTracks()
-            if selectedTrackID == nil {
-                selectedTrackID = tracks.first?.id
+            let availableIDs = Set(tracks.map(\.id))
+            if selectedTrackIDs.isEmpty {
+                selectedTrackIDs = tracks.first.map { Set([$0.id]) } ?? []
             } else {
-                await loadSelectedTrackDetails()
+                let preservedIDs = selectedTrackIDs.intersection(availableIDs)
+                if preservedIDs.isEmpty {
+                    selectedTrackIDs = tracks.first.map { Set([$0.id]) } ?? []
+                } else {
+                    selectedTrackIDs = preservedIDs
+                }
             }
+
+            await loadSelectedTrackDetails()
         } catch {
             AppLogger.shared.error("Track reload failed: \(error.localizedDescription)")
         }
@@ -700,10 +783,22 @@ final class AppViewModel: ObservableObject {
 
         isAnalyzing = true
         analysisErrorMessage = ""
-        analysisQueueProgressText = ""
-        defer { isAnalyzing = false }
+        analysisQueueProgressText = "Preparing..."
+        isCancellingAnalysis = false
+        defer {
+            isAnalyzing = false
+            analysisTask = nil
+            if Task.isCancelled {
+                analysisErrorMessage = "Analysis was canceled."
+            }
+        }
 
         for (index, track) in tracksToAnalyze.enumerated() {
+            if Task.isCancelled {
+                analysisQueueProgressText = "Canceled: \(index) / \(tracksToAnalyze.count)"
+                break
+            }
+
             do {
                 let externalMetadata = try database.fetchExternalMetadata(trackID: track.id)
                 let existingSegments = try database.fetchSegments(trackID: track.id)
@@ -831,6 +926,47 @@ final class AppViewModel: ObservableObject {
         } catch {
             AppLogger.shared.error("Track detail load failed: \(error.localizedDescription)")
         }
+    }
+
+    private func buildReferenceTrackSearchPayload(from tracks: [Track]) -> (
+        trackEmbedding: [Double],
+        segments: [TrackSegment],
+        excludeTrackPaths: Set<String>
+    )? {
+        var embeddings: [[Double]] = []
+        var segments: [TrackSegment] = []
+        var excludeTrackPaths: Set<String> = []
+
+        for track in tracks {
+            excludeTrackPaths.insert(track.filePath)
+            if let embedding = (try? database.fetchTrackEmbedding(trackID: track.id)), !embedding.isEmpty {
+                embeddings.append(embedding)
+            }
+            if let trackSegments = try? database.fetchSegments(trackID: track.id) {
+                segments.append(contentsOf: trackSegments.compactMap { segment in
+                    segment.vector == nil ? nil : segment
+                })
+            }
+        }
+
+        guard let targetDimension = embeddings.first?.count, targetDimension > 0 else {
+            return nil
+        }
+
+        let alignedEmbeddings = embeddings.filter { $0.count == targetDimension }
+        guard !alignedEmbeddings.isEmpty else { return nil }
+
+        var merged = Array(repeating: 0.0, count: targetDimension)
+        for vector in alignedEmbeddings {
+            for index in 0..<targetDimension {
+                merged[index] += vector[index]
+            }
+        }
+        let scale = Double(alignedEmbeddings.count)
+        for index in 0..<targetDimension {
+            merged[index] /= scale
+        }
+        return (trackEmbedding: merged, segments: segments, excludeTrackPaths: excludeTrackPaths)
     }
 
     private func loadTrackEmbeddings() throws -> [UUID: [Double]] {

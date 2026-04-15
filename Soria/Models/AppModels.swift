@@ -3,7 +3,6 @@ import Foundation
 enum SidebarSection: String, CaseIterable, Identifiable {
     case library = "Library"
     case scanJobs = "Scan Jobs"
-    case analysis = "Analysis"
     case search = "Search"
     case recommendations = "Recommendations"
     case exports = "Exports"
@@ -79,7 +78,7 @@ enum AnalysisScope: String, CaseIterable, Identifiable {
     var helperText: String {
         switch self {
         case .selectedTrack:
-            return "Analyze the currently selected library track."
+            return "Analyze currently selected track(s)."
         case .unanalyzedTracks:
             return "Process tracks that have never been analyzed or need fresh embeddings for the active profile."
         case .allIndexedTracks:
@@ -88,10 +87,22 @@ enum AnalysisScope: String, CaseIterable, Identifiable {
     }
 
     func resolveTracks(from tracks: [Track], selectedTrackID: UUID?, activeProfileID: String) -> [Track] {
+        return resolveTracks(
+            from: tracks,
+            selectedTrackIDs: selectedTrackID == nil ? [] : [selectedTrackID!],
+            activeProfileID: activeProfileID
+        )
+    }
+
+    func resolveTracks(
+        from tracks: [Track],
+        selectedTrackIDs: Set<UUID>,
+        activeProfileID: String
+    ) -> [Track] {
         switch self {
         case .selectedTrack:
-            guard let selectedTrackID else { return [] }
-            return tracks.filter { $0.id == selectedTrackID }
+            guard !selectedTrackIDs.isEmpty else { return [] }
+            return tracks.filter { selectedTrackIDs.contains($0.id) }
         case .unanalyzedTracks:
             return tracks.filter { $0.analyzedAt == nil || !$0.hasCurrentEmbedding(profileID: activeProfileID) }
         case .allIndexedTracks:
@@ -113,6 +124,21 @@ enum AnalysisScope: String, CaseIterable, Identifiable {
             activeProfileID: activeProfileID
         ).isEmpty
     }
+
+    func canRun(
+        validationStatus: ValidationStatus,
+        isBusy: Bool,
+        tracks: [Track],
+        selectedTrackIDs: Set<UUID>,
+        activeProfileID: String
+    ) -> Bool {
+        guard validationStatus.allowsSemanticActions(isBusy: isBusy) else { return false }
+        return !resolveTracks(
+            from: tracks,
+            selectedTrackIDs: selectedTrackIDs,
+            activeProfileID: activeProfileID
+        ).isEmpty
+    }
 }
 
 enum SearchMode: String, CaseIterable, Identifiable {
@@ -126,7 +152,7 @@ enum SearchMode: String, CaseIterable, Identifiable {
         case .text:
             return "Text"
         case .referenceTrack:
-            return "Reference Track"
+            return "Reference Tracks"
         }
     }
 
@@ -135,7 +161,7 @@ enum SearchMode: String, CaseIterable, Identifiable {
         case .text:
             return "Describe the sound or transition you want"
         case .referenceTrack:
-            return "Reference track mode uses the selected track"
+            return "Reference track mode uses selected tracks"
         }
     }
 
@@ -172,10 +198,10 @@ struct EmbeddingProfile: Codable, Hashable, Identifiable {
     let backendKind: EmbeddingBackendKind
     let requiresAPIKey: Bool
 
-    static let googleTextEmbedding004 = EmbeddingProfile(
-        id: "google/text-embedding-004",
-        displayName: "Google AI text-embedding-004",
-        modelName: "text-embedding-004",
+    static let googleGeminiEmbedding2Preview = EmbeddingProfile(
+        id: "google/gemini-embedding-2-preview",
+        displayName: "Google AI gemini-embedding-2-preview",
+        modelName: "gemini-embedding-2-preview",
         backendKind: .googleAI,
         requiresAPIKey: true
     )
@@ -189,13 +215,13 @@ struct EmbeddingProfile: Codable, Hashable, Identifiable {
     )
 
     static let all: [EmbeddingProfile] = [
-        .googleTextEmbedding004,
+        .googleGeminiEmbedding2Preview,
         .clapHTSATUnfused
     ]
 
     static func resolve(id: String?) -> EmbeddingProfile {
-        guard let id else { return .googleTextEmbedding004 }
-        return all.first(where: { $0.id == id }) ?? .googleTextEmbedding004
+        guard let id else { return .googleGeminiEmbedding2Preview }
+        return all.first(where: { $0.id == id }) ?? .googleGeminiEmbedding2Preview
     }
 }
 
