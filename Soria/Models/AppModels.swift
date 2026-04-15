@@ -198,6 +198,14 @@ struct EmbeddingProfile: Codable, Hashable, Identifiable {
     let backendKind: EmbeddingBackendKind
     let requiresAPIKey: Bool
 
+    static let googleTextEmbedding004 = EmbeddingProfile(
+        id: "google/text-embedding-004",
+        displayName: "Google AI text-embedding-004",
+        modelName: "text-embedding-004",
+        backendKind: .googleAI,
+        requiresAPIKey: true
+    )
+
     static let googleGeminiEmbedding2Preview = EmbeddingProfile(
         id: "google/gemini-embedding-2-preview",
         displayName: "Google AI gemini-embedding-2-preview",
@@ -215,6 +223,7 @@ struct EmbeddingProfile: Codable, Hashable, Identifiable {
     )
 
     static let all: [EmbeddingProfile] = [
+        .googleTextEmbedding004,
         .googleGeminiEmbedding2Preview,
         .clapHTSATUnfused
     ]

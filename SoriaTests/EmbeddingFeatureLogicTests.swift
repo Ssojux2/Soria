@@ -147,7 +147,7 @@ struct EmbeddingFeatureLogicTests {
         )
 
         #expect(SearchMode.referenceTrack.isQueryEditable == false)
-        #expect(SearchMode.referenceTrack.queryPlaceholder == "Reference track mode uses the selected track")
+        #expect(SearchMode.referenceTrack.queryPlaceholder == "Reference track mode uses selected tracks")
         #expect(
             SearchMode.referenceTrack.canSubmit(
                 validationStatus: validated,
