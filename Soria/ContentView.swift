@@ -27,7 +27,7 @@ struct ContentView: View {
         } detail: {
             VSplitView {
                 selectedInfoPane
-                    .frame(minHeight: 260, idealHeight: 320)
+                    .frame(minHeight: selectedInfoPaneMinHeight, idealHeight: selectedInfoPaneIdealHeight)
                     .layoutPriority(1)
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("right-pane-info")
@@ -57,6 +57,24 @@ struct ContentView: View {
             return "square.and.arrow.up"
         case .settings:
             return "gearshape"
+        }
+    }
+
+    private var selectedInfoPaneMinHeight: CGFloat {
+        switch viewModel.selectedSection {
+        case .search:
+            return 380
+        default:
+            return 260
+        }
+    }
+
+    private var selectedInfoPaneIdealHeight: CGFloat {
+        switch viewModel.selectedSection {
+        case .search:
+            return 440
+        default:
+            return 320
         }
     }
 

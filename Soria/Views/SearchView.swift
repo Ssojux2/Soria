@@ -19,47 +19,44 @@ struct SearchView: View {
             hasReferenceTrackEmbedding: viewModel.canRunReferenceTrackFeatures
         )
 
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Search")
-                    .font(.title2.bold())
-                Spacer()
-                Picker("Mode", selection: $viewModel.searchMode) {
-                    ForEach(SearchMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
+        VStack(alignment: .leading, spacing: 16) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 12) {
+                    Text("Search")
+                        .font(.title2.bold())
+                    Spacer(minLength: 12)
+                    searchModePicker
+                        .frame(width: 260)
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 240)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Search")
+                        .font(.title2.bold())
+                    searchModePicker
+                        .frame(maxWidth: 320)
+                }
             }
 
             Text("Semantic search uses the active embedding profile. Reference mode searches from selected tracks.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-            HStack {
-                TextField(viewModel.searchMode.queryPlaceholder, text: $queryText)
-                .textFieldStyle(.roundedBorder)
-                .disabled(!viewModel.searchMode.isQueryEditable)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 12) {
+                    searchQueryField
+                    searchButton(canSearch: canSearch)
+                }
 
-                Button(viewModel.isSearching ? "Cancel" : "Search") {
-                    if viewModel.isSearching {
-                        viewModel.cancelSearch()
-                    } else {
-                        viewModel.searchTracks(
-                            queryText: queryText,
-                            bpmMin: Double(bpmMinText),
-                            bpmMax: Double(bpmMaxText),
-                            musicalKey: musicalKeyText,
-                            genre: genreText,
-                            analysisFocus: searchAnalysisFocus,
-                            mixabilityTags: splitTags(mixabilityTagsText),
-                            maxDurationMinutes: Double(maxDurationText)
-                        )
+                VStack(alignment: .leading, spacing: 12) {
+                    searchQueryField
+                    HStack {
+                        searchButton(canSearch: canSearch)
+                        Spacer()
                     }
                 }
-                .disabled(!canSearch)
             }
+            .layoutPriority(1)
 
             HStack {
                 TextField("BPM Min", text: $bpmMinText)
@@ -160,12 +157,46 @@ struct SearchView: View {
                         .lineLimit(2)
                 }
             }
-            .frame(minHeight: 300)
-
-            Spacer()
+            .frame(minHeight: 220, maxHeight: .infinity)
         }
         .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("search-info-view")
+    }
+
+    private var searchModePicker: some View {
+        Picker("Mode", selection: $viewModel.searchMode) {
+            ForEach(SearchMode.allCases) { mode in
+                Text(mode.displayName).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+    }
+
+    private var searchQueryField: some View {
+        TextField(viewModel.searchMode.queryPlaceholder, text: $queryText)
+            .textFieldStyle(.roundedBorder)
+            .disabled(!viewModel.searchMode.isQueryEditable)
+    }
+
+    private func searchButton(canSearch: Bool) -> some View {
+        Button(viewModel.isSearching ? "Cancel" : "Search") {
+            if viewModel.isSearching {
+                viewModel.cancelSearch()
+            } else {
+                viewModel.searchTracks(
+                    queryText: queryText,
+                    bpmMin: Double(bpmMinText),
+                    bpmMax: Double(bpmMaxText),
+                    musicalKey: musicalKeyText,
+                    genre: genreText,
+                    analysisFocus: searchAnalysisFocus,
+                    mixabilityTags: splitTags(mixabilityTagsText),
+                    maxDurationMinutes: Double(maxDurationText)
+                )
+            }
+        }
+        .disabled(!canSearch)
     }
 
     private func splitTags(_ input: String) -> [String] {
