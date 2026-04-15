@@ -4,13 +4,7 @@ struct AnalysisView: View {
     @ObservedObject var viewModel: AppViewModel
 
     var body: some View {
-        let canAnalyze = viewModel.analysisScope.canRun(
-            validationStatus: viewModel.validationStatus,
-            isBusy: viewModel.isAnalyzing,
-            tracks: viewModel.tracks,
-            selectedTrackIDs: viewModel.selectedTrackIDs,
-            activeProfileID: viewModel.embeddingProfile.id
-        )
+        let canAnalyze = viewModel.canRunAnalysis
 
         VStack(alignment: .leading, spacing: 14) {
             Text("Analysis")

@@ -215,7 +215,7 @@ struct TrackDetailView: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Text(track.hasCurrentEmbedding(profileID: viewModel.embeddingProfile.id) ? "Ready" : "Needs Analysis")
+                        Text(viewModel.isTrackReadyForActiveProfile(track) ? "Ready" : "Needs Analysis")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }

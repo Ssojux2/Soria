@@ -596,17 +596,20 @@ final class DJLibrarySyncService {
     private let fileManager: FileManager
     private let seratoService: SeratoLibraryService
     private let rekordboxService: RekordboxLibraryService
+    private let invalidateVectorIndex: @Sendable (Track) async -> Void
 
     init(
         database: LibraryDatabase,
         fileManager: FileManager = .default,
         seratoService: SeratoLibraryService = SeratoLibraryService(),
-        rekordboxService: RekordboxLibraryService = RekordboxLibraryService()
+        rekordboxService: RekordboxLibraryService = RekordboxLibraryService(),
+        invalidateVectorIndex: @escaping @Sendable (Track) async -> Void = { _ in }
     ) {
         self.database = database
         self.fileManager = fileManager
         self.seratoService = seratoService
         self.rekordboxService = rekordboxService
+        self.invalidateVectorIndex = invalidateVectorIndex
     }
 
     func detectAvailableSources(
@@ -755,6 +758,7 @@ final class DJLibrarySyncService {
 
         if fileChanged, let existing, existing.analyzedAt != nil {
             try database.clearAnalysis(trackID: existing.id)
+            await invalidateVectorIndex(existing)
             track.analyzedAt = nil
             if track.bpmSource == .soriaAnalysis {
                 track.bpm = nil

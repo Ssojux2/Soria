@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CryptoKit
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
@@ -53,6 +54,7 @@ final class AppViewModel: ObservableObject {
             searchResults = []
             recommendationStatusMessage = ""
             searchStatusMessage = ""
+            scheduleWorkerHealthRefresh()
         }
     }
     @Published var validationStatus: ValidationStatus
@@ -69,18 +71,34 @@ final class AppViewModel: ObservableObject {
     @Published var analysisScope: AnalysisScope = .selectedTrack
     @Published var isCancellingAnalysis: Bool = false
     @Published var isCancellingSearch: Bool = false
+    @Published private(set) var workerProfileStatuses: [String: WorkerProfileStatus] = [:]
 
     private let database: LibraryDatabase
-    private let scanner: LibraryScannerService
-    private let worker: PythonWorkerClient
     private let recommendationEngine = RecommendationEngine()
     private let exporter = PlaylistExportService()
     private let externalMetadataImporter = ExternalMetadataService()
     private let externalVisualizationResolver = ExternalVisualizationResolver()
-    private let librarySyncService: DJLibrarySyncService
     private var pendingAnalyzeAllTrackIDs: [UUID] = []
     private var analysisTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
+    private var workerHealthTask: Task<Void, Never>?
+    private var readyTrackIDs: Set<UUID> = []
+    private lazy var worker: PythonWorkerClient = PythonWorkerClient(
+        configProvider: { [unowned self] in
+            PythonWorkerClient.WorkerConfig(
+                pythonExecutable: self.pythonExecutablePath,
+                workerScriptPath: self.workerScriptPath,
+                googleAIAPIKey: self.googleAIAPIKey,
+                embeddingProfile: self.embeddingProfile
+            )
+        }
+    )
+    private lazy var scanner: LibraryScannerService = LibraryScannerService(database: database) { [weak self] track in
+        await self?.invalidateTrackVectors(for: track)
+    }
+    private lazy var librarySyncService: DJLibrarySyncService = DJLibrarySyncService(database: database) { [weak self] track in
+        await self?.invalidateTrackVectors(for: track)
+    }
 
     init() {
         AppPaths.ensureDirectories()
@@ -99,9 +117,6 @@ final class AppViewModel: ObservableObject {
         do {
             let database = try LibraryDatabase()
             self.database = database
-            self.scanner = LibraryScannerService(database: database)
-            self.worker = PythonWorkerClient()
-            self.librarySyncService = DJLibrarySyncService(database: database)
             self.librarySources = try database.fetchLibrarySources()
         } catch {
             fatalError("Database init failed: \(error)")
@@ -118,6 +133,7 @@ final class AppViewModel: ObservableObject {
         Task {
             await detectLibrarySources()
             await refreshTracks()
+            await refreshWorkerHealthAndRepairIfNeeded()
             if shouldShowInitialSetup(hasExistingRoots: hasExistingRoots) {
                 isShowingInitialSetupSheet = true
             }
@@ -162,20 +178,20 @@ final class AppViewModel: ObservableObject {
     }
 
     var activeEmbeddingTrackCount: Int {
-        tracks.filter { $0.hasCurrentEmbedding(profileID: embeddingProfile.id) }.count
+        readyTrackIDs.count
     }
 
     var staleEmbeddingTrackCount: Int {
-        tracks.filter { $0.analyzedAt != nil && !$0.hasCurrentEmbedding(profileID: embeddingProfile.id) }.count
+        tracks.filter { $0.analyzedAt != nil && !readyTrackIDs.contains($0.id) }.count
     }
 
     var canRunReferenceTrackFeatures: Bool {
         guard hasValidatedEmbeddingProfile else { return false }
-        return selectedTracks.contains(where: { $0.hasCurrentEmbedding(profileID: embeddingProfile.id) })
+        return selectedTracks.contains(where: { readyTrackIDs.contains($0.id) })
     }
 
     var selectedReferenceTracksMissingEmbeddingCount: Int {
-        selectedTracks.filter { !$0.hasCurrentEmbedding(profileID: embeddingProfile.id) }.count
+        selectedTracks.filter { !readyTrackIDs.contains($0.id) }.count
     }
 
     var canRunAnalysis: Bool {
@@ -184,12 +200,27 @@ final class AppViewModel: ObservableObject {
             isBusy: isAnalyzing || isCancellingAnalysis,
             tracks: tracks,
             selectedTrackIDs: selectedTrackIDs,
+            readyTrackIDs: readyTrackIDs,
             activeProfileID: embeddingProfile.id
         )
     }
 
     var hasSelectedTrackForSearchReference: Bool {
         hasValidatedEmbeddingProfile && !selectedTracks.isEmpty
+    }
+
+    var isSelectedEmbeddingProfileSupported: Bool {
+        workerProfileStatuses[embeddingProfile.id]?.supported ?? true
+    }
+
+    var selectedEmbeddingProfileDependencyMessage: String? {
+        guard let status = workerProfileStatuses[embeddingProfile.id], !status.supported else { return nil }
+        let detail = status.dependencyErrors.joined(separator: " ")
+        return detail.isEmpty ? "This embedding profile is currently unavailable." : detail
+    }
+
+    func isTrackReadyForActiveProfile(_ track: Track) -> Bool {
+        readyTrackIDs.contains(track.id)
     }
 
     func addLibraryRoot() {
@@ -377,6 +408,7 @@ final class AppViewModel: ObservableObject {
                 searchResults = []
             }
             settingsStatusMessage = "Analysis settings saved."
+            scheduleWorkerHealthRefresh()
         } catch {
             settingsStatusMessage = "Failed to save settings: \(error.localizedDescription)"
             AppLogger.shared.error("Settings save failed: \(error.localizedDescription)")
@@ -384,6 +416,12 @@ final class AppViewModel: ObservableObject {
     }
 
     func validateEmbeddingProfile() {
+        guard isSelectedEmbeddingProfileSupported else {
+            let message = selectedEmbeddingProfileDependencyMessage ?? "The selected embedding profile is unavailable."
+            validationStatus = .failed(message)
+            settingsStatusMessage = message
+            return
+        }
         guard !embeddingProfile.requiresAPIKey || !googleAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             validationStatus = .failed("Enter a Google AI API Key first.")
             settingsStatusMessage = "Enter a Google AI API Key before validating."
@@ -425,6 +463,10 @@ final class AppViewModel: ObservableObject {
     }
 
     func requestAnalysis() {
+        guard isSelectedEmbeddingProfileSupported else {
+            analysisErrorMessage = selectedEmbeddingProfileDependencyMessage ?? "The active embedding profile is unavailable."
+            return
+        }
         guard hasValidatedEmbeddingProfile else {
             analysisErrorMessage = "Validate the active embedding profile before analyzing tracks."
             return
@@ -437,6 +479,7 @@ final class AppViewModel: ObservableObject {
         let targets = analysisScope.resolveTracks(
             from: tracks,
             selectedTrackIDs: selectedTrackIDs,
+            readyTrackIDs: readyTrackIDs,
             activeProfileID: embeddingProfile.id
         )
         guard !targets.isEmpty else {
@@ -483,6 +526,10 @@ final class AppViewModel: ObservableObject {
     }
 
     func generateRecommendations(limit: Int = 20) {
+        guard isSelectedEmbeddingProfileSupported else {
+            recommendationStatusMessage = selectedEmbeddingProfileDependencyMessage ?? "The active embedding profile is unavailable."
+            return
+        }
         guard hasValidatedEmbeddingProfile else {
             recommendationStatusMessage = "Validate the active embedding profile first."
             return
@@ -491,7 +538,7 @@ final class AppViewModel: ObservableObject {
             recommendationStatusMessage = "Select a track first."
             return
         }
-        guard seed.hasCurrentEmbedding(profileID: embeddingProfile.id) else {
+        guard readyTrackIDs.contains(seed.id) else {
             recommendationStatusMessage = "Analyze the selected track for the active embedding profile first."
             return
         }
@@ -507,7 +554,7 @@ final class AppViewModel: ObservableObject {
                 )
                 let recs = recommendationEngine.recommendNextTracks(
                     seed: seed,
-                    candidates: tracks.filter { $0.hasCurrentEmbedding(profileID: embeddingProfile.id) },
+                    candidates: tracks.filter { readyTrackIDs.contains($0.id) },
                     embeddingsByTrackID: embeddingsByTrackID,
                     vectorSimilarityByPath: similarityMap,
                     constraints: constraints,
@@ -526,6 +573,10 @@ final class AppViewModel: ObservableObject {
     }
 
     func buildPlaylistPath() {
+        guard isSelectedEmbeddingProfileSupported else {
+            recommendationStatusMessage = selectedEmbeddingProfileDependencyMessage ?? "The active embedding profile is unavailable."
+            return
+        }
         guard hasValidatedEmbeddingProfile else {
             recommendationStatusMessage = "Validate the active embedding profile first."
             return
@@ -534,7 +585,7 @@ final class AppViewModel: ObservableObject {
             recommendationStatusMessage = "Select a track first."
             return
         }
-        guard seed.hasCurrentEmbedding(profileID: embeddingProfile.id) else {
+        guard readyTrackIDs.contains(seed.id) else {
             recommendationStatusMessage = "Analyze the selected track for the active embedding profile first."
             return
         }
@@ -555,7 +606,7 @@ final class AppViewModel: ObservableObject {
                     )
                     let next = recommendationEngine.recommendNextTracks(
                         seed: current,
-                        candidates: tracks.filter { $0.hasCurrentEmbedding(profileID: embeddingProfile.id) },
+                        candidates: tracks.filter { readyTrackIDs.contains($0.id) },
                         embeddingsByTrackID: embeddingsByTrackID,
                         vectorSimilarityByPath: similarityMap,
                         constraints: constraints,
@@ -649,6 +700,10 @@ final class AppViewModel: ObservableObject {
             searchStatusMessage = "Validate the active embedding profile first."
             return
         }
+        guard isSelectedEmbeddingProfileSupported else {
+            searchStatusMessage = selectedEmbeddingProfileDependencyMessage ?? "The active embedding profile is unavailable."
+            return
+        }
 
         let filters = WorkerSimilarityFilters(
             bpmMin: bpmMin,
@@ -691,7 +746,7 @@ final class AppViewModel: ObservableObject {
 
                 case .referenceTrack:
                     let selectedReferenceTracks = selectedTracks.filter {
-                        $0.hasCurrentEmbedding(profileID: embeddingProfile.id)
+                        readyTrackIDs.contains($0.id)
                     }
                     guard !selectedReferenceTracks.isEmpty else {
                         searchStatusMessage = "Select one or more reference tracks."
@@ -758,6 +813,7 @@ final class AppViewModel: ObservableObject {
     func refreshTracks() async {
         do {
             tracks = try database.fetchAllTracks()
+            readyTrackIDs = try database.fetchReadyTrackIDs(profileID: embeddingProfile.id)
             let availableIDs = Set(tracks.map(\.id))
             if selectedTrackIDs.isEmpty {
                 selectedTrackIDs = tracks.first.map { Set([$0.id]) } ?? []
@@ -806,7 +862,7 @@ final class AppViewModel: ObservableObject {
                 let existingSegments = try database.fetchSegments(trackID: track.id)
                 let existingSummary = try database.fetchAnalysisSummary(trackID: track.id)
                 let canReembed = track.analyzedAt != nil
-                    && !track.hasCurrentEmbedding(profileID: embeddingProfile.id)
+                    && !readyTrackIDs.contains(track.id)
                     && !existingSegments.isEmpty
                     && existingSummary != nil
 
@@ -823,19 +879,17 @@ final class AppViewModel: ObservableObject {
                     ) else {
                         throw WorkerError.executionFailed("Stored descriptor segments no longer match the re-embedded payload.")
                     }
+                    guard let trackEmbedding = result.trackEmbedding, !trackEmbedding.isEmpty else {
+                        throw WorkerError.executionFailed("Worker returned an empty track embedding for re-embedding.")
+                    }
 
                     try database.replaceTrackEmbeddings(
                         trackID: track.id,
                         segments: refreshedSegments,
-                        trackEmbedding: result.trackEmbedding,
-                        embeddingProfileID: result.embeddingProfileID
+                        trackEmbedding: trackEmbedding
                     )
-
-                    if var updatedTrack = tracks.first(where: { $0.id == track.id }) {
-                        updatedTrack.embeddingProfileID = result.embeddingProfileID
-                        updatedTrack.embeddingUpdatedAt = Date()
-                        try database.upsertTrack(updatedTrack)
-                    }
+                    try await worker.upsertTrackVectors(track: track, segments: refreshedSegments, trackEmbedding: trackEmbedding)
+                    try database.markTrackEmbeddingIndexed(trackID: track.id, embeddingProfileID: result.embeddingProfileID)
                 } else {
                     let result = try await worker.analyze(
                         filePath: track.filePath,
@@ -855,11 +909,14 @@ final class AppViewModel: ObservableObject {
                             vector: item.embedding
                         )
                     }
+                    guard let trackEmbedding = result.trackEmbedding, !trackEmbedding.isEmpty else {
+                        throw WorkerError.executionFailed("Worker returned an empty track embedding during analysis.")
+                    }
 
                     let summary = TrackAnalysisSummary(
                         trackID: track.id,
                         segments: segments,
-                        trackEmbedding: result.trackEmbedding,
+                        trackEmbedding: trackEmbedding,
                         estimatedBPM: result.estimatedBPM,
                         estimatedKey: result.estimatedKey,
                         brightness: result.brightness,
@@ -871,8 +928,7 @@ final class AppViewModel: ObservableObject {
                     try database.replaceSegments(
                         trackID: track.id,
                         segments: segments,
-                        analysisSummary: summary,
-                        embeddingProfileID: result.embeddingProfileID
+                        analysisSummary: summary
                     )
 
                     if var updatedTrack = tracks.first(where: { $0.id == track.id }) {
@@ -895,9 +951,11 @@ final class AppViewModel: ObservableObject {
                             updatedTrack.keySource = .soriaAnalysis
                         }
                         updatedTrack.analyzedAt = Date()
-                        updatedTrack.embeddingProfileID = result.embeddingProfileID
-                        updatedTrack.embeddingUpdatedAt = Date()
+                        updatedTrack.embeddingProfileID = nil
+                        updatedTrack.embeddingUpdatedAt = nil
                         try database.upsertTrack(updatedTrack)
+                        try await worker.upsertTrackVectors(track: updatedTrack, segments: segments, trackEmbedding: trackEmbedding)
+                        try database.markTrackEmbeddingIndexed(trackID: track.id, embeddingProfileID: result.embeddingProfileID)
                     }
                 }
 
@@ -975,7 +1033,17 @@ final class AppViewModel: ObservableObject {
             }
             if let trackSegments = try? database.fetchSegments(trackID: track.id) {
                 segments.append(contentsOf: trackSegments.compactMap { segment in
-                    segment.vector == nil ? nil : segment
+                    guard let vector = segment.vector, !vector.isEmpty else { return nil }
+                    return TrackSegment(
+                        id: segment.id,
+                        trackID: segment.trackID,
+                        type: segment.type,
+                        startSec: segment.startSec,
+                        endSec: segment.endSec,
+                        energyScore: segment.energyScore,
+                        descriptorText: segment.descriptorText,
+                        vector: vector
+                    )
                 })
             }
         }
@@ -1002,12 +1070,20 @@ final class AppViewModel: ObservableObject {
 
     private func loadTrackEmbeddings() throws -> [UUID: [Double]] {
         var output: [UUID: [Double]] = [:]
-        for track in tracks where track.hasCurrentEmbedding(profileID: embeddingProfile.id) {
+        for track in tracks where readyTrackIDs.contains(track.id) {
             if let embedding = try database.fetchTrackEmbedding(trackID: track.id), !embedding.isEmpty {
                 output[track.id] = embedding
             }
         }
         return output
+    }
+
+    private func invalidateTrackVectors(for track: Track) async {
+        do {
+            try await worker.deleteTrackVectors(trackID: track.id, deleteAllProfiles: true)
+        } catch {
+            AppLogger.shared.error("Failed to delete stale vectors for \(track.filePath): \(error.localizedDescription)")
+        }
     }
 
     private func workerSimilarityMap(
@@ -1020,7 +1096,10 @@ final class AppViewModel: ObservableObject {
             return [:]
         }
 
-        let seedSegments = try database.fetchSegments(trackID: seed.id)
+        let seedSegments = try database.fetchSegments(trackID: seed.id).filter { segment in
+            guard let vector = segment.vector else { return false }
+            return !vector.isEmpty
+        }
         let filters = WorkerSimilarityFilters(
             bpmMin: constraints.targetBPMMin,
             bpmMax: constraints.targetBPMMax,
@@ -1127,6 +1206,83 @@ final class AppViewModel: ObservableObject {
             recommendations = []
             searchResults = []
         }
+    }
+
+    private func scheduleWorkerHealthRefresh() {
+        workerHealthTask?.cancel()
+        workerHealthTask = Task { @MainActor [weak self] in
+            await self?.refreshWorkerHealthAndRepairIfNeeded()
+        }
+    }
+
+    private func refreshWorkerHealthAndRepairIfNeeded() async {
+        do {
+            let healthcheck = try await worker.healthcheck()
+            if Task.isCancelled {
+                return
+            }
+
+            workerProfileStatuses = healthcheck.profileStatusByID
+            readyTrackIDs = try database.fetchReadyTrackIDs(profileID: embeddingProfile.id)
+
+            guard workerProfileStatuses[embeddingProfile.id]?.supported ?? true else {
+                return
+            }
+
+            try await repairVectorIndexIfNeeded(healthcheck: healthcheck)
+        } catch {
+            if Task.isCancelled {
+                return
+            }
+            AppLogger.shared.error("Worker healthcheck failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func repairVectorIndexIfNeeded(healthcheck: WorkerHealthcheckResponse) async throws {
+        let readyTracks = tracks.filter { readyTrackIDs.contains($0.id) }
+        let readyTrackPaths = Set(readyTracks.map(\.filePath))
+        let indexedTrackPaths = Set(healthcheck.vectorIndexState?.trackFilePaths ?? [])
+        let indexedTrackCount = healthcheck.vectorIndexState?.trackCount ?? 0
+        let hasDrift = indexedTrackCount != readyTracks.count || indexedTrackPaths != readyTrackPaths
+
+        if !hasDrift {
+            AppSettingsStore.clearAutomaticVectorRepair(profileID: embeddingProfile.id)
+            return
+        }
+
+        let repairSignature = vectorRepairSignature(profileID: embeddingProfile.id, trackPaths: readyTrackPaths)
+        if AppSettingsStore.automaticVectorRepairSignature(profileID: embeddingProfile.id) == repairSignature {
+            return
+        }
+
+        var segmentsByTrackID: [UUID: [TrackSegment]] = [:]
+        var trackEmbeddings: [UUID: [Double]] = [:]
+        for track in readyTracks {
+            guard let embedding = try database.fetchTrackEmbedding(trackID: track.id), !embedding.isEmpty else {
+                continue
+            }
+            let segments = try database.fetchSegments(trackID: track.id).compactMap { segment -> TrackSegment? in
+                guard let vector = segment.vector, !vector.isEmpty else { return nil }
+                return segment
+            }
+            guard !segments.isEmpty else { continue }
+            segmentsByTrackID[track.id] = segments
+            trackEmbeddings[track.id] = embedding
+        }
+
+        try await worker.rebuildVectorIndex(
+            tracks: readyTracks,
+            segmentsByTrackID: segmentsByTrackID,
+            trackEmbeddings: trackEmbeddings
+        )
+        AppSettingsStore.markAutomaticVectorRepair(profileID: embeddingProfile.id, signature: repairSignature)
+        AppLogger.shared.info("Automatically rebuilt the \(embeddingProfile.id) vector index.")
+    }
+
+    private func vectorRepairSignature(profileID: String, trackPaths: Set<String>) -> String {
+        let joined = ([profileID] + trackPaths.sorted()).joined(separator: "\n")
+        let digest = SHA256.hash(data: Data(joined.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     private func detectLibrarySources() async {

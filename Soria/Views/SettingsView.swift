@@ -15,7 +15,9 @@ struct SettingsView: View {
                             .font(.headline)
                         Picker("Embedding Profile", selection: $viewModel.embeddingProfile) {
                             ForEach(EmbeddingProfile.all, id: \.id) { profile in
-                                Text(profile.displayName).tag(profile)
+                                Text(profile.displayName)
+                                    .tag(profile)
+                                    .disabled(!(viewModel.workerProfileStatuses[profile.id]?.supported ?? true))
                             }
                         }
                         .pickerStyle(.menu)
@@ -23,6 +25,12 @@ struct SettingsView: View {
                         Text("Active model: \(viewModel.embeddingProfile.modelName)")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+
+                        if let dependencyMessage = viewModel.selectedEmbeddingProfileDependencyMessage {
+                            Text(dependencyMessage)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
 
                         Text("Validation")
                             .font(.headline)
@@ -64,7 +72,7 @@ struct SettingsView: View {
                             Button(viewModel.embeddingProfile.requiresAPIKey ? "Validate API Key" : "Validate Profile") {
                                 viewModel.validateEmbeddingProfile()
                             }
-                            .disabled(viewModel.validationStatus == .validating)
+                            .disabled(viewModel.validationStatus == .validating || !viewModel.isSelectedEmbeddingProfileSupported)
                         }
 
                         if !viewModel.settingsStatusMessage.isEmpty {
