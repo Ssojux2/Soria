@@ -70,10 +70,13 @@ def main() -> int:
 
         _print_json({"error": f"Unsupported command: {command}"})
         return 2
+    except BrokenPipeError:
+        return 0
     except Exception as exc:
         LOGGER.exception("Worker command failed")
-        _print_json({"error": str(exc)})
-        return 1
+        if _print_json({"error": str(exc)}):
+            return 1
+        return 0
 
 
 def handle_validate_embedding_profile(payload: dict[str, Any]) -> dict[str, Any]:
@@ -759,9 +762,19 @@ def _load_vector_store():
     return ChromaVectorStore
 
 
-def _print_json(payload: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False))
-    sys.stdout.flush()
+def _print_json(payload: dict[str, Any]) -> bool:
+    try:
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False))
+        sys.stdout.flush()
+        return True
+    except BrokenPipeError:
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+            os.close(devnull)
+        except OSError:
+            pass
+        return False
 
 
 if __name__ == "__main__":

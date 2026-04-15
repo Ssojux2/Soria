@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import math
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -560,3 +562,34 @@ def test_vector_maintenance_commands_update_profile_index(monkeypatch: pytest.Mo
         }
     )
     assert rebuilt["indexedTrackCount"] == 1
+
+
+def test_healthcheck_ignores_broken_pipe_when_stdout_closes(tmp_path: Path) -> None:
+    payload = {
+        "command": "healthcheck",
+        "options": {
+            "cacheDirectory": str(tmp_path),
+            "embeddingProfileID": "google/gemini-embedding-2-preview",
+        },
+    }
+
+    proc = subprocess.Popen(
+        [sys.executable, str(ANALYSIS_WORKER_ROOT / "main.py")],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert proc.stdin is not None
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+
+    proc.stdin.write(json.dumps(payload).encode())
+    proc.stdin.close()
+    proc.stdout.close()
+
+    stderr = proc.stderr.read().decode()
+    returncode = proc.wait(timeout=5)
+
+    assert returncode == 0
+    assert "BrokenPipeError" not in stderr
