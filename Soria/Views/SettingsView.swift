@@ -164,5 +164,6 @@ struct SettingsView: View {
             }
             .padding()
         }
+        .accessibilityIdentifier("settings-info-view")
     }
 }

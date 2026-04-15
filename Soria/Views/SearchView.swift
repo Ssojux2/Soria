@@ -138,5 +138,6 @@ struct SearchView: View {
             Spacer()
         }
         .padding()
+        .accessibilityIdentifier("search-info-view")
     }
 }

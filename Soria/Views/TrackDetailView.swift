@@ -68,6 +68,7 @@ struct TrackDetailView: View {
             .padding()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .accessibilityIdentifier("track-detail-info-view")
     }
 
     @ViewBuilder

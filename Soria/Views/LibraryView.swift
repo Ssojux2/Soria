@@ -82,6 +82,7 @@ struct LibraryView: View {
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .accessibilityIdentifier("library-view")
     }
 
     private var activeSourceCount: Int {

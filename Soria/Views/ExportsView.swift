@@ -36,5 +36,6 @@ struct ExportsView: View {
             Spacer()
         }
         .padding()
+        .accessibilityIdentifier("exports-info-view")
     }
 }

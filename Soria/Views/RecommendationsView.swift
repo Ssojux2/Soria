@@ -141,6 +141,7 @@ struct RecommendationsView: View {
             excludeTagsText = viewModel.constraints.excludeTags.joined(separator: ", ")
             maxDurationText = viewModel.constraints.maxDurationMinutes.map { String(format: "%.1f", $0) } ?? ""
         }
+        .accessibilityIdentifier("recommendations-info-view")
     }
 
     private func splitTags(_ input: String) -> [String] {

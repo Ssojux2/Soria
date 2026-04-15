@@ -20,17 +20,22 @@ struct ContentView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("sidebar-\(section.rawValue.lowercased())")
                 }
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220)
         } detail: {
             VSplitView {
-                LibraryView(viewModel: viewModel)
-                    .frame(minHeight: 340)
-                    .layoutPriority(1)
-
                 selectedInfoPane
-                    .frame(minHeight: 260)
+                    .frame(minHeight: 260, idealHeight: 320)
+                    .layoutPriority(1)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("right-pane-info")
+
+                LibraryView(viewModel: viewModel)
+                    .frame(minHeight: 340, idealHeight: 420)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("right-pane-library")
             }
             .navigationTitle(viewModel.selectedSection.rawValue)
         }
