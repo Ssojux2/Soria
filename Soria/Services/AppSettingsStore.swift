@@ -10,6 +10,8 @@ enum AppSettingsStore {
     private static let lastValidatedKeyHashKey = "settings.lastValidatedKeyHash"
     private static let lastValidatedProfileIDKey = "settings.lastValidatedProfileID"
     private static let lastValidatedAtKey = "settings.lastValidatedAt"
+    private static let automaticVectorRepairSignaturePrefix = "settings.vectorRepairSignature."
+    private static let automaticVectorRepairAtPrefix = "settings.vectorRepairAt."
 
     static func loadPythonExecutablePath() -> String {
         if let environmentValue = ProcessInfo.processInfo.environment["SORIA_PYTHON"], !environmentValue.isEmpty {
@@ -71,7 +73,13 @@ enum AppSettingsStore {
     }
 
     static func loadEmbeddingProfile() -> EmbeddingProfile {
-        EmbeddingProfile.resolve(id: UserDefaults.standard.string(forKey: embeddingProfileIDKey))
+        let storedID = UserDefaults.standard.string(forKey: embeddingProfileIDKey)
+        if storedID == EmbeddingProfile.legacyGoogleTextEmbedding004ID {
+            UserDefaults.standard.set(EmbeddingProfile.googleGeminiEmbedding2Preview.id, forKey: embeddingProfileIDKey)
+            clearValidationMetadata()
+            return .googleGeminiEmbedding2Preview
+        }
+        return EmbeddingProfile.resolve(id: storedID)
     }
 
     static func saveEmbeddingProfile(_ profile: EmbeddingProfile) {
@@ -131,6 +139,29 @@ enum AppSettingsStore {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
+    static func automaticVectorRepairSignature(profileID: String) -> String? {
+        UserDefaults.standard.string(forKey: automaticVectorRepairSignaturePrefix + sanitizeProfileKey(profileID))
+    }
+
+    static func automaticVectorRepairDate(profileID: String) -> Date? {
+        guard let raw = UserDefaults.standard.string(forKey: automaticVectorRepairAtPrefix + sanitizeProfileKey(profileID)) else {
+            return nil
+        }
+        return LibraryDatabase.iso8601.date(from: raw)
+    }
+
+    static func markAutomaticVectorRepair(profileID: String, signature: String, date: Date = Date()) {
+        let suffix = sanitizeProfileKey(profileID)
+        UserDefaults.standard.set(signature, forKey: automaticVectorRepairSignaturePrefix + suffix)
+        UserDefaults.standard.set(LibraryDatabase.iso8601.string(from: date), forKey: automaticVectorRepairAtPrefix + suffix)
+    }
+
+    static func clearAutomaticVectorRepair(profileID: String) {
+        let suffix = sanitizeProfileKey(profileID)
+        UserDefaults.standard.removeObject(forKey: automaticVectorRepairSignaturePrefix + suffix)
+        UserDefaults.standard.removeObject(forKey: automaticVectorRepairAtPrefix + suffix)
+    }
+
     static func detectedPythonExecutablePath() -> String? {
         guard let projectRoot else { return nil }
         let candidate = projectRoot.appendingPathComponent("analysis-worker/.venv/bin/python").path
@@ -168,5 +199,11 @@ enum AppSettingsStore {
             return nil
         }
         return LibraryDatabase.iso8601.date(from: raw)
+    }
+
+    private static func sanitizeProfileKey(_ profileID: String) -> String {
+        profileID.unicodeScalars.map { scalar in
+            CharacterSet.alphanumerics.contains(scalar) ? String(scalar) : "_"
+        }.joined()
     }
 }

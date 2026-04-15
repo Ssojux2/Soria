@@ -33,10 +33,7 @@ class ChromaVectorStore:
         self.client = chromadb.PersistentClient(path=persist_dir, settings=Settings(anonymized_telemetry=False))
         self.profile_id = profile_id
         self.profile_slug = sanitize_profile_id(profile_id)
-        self.collections = {
-            key: self.client.get_or_create_collection(self._collection_name(key))
-            for key in self.COLLECTION_KEYS
-        }
+        self.collections = self._load_collections()
 
     def upsert_track_embeddings(
         self,
@@ -117,6 +114,48 @@ class ChromaVectorStore:
         for collection in self.collections.values():
             collection.delete(where={"track_id": track_id})
 
+    def reset_profile(self) -> None:
+        for key in self.COLLECTION_KEYS:
+            collection_name = self._collection_name(key)
+            delete_collection = getattr(self.client, "delete_collection", None)
+            if callable(delete_collection):
+                try:
+                    delete_collection(collection_name)
+                except Exception:
+                    pass
+        self.collections = self._load_collections()
+
+    def index_state(self) -> dict[str, Any]:
+        track_collection = self.collections["tracks"]
+        response = track_collection.get(include=["metadatas"])
+        metadatas = response.get("metadatas") or []
+        track_ids = sorted(
+            {
+                str(metadata.get("track_id") or metadata.get("app_track_id") or "")
+                for metadata in metadatas
+                if isinstance(metadata, dict)
+            }
+            - {""}
+        )
+        file_paths = sorted(
+            {
+                str(metadata.get("file_path") or "")
+                for metadata in metadatas
+                if isinstance(metadata, dict)
+            }
+            - {""}
+        )
+
+        return {
+            "trackCount": int(track_collection.count()),
+            "trackIDs": track_ids,
+            "trackFilePaths": file_paths,
+            "collectionCounts": {
+                key: int(collection.count())
+                for key, collection in self.collections.items()
+            },
+        }
+
     def search(
         self,
         query_embeddings: dict[str, list[float]],
@@ -176,6 +215,12 @@ class ChromaVectorStore:
 
     def _collection_name(self, key: str) -> str:
         return f"{key}__{self.profile_slug}"
+
+    def _load_collections(self) -> dict[str, Any]:
+        return {
+            key: self.client.get_or_create_collection(self._collection_name(key))
+            for key in self.COLLECTION_KEYS
+        }
 
 
 def sanitize_profile_id(profile_id: str) -> str:

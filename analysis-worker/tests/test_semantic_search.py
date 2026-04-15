@@ -71,6 +71,14 @@ class FakeCollection:
             "metadatas": [[metadata for _, metadata in limited]],
         }
 
+    def get(self, include: list[str] | None = None) -> dict[str, list[dict[str, object]]]:
+        return {
+            "metadatas": [payload["metadata"] for payload in self.records.values()],
+        }
+
+    def count(self) -> int:
+        return len(self.records)
+
 
 class FakePersistentClient:
     stores: dict[str, dict[str, FakeCollection]] = {}
@@ -81,6 +89,9 @@ class FakePersistentClient:
 
     def get_or_create_collection(self, name: str) -> FakeCollection:
         return self.collections.setdefault(name, FakeCollection(name))
+
+    def delete_collection(self, name: str) -> None:
+        self.collections.pop(name, None)
 
 
 class FakeSettings:
@@ -178,6 +189,33 @@ def test_validate_embedding_profile_failure(monkeypatch: pytest.MonkeyPatch) -> 
     with pytest.raises(ValueError, match="Failed to validate"):
         worker_main.handle_validate_embedding_profile(
             {"options": {"embeddingProfileID": "google/gemini-embedding-2-preview"}}
+        )
+
+
+def test_embed_descriptors_requires_non_empty_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeEmbeddingClient:
+        _last_error = "Synthetic embedding failure"
+
+        def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+            return [None for _ in texts]
+
+    monkeypatch.setattr(worker_main, "_build_embedding_client", lambda payload, profile: FakeEmbeddingClient())
+
+    with pytest.raises(ValueError, match="Synthetic embedding failure"):
+        worker_main.handle_embed_descriptors(
+            {
+                "filePath": "/tracks/failing.mp3",
+                "segments": [
+                    {
+                        "segmentType": "intro",
+                        "startSec": 0,
+                        "endSec": 10,
+                        "energyScore": 0.4,
+                        "descriptorText": "warm pads",
+                    }
+                ],
+                "options": {"embeddingProfileID": "google/gemini-embedding-2-preview"},
+            }
         )
 
 
@@ -372,3 +410,116 @@ def test_reembedding_replaces_existing_profile_entries(monkeypatch: pytest.Monke
     assert len(store.collections["intro"].records) == 1
     assert len(store.collections["middle"].records) == 1
     assert len(store.collections["outro"].records) == 1
+
+
+def test_analyze_does_not_mutate_vector_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSegment:
+        def __init__(self, segment_type: str, descriptor_text: str) -> None:
+            self.segment_type = segment_type
+            self.start_sec = 0.0
+            self.end_sec = 30.0
+            self.energy_score = 0.5
+            self.descriptor_text = descriptor_text
+
+    def fake_analyze_track(file_path: str, track_metadata: dict[str, object]) -> dict[str, object]:
+        return {
+            "segments": [FakeSegment("intro", "bright intro")],
+            "estimated_bpm": 124.0,
+            "estimated_key": "8A",
+            "brightness": 0.5,
+            "onset_density": 0.5,
+            "rhythmic_density": 0.5,
+            "low_mid_high_balance": [0.3, 0.4, 0.3],
+            "waveform_preview": [0.1, 0.2],
+        }
+
+    class FakeEmbeddingClient:
+        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(worker_main, "_load_analyze_track", lambda: fake_analyze_track)
+    monkeypatch.setattr(worker_main, "_build_embedding_client", lambda payload, profile: FakeEmbeddingClient())
+    monkeypatch.setattr(worker_main, "_vector_store", lambda payload, profile: pytest.fail("vector store should not be touched"))
+
+    result = worker_main.handle_analyze(
+        {
+            "filePath": "/tracks/analyze.mp3",
+            "trackMetadata": {"trackID": "track-1"},
+            "options": {"embeddingProfileID": "google/gemini-embedding-2-preview"},
+        }
+    )
+
+    assert result["trackEmbedding"] == pytest.approx([1.0, 0.0])
+    assert result["segments"][0]["embedding"] == pytest.approx([1.0, 0.0])
+
+
+def test_vector_maintenance_commands_update_profile_index(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _install_fake_chroma(monkeypatch)
+
+    payload = {
+        "options": {
+            "cacheDirectory": str(tmp_path),
+            "embeddingProfileID": "google/gemini-embedding-2-preview",
+        },
+        "track": {
+            "trackID": "track-1",
+            "filePath": "/tracks/one.mp3",
+            "scanVersion": "v1",
+            "bpm": 124,
+            "musicalKey": "8A",
+            "genre": "House",
+            "duration": 300,
+            "trackEmbedding": [1.0, 0.0],
+            "segments": [
+                {
+                    "segmentID": "seg-intro",
+                    "segmentType": "intro",
+                    "startSec": 0,
+                    "endSec": 30,
+                    "energyScore": 0.5,
+                    "descriptorText": "intro",
+                    "embedding": [1.0, 0.0],
+                }
+            ],
+        },
+    }
+
+    upsert_result = worker_main.handle_upsert_track_vectors({"command": "upsert_track_vectors", **payload})
+    assert upsert_result["indexedTrackCount"] == 1
+
+    health = worker_main.handle_healthcheck(
+        {
+            "command": "healthcheck",
+            "options": {
+                "cacheDirectory": str(tmp_path),
+                "embeddingProfileID": "google/gemini-embedding-2-preview",
+            },
+        }
+    )
+    assert health["vectorIndexState"]["trackCount"] == 1
+    assert health["vectorIndexState"]["trackFilePaths"] == ["/tracks/one.mp3"]
+
+    delete_result = worker_main.handle_delete_track_vectors(
+        {
+            "command": "delete_track_vectors",
+            "trackID": "track-1",
+            "deleteAllProfiles": True,
+            "options": {
+                "cacheDirectory": str(tmp_path),
+                "embeddingProfileID": "google/gemini-embedding-2-preview",
+            },
+        }
+    )
+    assert delete_result["deletedProfileIDs"] == ["google/gemini-embedding-2-preview", "local/clap-htsat-unfused"]
+
+    rebuilt = worker_main.handle_rebuild_vector_index(
+        {
+            "command": "rebuild_vector_index",
+            "tracks": [payload["track"]],
+            "options": {
+                "cacheDirectory": str(tmp_path),
+                "embeddingProfileID": "google/gemini-embedding-2-preview",
+            },
+        }
+    )
+    assert rebuilt["indexedTrackCount"] == 1

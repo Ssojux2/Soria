@@ -116,8 +116,7 @@ final class LibraryDatabase {
     func replaceSegments(
         trackID: UUID,
         segments: [TrackSegment],
-        analysisSummary: TrackAnalysisSummary,
-        embeddingProfileID: String
+        analysisSummary: TrackAnalysisSummary
     ) throws {
         try withTransaction {
             try withStatement("DELETE FROM segments WHERE track_id = ?;") { statement in
@@ -143,7 +142,7 @@ final class LibraryDatabase {
                     sqlite3_bind_double(statement, 5, segment.endSec)
                     sqlite3_bind_double(statement, 6, segment.energyScore)
                     bind(statement, index: 7, text: segment.descriptorText)
-                    bind(statement, index: 8, text: jsonString(segment.vector ?? []))
+                    bind(statement, index: 8, text: nonEmptyJSONArrayText(segment.vector))
                     guard sqlite3_step(statement) == SQLITE_DONE else {
                         throw DatabaseError.writeFailed
                     }
@@ -153,16 +152,14 @@ final class LibraryDatabase {
             let updateSQL = """
             UPDATE tracks
             SET analyzed_at = ?, track_embedding_json = ?, analysis_summary_json = ?,
-                embedding_profile_id = ?, embedding_updated_at = ?
+                embedding_profile_id = NULL, embedding_updated_at = NULL
             WHERE id = ?;
             """
             try withStatement(updateSQL) { statement in
                 bind(statement, index: 1, text: Self.iso8601.string(from: Date()))
-                bind(statement, index: 2, text: jsonString(analysisSummary.trackEmbedding ?? []))
+                bind(statement, index: 2, text: nonEmptyJSONArrayText(analysisSummary.trackEmbedding))
                 bind(statement, index: 3, text: jsonString(analysisSummary))
-                bind(statement, index: 4, text: embeddingProfileID)
-                bind(statement, index: 5, text: Self.iso8601.string(from: Date()))
-                bind(statement, index: 6, text: trackID.uuidString)
+                bind(statement, index: 4, text: trackID.uuidString)
                 guard sqlite3_step(statement) == SQLITE_DONE else {
                     throw DatabaseError.writeFailed
                 }
@@ -173,8 +170,7 @@ final class LibraryDatabase {
     func replaceTrackEmbeddings(
         trackID: UUID,
         segments: [TrackSegment],
-        trackEmbedding: [Double]?,
-        embeddingProfileID: String
+        trackEmbedding: [Double]?
     ) throws {
         guard let existingSummary = try fetchAnalysisSummary(trackID: trackID) else {
             throw DatabaseError.writeFailed
@@ -199,7 +195,7 @@ final class LibraryDatabase {
                 for segment in segments {
                     sqlite3_reset(statement)
                     sqlite3_clear_bindings(statement)
-                    bind(statement, index: 1, text: jsonString(segment.vector ?? []))
+                    bind(statement, index: 1, text: nonEmptyJSONArrayText(segment.vector))
                     bind(statement, index: 2, text: segment.id.uuidString)
                     guard sqlite3_step(statement) == SQLITE_DONE else {
                         throw DatabaseError.writeFailed
@@ -210,15 +206,13 @@ final class LibraryDatabase {
             let updateTrackSQL = """
             UPDATE tracks
             SET track_embedding_json = ?, analysis_summary_json = ?,
-                embedding_profile_id = ?, embedding_updated_at = ?
+                embedding_profile_id = NULL, embedding_updated_at = NULL
             WHERE id = ?;
             """
             try withStatement(updateTrackSQL) { statement in
-                bind(statement, index: 1, text: jsonString(trackEmbedding ?? []))
+                bind(statement, index: 1, text: nonEmptyJSONArrayText(trackEmbedding))
                 bind(statement, index: 2, text: jsonString(refreshedSummary))
-                bind(statement, index: 3, text: embeddingProfileID)
-                bind(statement, index: 4, text: Self.iso8601.string(from: Date()))
-                bind(statement, index: 5, text: trackID.uuidString)
+                bind(statement, index: 3, text: trackID.uuidString)
                 guard sqlite3_step(statement) == SQLITE_DONE else {
                     throw DatabaseError.writeFailed
                 }
@@ -255,7 +249,7 @@ final class LibraryDatabase {
                         endSec: sqlite3_column_double(statement, 3),
                         energyScore: sqlite3_column_double(statement, 4),
                         descriptorText: descriptorText,
-                        vector: doubles(from: sqliteString(statement, index: 6) ?? "[]")
+                        vector: optionalDoubles(from: sqliteString(statement, index: 6))
                     )
                 )
             }
@@ -269,7 +263,59 @@ final class LibraryDatabase {
             bind(statement, index: 1, text: trackID.uuidString)
             guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
             guard let jsonText = sqliteString(statement, index: 0), !jsonText.isEmpty else { return nil }
-            return doubles(from: jsonText)
+            return optionalDoubles(from: jsonText)
+        }
+    }
+
+    func fetchReadyTrackIDs(profileID: String) throws -> Set<UUID> {
+        let sql = """
+        SELECT id
+        FROM tracks
+        WHERE embedding_profile_id = ?
+          AND embedding_updated_at IS NOT NULL
+          AND track_embedding_json IS NOT NULL
+          AND track_embedding_json <> ''
+          AND track_embedding_json <> '[]'
+          AND EXISTS (
+            SELECT 1
+            FROM segments
+            WHERE segments.track_id = tracks.id
+              AND embedding_json IS NOT NULL
+              AND embedding_json <> ''
+              AND embedding_json <> '[]'
+          );
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, index: 1, text: profileID)
+            var output: Set<UUID> = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let idText = sqliteString(statement, index: 0), let id = UUID(uuidString: idText) else {
+                    continue
+                }
+                output.insert(id)
+            }
+            return output
+        }
+    }
+
+    func markTrackEmbeddingIndexed(
+        trackID: UUID,
+        embeddingProfileID: String,
+        indexedAt: Date = Date()
+    ) throws {
+        try withStatement(
+            """
+            UPDATE tracks
+            SET embedding_profile_id = ?, embedding_updated_at = ?
+            WHERE id = ?;
+            """
+        ) { statement in
+            bind(statement, index: 1, text: embeddingProfileID)
+            bind(statement, index: 2, text: Self.iso8601.string(from: indexedAt))
+            bind(statement, index: 3, text: trackID.uuidString)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
         }
     }
 
@@ -604,6 +650,8 @@ final class LibraryDatabase {
         try exec("CREATE INDEX IF NOT EXISTS idx_external_metadata_track ON external_metadata(track_id);")
         try exec("CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(file_path);")
         try exec("CREATE INDEX IF NOT EXISTS idx_library_sources_kind ON library_sources(kind);")
+        try migrateLegacyEmbeddingProfileState()
+        try invalidateIncompleteEmbeddingState()
     }
 
     private func track(from statement: OpaquePointer?) -> Track? {
@@ -742,6 +790,17 @@ final class LibraryDatabase {
         (try? decode([Double].self, from: text)) ?? []
     }
 
+    private func optionalDoubles(from text: String?) -> [Double]? {
+        guard let text, !text.isEmpty else { return nil }
+        let decoded = doubles(from: text)
+        return decoded.isEmpty ? nil : decoded
+    }
+
+    private func nonEmptyJSONArrayText(_ values: [Double]?) -> String? {
+        guard let values, !values.isEmpty else { return nil }
+        return jsonString(values)
+    }
+
     private func stringArray(from text: String) -> [String] {
         (try? decode([String].self, from: text)) ?? []
     }
@@ -756,6 +815,49 @@ final class LibraryDatabase {
             return cuePoints.isEmpty ? storedValue : max(storedValue, cuePoints.count)
         }
         return cuePoints.isEmpty ? nil : cuePoints.count
+    }
+
+    private func migrateLegacyEmbeddingProfileState() throws {
+        try withTransaction {
+            try exec("""
+            UPDATE segments
+            SET embedding_json = NULL
+            WHERE track_id IN (
+                SELECT id
+                FROM tracks
+                WHERE embedding_profile_id = '\(EmbeddingProfile.legacyGoogleTextEmbedding004ID)'
+            );
+            """)
+            try exec("""
+            UPDATE tracks
+            SET track_embedding_json = NULL,
+                embedding_profile_id = NULL,
+                embedding_updated_at = NULL
+            WHERE embedding_profile_id = '\(EmbeddingProfile.legacyGoogleTextEmbedding004ID)';
+            """)
+        }
+    }
+
+    private func invalidateIncompleteEmbeddingState() throws {
+        try exec("""
+        UPDATE tracks
+        SET embedding_profile_id = NULL,
+            embedding_updated_at = NULL
+        WHERE embedding_profile_id IS NOT NULL
+          AND (
+            track_embedding_json IS NULL OR
+            track_embedding_json = '' OR
+            track_embedding_json = '[]' OR
+            NOT EXISTS (
+                SELECT 1
+                FROM segments
+                WHERE segments.track_id = tracks.id
+                  AND embedding_json IS NOT NULL
+                  AND embedding_json <> ''
+                  AND embedding_json <> '[]'
+            )
+          );
+        """)
     }
 
     static let iso8601: ISO8601DateFormatter = {

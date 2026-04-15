@@ -5,7 +5,7 @@ import Testing
 extension SoriaTests {
     @Test
     func validationStatusResetsWhenKeyChanges() {
-        let profile = EmbeddingProfile.googleTextEmbedding004
+        let profile = EmbeddingProfile.googleGeminiEmbedding2Preview
         let validatedAt = Date(timeIntervalSince1970: 1_716_000_000)
         let storedHash = AppSettingsStore.hashAPIKey("valid-key")
 
@@ -40,16 +40,24 @@ extension SoriaTests {
                 apiKey: "same-key",
                 profile: .clapHTSATUnfused,
                 storedKeyHash: storedHash,
-                storedProfileID: EmbeddingProfile.googleTextEmbedding004.id,
+                storedProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
                 storedAt: validatedAt
             ) == .unvalidated
         )
     }
 
     @Test
+    func legacyProfileIDResolvesToGeminiPreview() {
+        #expect(
+            EmbeddingProfile.resolve(id: EmbeddingProfile.legacyGoogleTextEmbedding004ID)
+                == .googleGeminiEmbedding2Preview
+        )
+    }
+
+    @Test
     func analysisScopeMappingFollowsSelectedUnanalyzedAndAllRules() {
         let selectedID = UUID()
-        let currentProfile = EmbeddingProfile.googleTextEmbedding004.id
+        let currentProfile = EmbeddingProfile.googleGeminiEmbedding2Preview.id
         let selectedTrack = makeTrack(
             id: selectedID,
             analyzedAt: Date(timeIntervalSince1970: 10),
@@ -68,6 +76,7 @@ extension SoriaTests {
             AnalysisScope.selectedTrack.resolveTracks(
                 from: tracks,
                 selectedTrackID: selectedID,
+                readyTrackIDs: Set([selectedTrack.id]),
                 activeProfileID: currentProfile
             ) == [selectedTrack]
         )
@@ -77,6 +86,7 @@ extension SoriaTests {
                 AnalysisScope.unanalyzedTracks.resolveTracks(
                     from: tracks,
                     selectedTrackID: selectedID,
+                    readyTrackIDs: Set([selectedTrack.id]),
                     activeProfileID: currentProfile
                 ).map(\.id)
             ) == Set([staleTrack.id, neverAnalyzedTrack.id])
@@ -86,6 +96,7 @@ extension SoriaTests {
             AnalysisScope.allIndexedTracks.resolveTracks(
                 from: tracks,
                 selectedTrackID: selectedID,
+                readyTrackIDs: Set([selectedTrack.id]),
                 activeProfileID: currentProfile
             ).count == 3
         )
@@ -95,7 +106,7 @@ extension SoriaTests {
     func unvalidatedStateDisablesAnalysisAndSearch() {
         let selectedTrack = makeTrack(
             analyzedAt: Date(timeIntervalSince1970: 10),
-            embeddingProfileID: EmbeddingProfile.googleTextEmbedding004.id,
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
             embeddingUpdatedAt: Date(timeIntervalSince1970: 20)
         )
         let tracks = [selectedTrack]
@@ -109,7 +120,8 @@ extension SoriaTests {
                 isBusy: false,
                 tracks: tracks,
                 selectedTrackID: selectedTrack.id,
-                activeProfileID: EmbeddingProfile.googleTextEmbedding004.id
+                readyTrackIDs: Set([selectedTrack.id]),
+                activeProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id
             ) == false
         )
 

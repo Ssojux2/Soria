@@ -2,10 +2,15 @@ import Foundation
 
 final class LibraryScannerService {
     private let database: LibraryDatabase
+    private let invalidateVectorIndex: @Sendable (Track) async -> Void
     private let supportedExtensions: Set<String> = ["mp3", "wav", "aiff", "m4a", "flac"]
 
-    init(database: LibraryDatabase) {
+    init(
+        database: LibraryDatabase,
+        invalidateVectorIndex: @escaping @Sendable (Track) async -> Void = { _ in }
+    ) {
         self.database = database
+        self.invalidateVectorIndex = invalidateVectorIndex
     }
 
     func scan(
@@ -55,6 +60,7 @@ final class LibraryScannerService {
                     let fileChanged = previous != nil
                     if fileChanged, let previous, previous.analyzedAt != nil {
                         try database.clearAnalysis(trackID: previous.id)
+                        await invalidateVectorIndex(previous)
                         if track.bpmSource == .soriaAnalysis {
                             track.bpm = nil
                             track.bpmSource = nil

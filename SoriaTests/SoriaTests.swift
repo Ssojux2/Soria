@@ -403,9 +403,9 @@ struct SoriaTests {
                 rhythmicDensity: 0.6,
                 lowMidHighBalance: [0.3, 0.4, 0.3],
                 waveformPreview: [0.1, 0.2, 0.3]
-            ),
-            embeddingProfileID: "profile"
+            )
         )
+        try database.markTrackEmbeddingIndexed(trackID: existingTrack.id, embeddingProfileID: "profile")
 
         let seratoRecord = VendorLibraryTrackRecord(
             source: .serato,
@@ -483,6 +483,93 @@ struct SoriaTests {
         #expect(tracks.first?.bpmSource == .soriaAnalysis)
         #expect(metadata.count == 2)
         #expect(Set(metadata.map(\.source)) == Set([.serato, .rekordbox]))
+    }
+
+    @Test func readyTrackIDsRequireStoredTrackAndSegmentVectors() throws {
+        let directory = try makeTemporaryDirectory()
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let database = try LibraryDatabase(databaseURL: databaseURL)
+
+        let readyTrack = makeTrack(
+            path: "/music/ready.mp3",
+            title: "Ready",
+            analyzedAt: Date()
+        )
+        try database.upsertTrack(readyTrack)
+        let readySegments = [
+            TrackSegment(
+                id: UUID(),
+                trackID: readyTrack.id,
+                type: .intro,
+                startSec: 0,
+                endSec: 30,
+                energyScore: 0.5,
+                descriptorText: "intro",
+                vector: [0.1, 0.2]
+            )
+        ]
+        try database.replaceSegments(
+            trackID: readyTrack.id,
+            segments: readySegments,
+            analysisSummary: TrackAnalysisSummary(
+                trackID: readyTrack.id,
+                segments: readySegments,
+                trackEmbedding: [0.2, 0.3],
+                estimatedBPM: nil,
+                estimatedKey: nil,
+                brightness: 0.4,
+                onsetDensity: 0.5,
+                rhythmicDensity: 0.6,
+                lowMidHighBalance: [0.3, 0.4, 0.3],
+                waveformPreview: [0.1, 0.2]
+            )
+        )
+        try database.markTrackEmbeddingIndexed(
+            trackID: readyTrack.id,
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id
+        )
+
+        let incompleteTrack = makeTrack(
+            path: "/music/incomplete.mp3",
+            title: "Incomplete",
+            analyzedAt: Date()
+        )
+        try database.upsertTrack(incompleteTrack)
+        let incompleteSegments = [
+            TrackSegment(
+                id: UUID(),
+                trackID: incompleteTrack.id,
+                type: .intro,
+                startSec: 0,
+                endSec: 30,
+                energyScore: 0.5,
+                descriptorText: "intro",
+                vector: nil
+            )
+        ]
+        try database.replaceSegments(
+            trackID: incompleteTrack.id,
+            segments: incompleteSegments,
+            analysisSummary: TrackAnalysisSummary(
+                trackID: incompleteTrack.id,
+                segments: incompleteSegments,
+                trackEmbedding: nil,
+                estimatedBPM: nil,
+                estimatedKey: nil,
+                brightness: 0.4,
+                onsetDensity: 0.5,
+                rhythmicDensity: 0.6,
+                lowMidHighBalance: [0.3, 0.4, 0.3],
+                waveformPreview: [0.1, 0.2]
+            )
+        )
+        try database.markTrackEmbeddingIndexed(
+            trackID: incompleteTrack.id,
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id
+        )
+
+        let readyIDs = try database.fetchReadyTrackIDs(profileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id)
+        #expect(readyIDs == Set([readyTrack.id]))
     }
 }
 

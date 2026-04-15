@@ -46,6 +46,15 @@ def main() -> int:
         if command == "search_tracks":
             _print_json(handle_search_tracks(payload))
             return 0
+        if command == "upsert_track_vectors":
+            _print_json(handle_upsert_track_vectors(payload))
+            return 0
+        if command == "delete_track_vectors":
+            _print_json(handle_delete_track_vectors(payload))
+            return 0
+        if command == "rebuild_vector_index":
+            _print_json(handle_rebuild_vector_index(payload))
+            return 0
         if command == "healthcheck":
             _print_json(handle_healthcheck(payload))
             return 0
@@ -92,7 +101,7 @@ def handle_analyze(payload: dict[str, Any]) -> dict[str, Any]:
         for segment in analysis["segments"]
     ]
 
-    embedding_result = _embed_and_store_track(
+    embedding_result = _embed_track(
         payload=payload,
         file_path=file_path,
         track_metadata=track_metadata,
@@ -117,13 +126,9 @@ def handle_embed_descriptors(payload: dict[str, Any]) -> dict[str, Any]:
     track_metadata = payload.get("trackMetadata") or {}
     normalized_segments = _normalize_payload_segments(payload.get("segments") or [])
     if not normalized_segments:
-        return {
-            "trackEmbedding": None,
-            "segments": [],
-            "embeddingProfileID": _resolve_embedding_profile(payload)["id"],
-        }
+        raise ValueError("No valid descriptor segments were provided for embedding.")
 
-    return _embed_and_store_track(
+    return _embed_track(
         payload=payload,
         file_path=payload["filePath"],
         track_metadata=track_metadata,
@@ -158,65 +163,100 @@ def handle_search_tracks(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def handle_healthcheck(payload: dict[str, Any]) -> dict[str, Any]:
-    profile = _resolve_embedding_profile(payload)
+    requested_profile_id = str(payload.get("options", {}).get("embeddingProfileID") or "").strip()
+    if not requested_profile_id:
+        requested_profile_id = "google/gemini-embedding-2-preview"
     api_key = _resolve_google_ai_api_key(payload.get("options") or {})
+    profile_status_by_id = _profile_statuses(payload)
+    vector_index_state = None
+    if requested_profile_id in EMBEDDING_PROFILES:
+        vector_index_state = _vector_index_state(payload, requested_profile_id)
     return {
         "ok": True,
         "apiKeyConfigured": bool(api_key),
         "pythonExecutable": sys.executable,
         "workerScriptPath": str(Path(__file__).resolve()),
-        "embeddingProfileID": profile["id"],
+        "embeddingProfileID": requested_profile_id,
         "dependencies": {
             "librosa": _module_available("librosa"),
             "chromadb": _module_available("chromadb"),
             "requests": _module_available("requests"),
         },
+        "profileStatusByID": profile_status_by_id,
+        "vectorIndexState": vector_index_state,
     }
 
 
-def _embed_and_store_track(
+def handle_upsert_track_vectors(payload: dict[str, Any]) -> dict[str, Any]:
+    profile = _resolve_embedding_profile(payload)
+    track_payload = payload.get("track") or {}
+    normalized_track = _normalize_index_track(track_payload)
+    store = _vector_store(payload, profile)
+    _upsert_index_track(store, normalized_track)
+    return {
+        "ok": True,
+        "indexedTrackCount": 1,
+        "embeddingProfileID": profile["id"],
+    }
+
+
+def handle_delete_track_vectors(payload: dict[str, Any]) -> dict[str, Any]:
+    profile_ids = _profile_ids_from_payload(payload)
+    track_id = str(payload.get("trackID") or "").strip()
+    if not track_id:
+        raise ValueError("trackID is required to delete vector entries.")
+
+    deleted_profiles: list[str] = []
+    for profile_id in profile_ids:
+        if profile_id not in EMBEDDING_PROFILES:
+            continue
+        profile = {"id": profile_id, **EMBEDDING_PROFILES[profile_id]}
+        store = _vector_store(payload, profile)
+        store.delete_track(track_id)
+        deleted_profiles.append(profile_id)
+
+    return {
+        "ok": True,
+        "deletedProfileIDs": deleted_profiles,
+        "trackID": track_id,
+    }
+
+
+def handle_rebuild_vector_index(payload: dict[str, Any]) -> dict[str, Any]:
+    profile = _resolve_embedding_profile(payload)
+    store = _vector_store(payload, profile)
+    store.reset_profile()
+
+    indexed_count = 0
+    for track_payload in payload.get("tracks") or []:
+        normalized_track = _normalize_index_track(track_payload)
+        _upsert_index_track(store, normalized_track)
+        indexed_count += 1
+
+    return {
+        "ok": True,
+        "indexedTrackCount": indexed_count,
+        "embeddingProfileID": profile["id"],
+    }
+
+
+def _embed_track(
     payload: dict[str, Any],
     file_path: str,
     track_metadata: dict[str, Any],
     normalized_segments: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    if not normalized_segments:
+        raise ValueError("No valid segments are available for embedding.")
+
     profile = _resolve_embedding_profile(payload)
     client = _build_embedding_client(payload, profile)
     segment_texts = [segment["descriptor_text"] for segment in normalized_segments]
     segment_embeddings = client.embed_batch(segment_texts)
+    segment_embeddings = _require_non_empty_embeddings(segment_embeddings, client)
     weighted_track_embedding = _weighted_embedding(segment_embeddings, normalized_segments)
-
-    segments_with_embeddings = []
-    for segment, embedding in zip(normalized_segments, segment_embeddings):
-        segments_with_embeddings.append(
-            {
-                "segment_id": str(uuid.uuid4()),
-                "segment_type": segment["segment_type"],
-                "start_sec": float(segment["start_sec"]),
-                "end_sec": float(segment["end_sec"]),
-                "energy_score": float(segment["energy_score"]),
-                "descriptor_text": segment["descriptor_text"],
-                "embedding": embedding,
-            }
-        )
-
-    store = _vector_store(payload, profile)
-    track_id = str(track_metadata.get("trackID") or _stable_track_id(file_path))
-    scan_version = f"{track_metadata.get('contentHash', '')}|{track_metadata.get('modifiedTime', '')}"
-    store.upsert_track_embeddings(
-        track_id=track_id,
-        scan_version=scan_version,
-        track_metadata={
-            "app_track_id": track_metadata.get("trackID") or "",
-            "file_path": file_path,
-            "bpm": track_metadata.get("bpm"),
-            "musical_key": track_metadata.get("musicalKey") or "",
-            "genre": track_metadata.get("genre") or "",
-            "duration_sec": track_metadata.get("duration") or 0,
-        },
-        track_embedding=weighted_track_embedding,
-        segments=segments_with_embeddings,
-    )
+    if not weighted_track_embedding:
+        raise ValueError("Failed to compute a track embedding from the analyzed segments.")
 
     return {
         "trackEmbedding": weighted_track_embedding,
@@ -297,7 +337,7 @@ def _build_where(filters: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _weighted_embedding(
-    embeddings: list[list[float] | None],
+    embeddings: list[list[float]],
     segments: list[dict[str, Any]],
 ) -> list[float] | None:
     weights = {"intro": 1.0, "middle": 3.0, "outro": 1.0}
@@ -336,8 +376,122 @@ def _normalize_payload_segments(segments: list[dict[str, Any]]) -> list[dict[str
     return normalized
 
 
+def _normalize_index_track(track_payload: dict[str, Any]) -> dict[str, Any]:
+    track_id = str(track_payload.get("trackID") or "").strip()
+    file_path = str(track_payload.get("filePath") or "").strip()
+    if not track_id or not file_path:
+        raise ValueError("Vector index updates require both trackID and filePath.")
+
+    track_embedding = track_payload.get("trackEmbedding")
+    if not isinstance(track_embedding, list) or not track_embedding:
+        raise ValueError(f"Track {track_id} is missing a non-empty trackEmbedding.")
+
+    normalized_segments = _normalize_index_segments(track_payload.get("segments") or [], track_id)
+    if not normalized_segments:
+        raise ValueError(f"Track {track_id} has no indexable segment embeddings.")
+
+    return {
+        "track_id": track_id,
+        "file_path": file_path,
+        "scan_version": str(track_payload.get("scanVersion") or ""),
+        "track_embedding": [float(value) for value in track_embedding],
+        "track_metadata": {
+            "app_track_id": track_id,
+            "file_path": file_path,
+            "bpm": track_payload.get("bpm"),
+            "musical_key": str(track_payload.get("musicalKey") or ""),
+            "genre": str(track_payload.get("genre") or ""),
+            "duration_sec": float(track_payload.get("duration") or 0),
+        },
+        "segments": normalized_segments,
+    }
+
+
+def _normalize_index_segments(segments: list[dict[str, Any]], track_id: str) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for segment in segments:
+        segment_type = str(segment.get("segmentType") or "").strip()
+        descriptor_text = str(segment.get("descriptorText") or "").strip()
+        embedding = segment.get("embedding")
+        if segment_type not in {"intro", "middle", "outro"} or not descriptor_text:
+            continue
+        if not isinstance(embedding, list) or not embedding:
+            continue
+        normalized.append(
+            {
+                "segment_id": str(segment.get("segmentID") or f"{track_id}:{segment_type}:{uuid.uuid4()}"),
+                "segment_type": segment_type,
+                "start_sec": float(segment.get("startSec") or 0),
+                "end_sec": float(segment.get("endSec") or 0),
+                "energy_score": float(segment.get("energyScore") or 0),
+                "descriptor_text": descriptor_text,
+                "embedding": [float(value) for value in embedding],
+            }
+        )
+    return normalized
+
+
+def _upsert_index_track(store: Any, normalized_track: dict[str, Any]) -> None:
+    store.upsert_track_embeddings(
+        track_id=normalized_track["track_id"],
+        scan_version=normalized_track["scan_version"],
+        track_metadata=normalized_track["track_metadata"],
+        track_embedding=normalized_track["track_embedding"],
+        segments=normalized_track["segments"],
+    )
+
+
+def _require_non_empty_embeddings(
+    embeddings: list[list[float] | None],
+    client: Any,
+) -> list[list[float]]:
+    normalized: list[list[float]] = []
+    for index, embedding in enumerate(embeddings):
+        if embedding:
+            normalized.append([float(value) for value in embedding])
+            continue
+        detail = getattr(client, "_last_error", None)
+        if detail:
+            raise ValueError(f"Failed to embed descriptor segment {index + 1}. {detail}")
+        raise ValueError(f"Failed to embed descriptor segment {index + 1}.")
+    return normalized
+
+
 def _stable_track_id(file_path: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, file_path))
+
+
+def _profile_statuses(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    status_by_id: dict[str, dict[str, Any]] = {}
+    for profile_id, profile in EMBEDDING_PROFILES.items():
+        dependency_errors: list[str] = []
+        if not _module_available("chromadb"):
+            dependency_errors.append("Missing dependency: chromadb")
+        if profile["backend"] == "clap":
+            if not _module_available("torch"):
+                dependency_errors.append("Missing dependency: torch")
+            if not _module_available("transformers"):
+                dependency_errors.append("Missing dependency: transformers")
+
+        status_by_id[profile_id] = {
+            "supported": not dependency_errors,
+            "requiresAPIKey": bool(profile.get("requires_api_key")),
+            "dependencyErrors": dependency_errors,
+        }
+    return status_by_id
+
+
+def _vector_index_state(payload: dict[str, Any], profile_id: str) -> dict[str, Any]:
+    if not _module_available("chromadb"):
+        return {
+            "trackCount": 0,
+            "trackIDs": [],
+            "trackFilePaths": [],
+            "collectionCounts": {},
+        }
+    profile = {"id": profile_id, **EMBEDDING_PROFILES[profile_id]}
+    store = _vector_store(payload, profile)
+    return store.index_state()
 
 
 def _resolve_embedding_profile(payload: dict[str, Any]) -> dict[str, Any]:
@@ -348,6 +502,19 @@ def _resolve_embedding_profile(payload: dict[str, Any]) -> dict[str, Any]:
     if profile is None:
         raise ValueError(f"Unsupported embedding profile: {requested_profile_id}")
     return {"id": requested_profile_id, **profile}
+
+
+def _profile_ids_from_payload(payload: dict[str, Any]) -> list[str]:
+    requested = payload.get("profileIDs")
+    if isinstance(requested, list):
+        output = [str(value).strip() for value in requested if str(value).strip()]
+        if output:
+            return output
+
+    if payload.get("deleteAllProfiles"):
+        return list(EMBEDDING_PROFILES.keys())
+
+    return [_resolve_embedding_profile(payload)["id"]]
 
 
 def _resolve_google_ai_api_key(options: dict[str, Any]) -> str | None:

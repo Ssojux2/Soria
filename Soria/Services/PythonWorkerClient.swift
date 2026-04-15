@@ -49,6 +49,38 @@ struct WorkerValidationResponse: Codable {
     let modelName: String
 }
 
+struct WorkerProfileStatus: Codable {
+    let supported: Bool
+    let requiresAPIKey: Bool
+    let dependencyErrors: [String]
+}
+
+struct WorkerVectorIndexState: Codable {
+    let trackCount: Int
+    let trackIDs: [String]
+    let trackFilePaths: [String]
+    let collectionCounts: [String: Int]
+}
+
+struct WorkerHealthcheckResponse: Codable {
+    let ok: Bool
+    let apiKeyConfigured: Bool
+    let pythonExecutable: String
+    let workerScriptPath: String
+    let embeddingProfileID: String
+    let dependencies: [String: Bool]
+    let profileStatusByID: [String: WorkerProfileStatus]
+    let vectorIndexState: WorkerVectorIndexState?
+}
+
+struct WorkerMutationResponse: Codable {
+    let ok: Bool
+    let indexedTrackCount: Int?
+    let embeddingProfileID: String?
+    let deletedProfileIDs: [String]?
+    let trackID: String?
+}
+
 final class PythonWorkerClient {
     struct WorkerConfig {
         var pythonExecutable: String
@@ -108,6 +140,14 @@ final class PythonWorkerClient {
         return try await runGeneric(payload: payload)
     }
 
+    func healthcheck() async throws -> WorkerHealthcheckResponse {
+        let payload = WorkerHealthcheckPayload(
+            command: "healthcheck",
+            options: workerOptions()
+        )
+        return try await runGeneric(payload: payload)
+    }
+
     func searchTracksText(
         query: String,
         limit: Int,
@@ -148,7 +188,7 @@ final class PythonWorkerClient {
             queryText: nil,
             queryTrackEmbedding: trackEmbedding,
             querySegments: segments.compactMap { segment in
-                guard let vector = segment.vector else { return nil }
+                guard let vector = segment.vector, !vector.isEmpty else { return nil }
                 return WorkerQuerySegment(
                     segmentType: segment.type.rawValue,
                     embedding: vector
@@ -168,12 +208,56 @@ final class PythonWorkerClient {
         return try await runGeneric(payload: payload)
     }
 
-    private func workerOptions() -> WorkerOptionsPayload {
+    func upsertTrackVectors(
+        track: Track,
+        segments: [TrackSegment],
+        trackEmbedding: [Double]
+    ) async throws {
+        let payload = WorkerUpsertTrackVectorsPayload(
+            command: "upsert_track_vectors",
+            track: vectorTrackPayload(track: track, segments: segments, trackEmbedding: trackEmbedding),
+            options: workerOptions()
+        )
+        let _: WorkerMutationResponse = try await runGeneric(payload: payload)
+    }
+
+    func deleteTrackVectors(trackID: UUID, profileIDs: [String]? = nil, deleteAllProfiles: Bool = false) async throws {
+        let payload = WorkerDeleteTrackVectorsPayload(
+            command: "delete_track_vectors",
+            trackID: trackID.uuidString,
+            profileIDs: profileIDs,
+            deleteAllProfiles: deleteAllProfiles,
+            options: workerOptions()
+        )
+        let _: WorkerMutationResponse = try await runGeneric(payload: payload)
+    }
+
+    func rebuildVectorIndex(tracks: [Track], segmentsByTrackID: [UUID: [TrackSegment]], trackEmbeddings: [UUID: [Double]]) async throws {
+        let payloadTracks = tracks.compactMap { track -> WorkerIndexedTrackPayload? in
+            guard
+                let trackEmbedding = trackEmbeddings[track.id],
+                !trackEmbedding.isEmpty,
+                let segments = segmentsByTrackID[track.id]
+            else {
+                return nil
+            }
+            return vectorTrackPayload(track: track, segments: segments, trackEmbedding: trackEmbedding)
+        }
+
+        let payload = WorkerRebuildVectorIndexPayload(
+            command: "rebuild_vector_index",
+            tracks: payloadTracks,
+            options: workerOptions()
+        )
+        let _: WorkerMutationResponse = try await runGeneric(payload: payload)
+    }
+
+    private func workerOptions(embeddingProfileID overrideProfileID: String? = nil) -> WorkerOptionsPayload {
         let config = configProvider()
         return WorkerOptionsPayload(
             googleAIAPIKey: config.googleAIAPIKey,
             cacheDirectory: AppPaths.pythonCacheDirectory.path,
-            embeddingProfileID: config.embeddingProfile.id
+            embeddingProfileID: overrideProfileID ?? config.embeddingProfile.id
         )
     }
 
@@ -210,6 +294,35 @@ final class PythonWorkerClient {
             playlistMemberships: playlistMemberships,
             cueCount: cueCount,
             comment: comment
+        )
+    }
+
+    private func vectorTrackPayload(
+        track: Track,
+        segments: [TrackSegment],
+        trackEmbedding: [Double]
+    ) -> WorkerIndexedTrackPayload {
+        WorkerIndexedTrackPayload(
+            trackID: track.id.uuidString,
+            filePath: track.filePath,
+            scanVersion: "\(track.contentHash)|\(LibraryDatabase.iso8601.string(from: track.modifiedTime))",
+            bpm: track.bpm,
+            musicalKey: track.musicalKey,
+            genre: track.genre,
+            duration: track.duration,
+            trackEmbedding: trackEmbedding,
+            segments: segments.compactMap { segment in
+                guard let vector = segment.vector, !vector.isEmpty else { return nil }
+                return WorkerIndexedSegmentPayload(
+                    segmentID: segment.id.uuidString,
+                    segmentType: segment.type.rawValue,
+                    startSec: segment.startSec,
+                    endSec: segment.endSec,
+                    energyScore: segment.energyScore,
+                    descriptorText: segment.descriptorText,
+                    embedding: vector
+                )
+            }
         )
     }
 
@@ -330,6 +443,11 @@ private struct WorkerValidatePayload: Codable {
     let options: WorkerOptionsPayload
 }
 
+private struct WorkerHealthcheckPayload: Codable {
+    let command: String
+    let options: WorkerOptionsPayload
+}
+
 private struct WorkerQuerySegment: Codable {
     let segmentType: String
     let embedding: [Double]
@@ -345,6 +463,48 @@ private struct WorkerTrackSearchPayload: Codable {
     let excludeTrackPaths: [String]
     let filters: WorkerSimilarityFilters
     let weights: [String: Double]
+    let options: WorkerOptionsPayload
+}
+
+private struct WorkerIndexedSegmentPayload: Codable {
+    let segmentID: String
+    let segmentType: String
+    let startSec: Double
+    let endSec: Double
+    let energyScore: Double
+    let descriptorText: String
+    let embedding: [Double]
+}
+
+private struct WorkerIndexedTrackPayload: Codable {
+    let trackID: String
+    let filePath: String
+    let scanVersion: String
+    let bpm: Double?
+    let musicalKey: String?
+    let genre: String
+    let duration: Double
+    let trackEmbedding: [Double]
+    let segments: [WorkerIndexedSegmentPayload]
+}
+
+private struct WorkerUpsertTrackVectorsPayload: Codable {
+    let command: String
+    let track: WorkerIndexedTrackPayload
+    let options: WorkerOptionsPayload
+}
+
+private struct WorkerDeleteTrackVectorsPayload: Codable {
+    let command: String
+    let trackID: String
+    let profileIDs: [String]?
+    let deleteAllProfiles: Bool
+    let options: WorkerOptionsPayload
+}
+
+private struct WorkerRebuildVectorIndexPayload: Codable {
+    let command: String
+    let tracks: [WorkerIndexedTrackPayload]
     let options: WorkerOptionsPayload
 }
 

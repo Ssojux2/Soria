@@ -85,10 +85,16 @@ enum AnalysisScope: String, CaseIterable, Identifiable {
         }
     }
 
-    func resolveTracks(from tracks: [Track], selectedTrackID: UUID?, activeProfileID: String) -> [Track] {
+    func resolveTracks(
+        from tracks: [Track],
+        selectedTrackID: UUID?,
+        readyTrackIDs: Set<UUID>,
+        activeProfileID: String
+    ) -> [Track] {
         return resolveTracks(
             from: tracks,
             selectedTrackIDs: selectedTrackID == nil ? [] : [selectedTrackID!],
+            readyTrackIDs: readyTrackIDs,
             activeProfileID: activeProfileID
         )
     }
@@ -96,6 +102,7 @@ enum AnalysisScope: String, CaseIterable, Identifiable {
     func resolveTracks(
         from tracks: [Track],
         selectedTrackIDs: Set<UUID>,
+        readyTrackIDs: Set<UUID>,
         activeProfileID: String
     ) -> [Track] {
         switch self {
@@ -103,7 +110,7 @@ enum AnalysisScope: String, CaseIterable, Identifiable {
             guard !selectedTrackIDs.isEmpty else { return [] }
             return tracks.filter { selectedTrackIDs.contains($0.id) }
         case .unanalyzedTracks:
-            return tracks.filter { $0.analyzedAt == nil || !$0.hasCurrentEmbedding(profileID: activeProfileID) }
+            return tracks.filter { $0.analyzedAt == nil || !readyTrackIDs.contains($0.id) || $0.embeddingProfileID != activeProfileID }
         case .allIndexedTracks:
             return tracks
         }
@@ -114,12 +121,14 @@ enum AnalysisScope: String, CaseIterable, Identifiable {
         isBusy: Bool,
         tracks: [Track],
         selectedTrackID: UUID?,
+        readyTrackIDs: Set<UUID>,
         activeProfileID: String
     ) -> Bool {
         guard validationStatus.allowsSemanticActions(isBusy: isBusy) else { return false }
         return !resolveTracks(
             from: tracks,
             selectedTrackID: selectedTrackID,
+            readyTrackIDs: readyTrackIDs,
             activeProfileID: activeProfileID
         ).isEmpty
     }
@@ -129,12 +138,14 @@ enum AnalysisScope: String, CaseIterable, Identifiable {
         isBusy: Bool,
         tracks: [Track],
         selectedTrackIDs: Set<UUID>,
+        readyTrackIDs: Set<UUID>,
         activeProfileID: String
     ) -> Bool {
         guard validationStatus.allowsSemanticActions(isBusy: isBusy) else { return false }
         return !resolveTracks(
             from: tracks,
             selectedTrackIDs: selectedTrackIDs,
+            readyTrackIDs: readyTrackIDs,
             activeProfileID: activeProfileID
         ).isEmpty
     }
@@ -191,19 +202,13 @@ enum EmbeddingBackendKind: String, Codable, Hashable {
 }
 
 struct EmbeddingProfile: Codable, Hashable, Identifiable {
+    static let legacyGoogleTextEmbedding004ID = "google/text-embedding-004"
+
     let id: String
     let displayName: String
     let modelName: String
     let backendKind: EmbeddingBackendKind
     let requiresAPIKey: Bool
-
-    static let googleTextEmbedding004 = EmbeddingProfile(
-        id: "google/text-embedding-004",
-        displayName: "Google AI text-embedding-004",
-        modelName: "text-embedding-004",
-        backendKind: .googleAI,
-        requiresAPIKey: true
-    )
 
     static let googleGeminiEmbedding2Preview = EmbeddingProfile(
         id: "google/gemini-embedding-2-preview",
@@ -222,13 +227,15 @@ struct EmbeddingProfile: Codable, Hashable, Identifiable {
     )
 
     static let all: [EmbeddingProfile] = [
-        .googleTextEmbedding004,
         .googleGeminiEmbedding2Preview,
         .clapHTSATUnfused
     ]
 
     static func resolve(id: String?) -> EmbeddingProfile {
         guard let id else { return .googleGeminiEmbedding2Preview }
+        if id == legacyGoogleTextEmbedding004ID {
+            return .googleGeminiEmbedding2Preview
+        }
         return all.first(where: { $0.id == id }) ?? .googleGeminiEmbedding2Preview
     }
 }
