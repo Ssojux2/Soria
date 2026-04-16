@@ -1279,21 +1279,68 @@ final class AppViewModel: ObservableObject {
     }
 
     func loadExternalMetadata() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = [.xml, .commaSeparatedText]
-
-        guard panel.runModal() == .OK else { return }
+        guard let urls = chooseMetadataFiles(
+            allowedContentTypes: [.xml, .commaSeparatedText],
+            allowsMultipleSelection: true
+        ) else {
+            return
+        }
 
         Task {
             do {
-                _ = try await importExternalMetadataFiles(panel.urls)
+                let summaries = try await importExternalMetadataFiles(urls)
+                let message = Self.metadataImportStatusMessage(for: summaries)
+                libraryStatusMessage = message
+                settingsStatusMessage = message
             } catch {
+                let message = "Metadata import failed: \(error.localizedDescription)"
+                libraryStatusMessage = message
+                settingsStatusMessage = message
                 AppLogger.shared.error("Metadata import failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    func autoImportRekordboxXML() {
+        let candidateURL: URL
+        if let candidate = externalMetadataImporter.detectRekordboxXMLCandidate() {
+            candidateURL = candidate.url
+        } else {
+            guard let selectedURL = chooseMetadataFiles(
+                allowedContentTypes: [.xml],
+                allowsMultipleSelection: false
+            )?.first else {
+                return
+            }
+            candidateURL = selectedURL
+        }
+
+        Task {
+            do {
+                let summary = try await importExternalMetadataFile(candidateURL)
+                let summaryText = Self.metadataImportStatusMessage(for: [summary])
+                let message = "Imported Rekordbox XML from \(candidateURL.path). \(summaryText)"
+                libraryStatusMessage = message
+                settingsStatusMessage = message
+            } catch {
+                let message = "Metadata import failed: \(error.localizedDescription)"
+                libraryStatusMessage = message
+                settingsStatusMessage = message
+                AppLogger.shared.error("Metadata import failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func chooseMetadataFiles(
+        allowedContentTypes: [UTType],
+        allowsMultipleSelection: Bool
+    ) -> [URL]? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = allowsMultipleSelection
+        panel.allowedContentTypes = allowedContentTypes
+        return panel.runModal() == .OK ? panel.urls : nil
     }
 
     func searchTracks(
@@ -2529,7 +2576,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func recommendationWorkerFilters() -> WorkerSimilarityFilters {
-        WorkerSimilarityFilters(
+        return WorkerSimilarityFilters(
             bpmMin: constraints.targetBPMMin,
             bpmMax: constraints.targetBPMMax,
             durationMaxSec: constraints.maxDurationMinutes.map { $0 * 60 },
@@ -2668,6 +2715,7 @@ final class AppViewModel: ObservableObject {
         if fileURL.pathExtension.lowercased() == "xml" {
             source = .rekordbox
             imported = try externalMetadataImporter.importRekordboxXML(from: fileURL)
+            AppSettingsStore.saveLastRekordboxXMLPath(fileURL.path)
         } else {
             source = .serato
             imported = try externalMetadataImporter.importSeratoCSV(from: fileURL)
@@ -2993,6 +3041,26 @@ final class AppViewModel: ObservableObject {
     private func refreshMembershipFacets() throws {
         seratoMembershipFacets = try database.fetchMembershipFacets(source: .serato)
         rekordboxMembershipFacets = try database.fetchMembershipFacets(source: .rekordbox)
+    }
+
+    nonisolated static func metadataImportStatusMessage(for summaries: [MetadataImportSummary]) -> String {
+        guard !summaries.isEmpty else {
+            return "No metadata files were imported."
+        }
+
+        let summaryText = summaries.map(\.displayText).joined(separator: " • ")
+        let anyMatched = summaries.contains { $0.matchedTracks > 0 }
+        let anyUnmatched = summaries.contains { $0.matchedTracks == 0 }
+
+        if !anyMatched {
+            return "\(summaryText). No indexed tracks matched the imported metadata yet. Sync libraries or scan a fallback folder first."
+        }
+
+        if anyUnmatched {
+            return "\(summaryText). Some imported metadata did not match indexed tracks yet. Sync libraries or scan a fallback folder first."
+        }
+
+        return "\(summaryText)."
     }
 
     func membershipFacets(for source: ExternalDJMetadata.Source) -> [MembershipFacet] {

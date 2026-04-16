@@ -4,6 +4,7 @@ import Foundation
 enum AppSettingsStore {
     private static let pythonExecutableKey = "settings.pythonExecutablePath"
     private static let workerScriptKey = "settings.workerScriptPath"
+    private static let lastRekordboxXMLPathKey = "settings.lastRekordboxXMLPath"
     private static let googleAIAPIKeyAccount = "google_ai_api_key"
     private static let legacyGeminiAPIKeyAccount = "gemini_api_key"
     private static let embeddingProfileIDKey = "settings.embeddingProfileID"
@@ -79,6 +80,23 @@ enum AppSettingsStore {
         )
         UserDefaults.standard.set(resolved, forKey: workerScriptKey)
         return resolved
+    }
+
+    static func loadLastRekordboxXMLPath() -> String? {
+        guard let storedValue = UserDefaults.standard.string(forKey: lastRekordboxXMLPathKey), !storedValue.isEmpty else {
+            return nil
+        }
+        let normalized = TrackPathNormalizer.normalizedAbsolutePath(storedValue)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    static func saveLastRekordboxXMLPath(_ path: String) {
+        let normalized = TrackPathNormalizer.normalizedAbsolutePath(path)
+        guard !normalized.isEmpty else {
+            UserDefaults.standard.removeObject(forKey: lastRekordboxXMLPathKey)
+            return
+        }
+        UserDefaults.standard.set(normalized, forKey: lastRekordboxXMLPathKey)
     }
 
     static func loadGoogleAIAPIKey() -> String {

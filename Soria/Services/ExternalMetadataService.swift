@@ -1,59 +1,77 @@
 import Foundation
 
 final class ExternalMetadataService {
+    private let fileManager: FileManager
     private let cuePointParser: ExternalCuePointParser
+    private let rekordboxXMLParser: RekordboxXMLParser
+    private let rekordboxXMLSearchDirectories: [URL]?
+    private let lastRekordboxXMLPathProvider: () -> String?
 
-    init(cuePointParser: ExternalCuePointParser = ExternalCuePointParser()) {
+    init(
+        fileManager: FileManager = .default,
+        cuePointParser: ExternalCuePointParser = ExternalCuePointParser(),
+        rekordboxXMLParser: RekordboxXMLParser? = nil,
+        rekordboxXMLSearchDirectories: [URL]? = nil,
+        lastRekordboxXMLPathProvider: @escaping () -> String? = { AppSettingsStore.loadLastRekordboxXMLPath() }
+    ) {
+        self.fileManager = fileManager
         self.cuePointParser = cuePointParser
+        self.rekordboxXMLParser = rekordboxXMLParser ?? RekordboxXMLParser(cuePointParser: cuePointParser)
+        self.rekordboxXMLSearchDirectories = rekordboxXMLSearchDirectories
+        self.lastRekordboxXMLPathProvider = lastRekordboxXMLPathProvider
     }
 
     func importRekordboxXML(from url: URL) throws -> [ExternalDJMetadata] {
-        let data = try Data(contentsOf: url)
-        let document = try XMLDocument(data: data)
-
-        var playlistsByTrackID: [String: [String]] = [:]
-        let playlistNodes = try document.nodes(forXPath: "//PLAYLISTS//NODE[@Type='1']")
-        for node in playlistNodes.compactMap({ $0 as? XMLElement }) {
-            let playlistName = node.attribute(forName: "Name")?.stringValue ?? "Playlist"
-            for member in node.elements(forName: "TRACK") {
-                guard let key = member.attribute(forName: "Key")?.stringValue, !key.isEmpty else { continue }
-                playlistsByTrackID[key, default: []].append(playlistName)
-            }
-        }
-
-        let trackNodes = try document.nodes(forXPath: "//COLLECTION/TRACK")
-        return trackNodes.compactMap { node in
-            guard let element = node as? XMLElement else { return nil }
-            guard let location = element.attribute(forName: "Location")?.stringValue else { return nil }
-
-            let trackID = element.attribute(forName: "TrackID")?.stringValue ?? UUID().uuidString
-            let trackPath = normalizedTrackPath(location)
-            let cuePoints = cuePointParser.parseRekordboxCuePoints(from: element)
-            let cueCount = cueCount(from: cuePoints, legacy: cuePoints.count)
-            let genreTag = element.attribute(forName: "Genre")?.stringValue
-            let comment = element.attribute(forName: "Comments")?.stringValue
+        let parsed = try rekordboxXMLParser.parse(from: url)
+        return parsed.tracks.map { track in
+            let memberships = parsed.memberships(forTrackPath: track.trackPath)
+            let cueCount = cueCount(from: track.cuePoints, legacy: track.cuePoints.count)
 
             return ExternalDJMetadata(
                 id: UUID(),
-                trackPath: trackPath,
+                trackPath: track.trackPath,
                 source: .rekordbox,
-                bpm: Double(element.attribute(forName: "AverageBpm")?.stringValue ?? ""),
-                musicalKey: element.attribute(forName: "Tonality")?.stringValue,
-                rating: Int(element.attribute(forName: "Rating")?.stringValue ?? ""),
-                color: element.attribute(forName: "Colour")?.stringValue,
-                tags: genreTag.map { [$0] } ?? [],
-                playCount: Int(element.attribute(forName: "PlayCount")?.stringValue ?? ""),
-                lastPlayed: parsedDate(element.attribute(forName: "DateAdded")?.stringValue),
-                playlistMemberships: playlistsByTrackID[trackID] ?? [],
+                bpm: track.bpm,
+                musicalKey: track.musicalKey,
+                rating: track.rating,
+                color: track.color,
+                tags: track.genre.map { [$0] } ?? [],
+                playCount: track.playCount,
+                lastPlayed: track.lastPlayed,
+                playlistMemberships: memberships,
                 cueCount: cueCount,
-                cuePoints: cuePoints,
-                comment: comment,
-                vendorTrackID: trackID,
+                cuePoints: track.cuePoints,
+                comment: track.comment,
+                vendorTrackID: track.trackID,
                 analysisState: nil,
                 analysisCachePath: nil,
                 syncVersion: nil
             )
         }
+    }
+
+    func detectRekordboxXMLCandidate() -> RekordboxXMLCandidate? {
+        if let savedPath = lastRekordboxXMLPathProvider() {
+            let savedURL = normalizedCandidateURL(URL(fileURLWithPath: savedPath))
+            if fileManager.fileExists(atPath: savedURL.path), rekordboxXMLParser.isValidDocument(at: savedURL) {
+                return RekordboxXMLCandidate(
+                    url: savedURL,
+                    modifiedAt: modificationDate(for: savedURL),
+                    origin: .savedPath
+                )
+            }
+        }
+
+        let candidateDirectories = rekordboxXMLSearchDirectories ?? [
+            fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Documents", isDirectory: true),
+            fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true),
+            fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Desktop", isDirectory: true),
+            fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Music", isDirectory: true),
+        ]
+
+        let candidates = candidateDirectories
+            .flatMap { rekordboxXMLCandidates(in: $0) }
+        return Self.preferredRekordboxXMLCandidate(from: candidates)
     }
 
     func importSeratoCSV(from url: URL) throws -> [ExternalDJMetadata] {
@@ -158,7 +176,7 @@ final class ExternalMetadataService {
         if let date = LibraryDatabase.iso8601.date(from: rawValue) {
             return date
         }
-        for format in ["yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd", "MM/dd/yyyy HH:mm:ss"] {
+        for format in ["yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd", "MM/dd/yyyy HH:mm:ss", "MM/dd/yyyy"] {
             let formatter = DateFormatter()
             formatter.locale = Locale(identifier: "en_US_POSIX")
             formatter.timeZone = .current
@@ -168,6 +186,58 @@ final class ExternalMetadataService {
             }
         }
         return nil
+    }
+
+    private func rekordboxXMLCandidates(in directory: URL) -> [RekordboxXMLCandidate] {
+        guard fileManager.fileExists(atPath: directory.path) else { return [] }
+        guard let enumerator = fileManager.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return []
+        }
+
+        var candidates: [RekordboxXMLCandidate] = []
+        for case let url as URL in enumerator {
+            guard url.pathExtension.lowercased() == "xml" else { continue }
+            let candidateURL = normalizedCandidateURL(url)
+            guard rekordboxXMLParser.isValidDocument(at: candidateURL) else { continue }
+            candidates.append(
+                RekordboxXMLCandidate(
+                    url: candidateURL,
+                    modifiedAt: modificationDate(for: candidateURL),
+                    origin: .automaticSearch
+                )
+            )
+        }
+        return candidates
+    }
+
+    private func modificationDate(for url: URL) -> Date? {
+        let resourceValues = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+        return resourceValues?.contentModificationDate
+    }
+
+    private func normalizedCandidateURL(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath()
+    }
+
+    static func preferredRekordboxXMLCandidate(
+        from candidates: [RekordboxXMLCandidate]
+    ) -> RekordboxXMLCandidate? {
+        candidates.sorted { lhs, rhs in
+            switch (lhs.modifiedAt, rhs.modifiedAt) {
+            case let (lhsDate?, rhsDate?) where lhsDate != rhsDate:
+                return lhsDate > rhsDate
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            default:
+                return lhs.url.path.localizedCaseInsensitiveCompare(rhs.url.path) == .orderedAscending
+            }
+        }.first
     }
 
     private func nilIfEmpty(_ value: String?) -> String? {
@@ -182,8 +252,4 @@ private extension Int {
     func takeIfPositive() -> Int? {
         self > 0 ? self : nil
     }
-}
-
-enum MetadataImportError: Error {
-    case invalidRekordboxXML
 }

@@ -315,21 +315,29 @@ final class RekordboxLibraryService {
     private let fileManager: FileManager
     private let cuePointParser: ExternalCuePointParser
     private let visualizationResolver: ExternalVisualizationResolver
+    private let rekordboxXMLParser: RekordboxXMLParser
 
     init(
         fileManager: FileManager = .default,
         cuePointParser: ExternalCuePointParser = ExternalCuePointParser(),
-        visualizationResolver: ExternalVisualizationResolver = ExternalVisualizationResolver()
+        visualizationResolver: ExternalVisualizationResolver = ExternalVisualizationResolver(),
+        rekordboxXMLParser: RekordboxXMLParser? = nil
     ) {
         self.fileManager = fileManager
         self.cuePointParser = cuePointParser
         self.visualizationResolver = visualizationResolver
+        self.rekordboxXMLParser = rekordboxXMLParser ?? RekordboxXMLParser(cuePointParser: cuePointParser)
     }
 
     func defaultSettingsURL() -> URL? {
-        let url = fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Pioneer/rekordbox6/rekordbox3.settings")
-        return fileManager.fileExists(atPath: url.path) ? url : nil
+        let baseURL = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Pioneer", isDirectory: true)
+        let candidates = [
+            baseURL.appendingPathComponent("rekordbox6/rekordbox3.settings"),
+            baseURL.appendingPathComponent("rekordbox7/rekordbox3.settings"),
+            baseURL.appendingPathComponent("rekordbox/rekordbox3.settings"),
+        ]
+        return candidates.first(where: { fileManager.fileExists(atPath: $0.path) })
     }
 
     func defaultDatabaseDirectory() throws -> URL? {
@@ -365,6 +373,7 @@ final class RekordboxLibraryService {
     func loadTracks(from databaseDirectory: URL) throws -> [VendorLibraryTrackRecord] {
         var aggregates: [String: RekordboxAggregate] = [:]
         var cuePointsByPath: [String: [ExternalDJCuePoint]] = [:]
+        var pathByTrackID: [String: String] = [:]
 
         for databaseName in ["networkRecommend.db", "networkAnalyze6.db"] {
             let databaseURL = databaseDirectory.appendingPathComponent(databaseName)
@@ -395,6 +404,12 @@ final class RekordboxLibraryService {
                 )
             }
 
+            for row in rows {
+                if let trackID = trimToNil(row.trackID) {
+                    pathByTrackID[trackID.lowercased()] = row.normalizedPath
+                }
+            }
+
             let pathByIdentifier = rows.reduce(into: [String: String]()) { result, row in
                 if let trackID = trimToNil(row.trackID) {
                     result[trackID.lowercased()] = row.normalizedPath
@@ -415,7 +430,7 @@ final class RekordboxLibraryService {
             }
         }
 
-        let playlistsByPath = loadPlaylists(from: databaseDirectory.appendingPathComponent("masterPlaylists6.xml"))
+        let playlistsByPath = loadPlaylists(from: databaseDirectory, pathByTrackID: pathByTrackID)
         for (path, playlists) in playlistsByPath {
             aggregates[path, default: RekordboxAggregate(path: path)].playlistMemberships.append(contentsOf: playlists)
         }
@@ -556,52 +571,46 @@ final class RekordboxLibraryService {
         ]
     }
 
-    private func loadPlaylists(from xmlURL: URL) -> [String: [String]] {
-        guard fileManager.fileExists(atPath: xmlURL.path),
-              let data = try? Data(contentsOf: xmlURL),
-              let document = try? XMLDocument(data: data),
-              let playlistContainers = try? document.nodes(forXPath: "//PLAYLISTS")
-        else {
-            return [:]
+    private func loadPlaylists(from databaseDirectory: URL, pathByTrackID: [String: String]) -> [String: [String]] {
+        guard let xmlURL = loadPlaylistXMLCandidate(in: databaseDirectory) else { return [:] }
+        let fallbackTrackPathsByID = pathByTrackID.reduce(into: [String: String]()) { partial, entry in
+            partial[entry.key.lowercased()] = entry.value
         }
-
-        var results: [String: [String]] = [:]
-        for case let container as XMLElement in playlistContainers {
-            for child in container.elements(forName: "NODE") {
-                collectPlaylistMemberships(from: child, path: [], results: &results)
-            }
-        }
-        return results
+        let parsed = try? rekordboxXMLParser.parse(
+            from: xmlURL,
+            fallbackTrackPathsByID: fallbackTrackPathsByID
+        )
+        return parsed?.playlistMembershipsByTrackPath ?? [:]
     }
 
-    private func collectPlaylistMemberships(
-        from node: XMLElement,
-        path: [String],
-        results: inout [String: [String]]
-    ) {
-        let rawName = node.attribute(forName: "Name")?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedName: String? = {
-            guard let rawName, !rawName.isEmpty else { return nil }
-            let lowered = rawName.lowercased()
-            if lowered == "root" || lowered == "playlists" || lowered.hasSuffix(" root") {
-                return nil
+    private func loadPlaylistXMLCandidate(in databaseDirectory: URL) -> URL? {
+        let preferredURLs = [
+            databaseDirectory.appendingPathComponent("masterPlaylists7.xml"),
+            databaseDirectory.appendingPathComponent("masterPlaylists6.xml"),
+        ]
+        for url in preferredURLs where fileManager.fileExists(atPath: url.path) {
+            return url
+        }
+
+        guard let contents = try? fileManager.contentsOfDirectory(
+            at: databaseDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+
+        return contents
+            .filter {
+                $0.pathExtension.lowercased() == "xml"
+                    && $0.lastPathComponent.lowercased().hasPrefix("masterplaylists")
             }
-            return rawName
-        }()
-
-        let currentPath = normalizedName.map { path + [$0] } ?? path
-        let playlistPath = currentPath.joined(separator: " / ")
-
-        for member in node.elements(forName: "TRACK") {
-            guard let location = member.attribute(forName: "Location")?.stringValue else { continue }
-            let normalizedTrackPath = TrackPathNormalizer.normalizedAbsolutePath(location)
-            guard !normalizedTrackPath.isEmpty, !playlistPath.isEmpty else { continue }
-            results[normalizedTrackPath, default: []].append(playlistPath)
-        }
-
-        for child in node.elements(forName: "NODE") {
-            collectPlaylistMemberships(from: child, path: currentPath, results: &results)
-        }
+            .sorted {
+                let lhs = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rhs = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return lhs > rhs
+            }
+            .first
     }
 
     private static func normalizedDuration(_ rawValue: Double?) -> Double? {

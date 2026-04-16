@@ -153,8 +153,14 @@ struct SettingsView: View {
                             Button("Library Setup") { viewModel.openInitialSetup() }
                             Button("Refresh Detection") { viewModel.refreshLibrarySourceDetection() }
                             Button("Sync Libraries") { viewModel.syncLibraries() }
+                                .accessibilityIdentifier("settings-sync-libraries-button")
+                            Button("Auto-Import Rekordbox XML") { viewModel.autoImportRekordboxXML() }
+                                .accessibilityIdentifier("settings-auto-import-rekordbox-xml-button")
+                            Button("Import File…") { viewModel.loadExternalMetadata() }
+                                .accessibilityIdentifier("settings-import-metadata-file-button")
                         }
                     }
+                    .accessibilityIdentifier("settings-library-sources")
                 }
 
                 GroupBox("Manual Folder Fallback") {

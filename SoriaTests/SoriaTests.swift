@@ -470,6 +470,234 @@ struct SoriaTests {
         #expect(tracks.first?.metadata.syncVersion == "7.2.8/6")
     }
 
+    @Test func rekordboxServiceLoadsMasterPlaylists7XMLWhenPresent() throws {
+        let directory = try makeTemporaryDirectory()
+        let databaseURL = directory.appendingPathComponent("networkRecommend.db")
+        try createSQLiteDatabase(
+            at: databaseURL,
+            statements: [
+                """
+                CREATE TABLE manage_tbl (
+                    SongFilePath TEXT,
+                    AnalyzeFilePath TEXT,
+                    AnalyzeStatus INTEGER,
+                    AnalyzeKey INTEGER,
+                    AnalyzeBPMRange INTEGER,
+                    TrackID TEXT,
+                    TrackCheckSum TEXT,
+                    Duration REAL,
+                    RekordboxVersion TEXT,
+                    AnalyzeVersion TEXT
+                );
+                """,
+                """
+                INSERT INTO manage_tbl VALUES (
+                    '/Users/test/Music/Rekordbox Seven Playlist.mp3',
+                    NULL,
+                    NULL,
+                    NULL,
+                    NULL,
+                    'rk-7',
+                    'checksum-7',
+                    240000,
+                    '7.3.0',
+                    '7'
+                );
+                """
+            ]
+        )
+
+        let playlistsURL = directory.appendingPathComponent("masterPlaylists7.xml")
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <DJ_PLAYLISTS>
+          <PLAYLISTS>
+            <NODE Name="Playlists Root">
+              <NODE Name="Club">
+                <NODE Name="Closing">
+                  <TRACK Key="rk-7" />
+                </NODE>
+              </NODE>
+            </NODE>
+          </PLAYLISTS>
+        </DJ_PLAYLISTS>
+        """.write(to: playlistsURL, atomically: true, encoding: .utf8)
+
+        let service = RekordboxLibraryService()
+        let tracks = try service.loadTracks(from: directory)
+
+        #expect(tracks.count == 1)
+        #expect(tracks.first?.metadata.playlistMemberships == ["Club / Closing"])
+    }
+
+    @Test func rekordboxXMLParserParsesTrackMetadataAndLeafPlaylists() throws {
+        let directory = try makeTemporaryDirectory()
+        let xmlURL = directory.appendingPathComponent("rekordbox-export.xml")
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <DJ_PLAYLISTS Version="1.0.0">
+          <COLLECTION Entries="2">
+            <TRACK
+              TrackID="track-1"
+              Name="Alpha Track"
+              Artist="DJ Test"
+              Genre="House"
+              Location="file://localhost/Users/test/Music/Alpha%20Track.mp3"
+              AverageBpm="124.5"
+              Tonality="8A"
+              Rating="4"
+              Colour="Blue"
+              PlayCount="9"
+              DateAdded="2026-04-10 09:30:00"
+              Comments="Peak-time weapon">
+              <POSITION_MARK Name="Drop" Type="0" Num="3" Start="64.5" />
+            </TRACK>
+            <TRACK
+              TrackID="track-2"
+              Name="Beta Track"
+              Location="/Users/test/Music/Beta Track.mp3" />
+          </COLLECTION>
+          <PLAYLISTS>
+            <NODE Name="ROOT" Type="0">
+              <NODE Name="Festival">
+                <NODE Name="Day 1">
+                  <NODE Name="Sunrise">
+                    <TRACK Key="track-1" />
+                  </NODE>
+                </NODE>
+              </NODE>
+              <NODE Name="Tools">
+                <TRACK Location="file://localhost/Users/test/Music/Beta%20Track.mp3" />
+              </NODE>
+            </NODE>
+          </PLAYLISTS>
+        </DJ_PLAYLISTS>
+        """.write(to: xmlURL, atomically: true, encoding: .utf8)
+
+        let parsed = try RekordboxXMLParser().parse(from: xmlURL)
+        let alphaTrackPath = "/Users/test/Music/Alpha Track.mp3"
+        let betaTrackPath = "/Users/test/Music/Beta Track.mp3"
+
+        #expect(parsed.tracks.count == 2)
+        #expect(parsed.trackPathsByID["track-1"] == alphaTrackPath)
+        #expect(parsed.memberships(forTrackPath: alphaTrackPath) == ["Festival / Day 1 / Sunrise"])
+        #expect(parsed.memberships(forTrackPath: betaTrackPath) == ["Tools"])
+
+        let alpha = parsed.tracks.first(where: { $0.trackID == "track-1" })
+        #expect(alpha?.trackPath == alphaTrackPath)
+        #expect(alpha?.bpm == 124.5)
+        #expect(alpha?.musicalKey == "8A")
+        #expect(alpha?.genre == "House")
+        #expect(alpha?.comment == "Peak-time weapon")
+        #expect(alpha?.rating == 4)
+        #expect(alpha?.color == "Blue")
+        #expect(alpha?.playCount == 9)
+        #expect(alpha?.cuePoints.count == 1)
+        #expect(alpha?.cuePoints.first?.index == 3)
+        #expect(alpha?.cuePoints.first?.kind == .cue)
+        #expect(abs((alpha?.cuePoints.first?.startSec ?? 0) - 64.5) < 0.001)
+    }
+
+    @Test func externalMetadataServiceAutomaticSearchIgnoresInvalidXMLAndReturnsValidCandidate() throws {
+        let directory = try makeTemporaryDirectory()
+        let validXML = directory.appendingPathComponent("rekordbox-export.xml")
+        let invalidXML = directory.appendingPathComponent("not-rekordbox.xml")
+
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <DJ_PLAYLISTS>
+          <PLAYLISTS>
+            <NODE Name="ROOT">
+              <NODE Name="Detected">
+                <TRACK Location="/Users/test/Music/New.mp3" />
+              </NODE>
+            </NODE>
+          </PLAYLISTS>
+        </DJ_PLAYLISTS>
+        """.write(to: validXML, atomically: true, encoding: .utf8)
+        try "<root />".write(to: invalidXML, atomically: true, encoding: .utf8)
+
+        let service = ExternalMetadataService(
+            rekordboxXMLSearchDirectories: [directory],
+            lastRekordboxXMLPathProvider: { nil }
+        )
+
+        let automaticCandidate = service.detectRekordboxXMLCandidate()
+        #expect(automaticCandidate?.url.resolvingSymlinksInPath().path == validXML.resolvingSymlinksInPath().path)
+        #expect(automaticCandidate?.origin == .automaticSearch)
+    }
+
+    @Test func externalMetadataServicePrefersSavedRekordboxXMLPathWhenValid() throws {
+        let directory = try makeTemporaryDirectory()
+        let savedXML = directory.appendingPathComponent("saved-rekordbox.xml")
+        let otherXML = directory.appendingPathComponent("other-rekordbox.xml")
+
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <DJ_PLAYLISTS>
+          <COLLECTION Entries="1">
+            <TRACK TrackID="saved" Location="/Users/test/Music/Saved.mp3" />
+          </COLLECTION>
+        </DJ_PLAYLISTS>
+        """.write(to: savedXML, atomically: true, encoding: .utf8)
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <DJ_PLAYLISTS>
+          <COLLECTION Entries="1">
+            <TRACK TrackID="other" Location="/Users/test/Music/Other.mp3" />
+          </COLLECTION>
+        </DJ_PLAYLISTS>
+        """.write(to: otherXML, atomically: true, encoding: .utf8)
+
+        let savedPathService = ExternalMetadataService(
+            rekordboxXMLSearchDirectories: [directory],
+            lastRekordboxXMLPathProvider: { savedXML.path }
+        )
+        let savedCandidate = savedPathService.detectRekordboxXMLCandidate()
+        #expect(savedCandidate?.url.resolvingSymlinksInPath().path == savedXML.resolvingSymlinksInPath().path)
+        #expect(savedCandidate?.origin == .savedPath)
+    }
+
+    @Test func externalMetadataServiceCandidateSelectionPrefersNewestThenAlphabeticalPath() {
+        let older = RekordboxXMLCandidate(
+            url: URL(fileURLWithPath: "/tmp/z-older.xml"),
+            modifiedAt: Date(timeIntervalSince1970: 10),
+            origin: .automaticSearch
+        )
+        let newer = RekordboxXMLCandidate(
+            url: URL(fileURLWithPath: "/tmp/a-newer.xml"),
+            modifiedAt: Date(timeIntervalSince1970: 20),
+            origin: .automaticSearch
+        )
+        let undated = RekordboxXMLCandidate(
+            url: URL(fileURLWithPath: "/tmp/m-undated.xml"),
+            modifiedAt: nil,
+            origin: .automaticSearch
+        )
+
+        #expect(
+            ExternalMetadataService.preferredRekordboxXMLCandidate(from: [older, newer, undated])?.url.path
+                == newer.url.path
+        )
+
+        let alphabeticalA = RekordboxXMLCandidate(
+            url: URL(fileURLWithPath: "/tmp/A.xml"),
+            modifiedAt: Date(timeIntervalSince1970: 30),
+            origin: .automaticSearch
+        )
+        let alphabeticalB = RekordboxXMLCandidate(
+            url: URL(fileURLWithPath: "/tmp/B.xml"),
+            modifiedAt: Date(timeIntervalSince1970: 30),
+            origin: .automaticSearch
+        )
+
+        #expect(
+            ExternalMetadataService.preferredRekordboxXMLCandidate(from: [alphabeticalB, alphabeticalA])?.url.path
+                == alphabeticalA.url.path
+        )
+        #expect(ExternalMetadataService.preferredRekordboxXMLCandidate(from: []) == nil)
+    }
+
     @Test func cuePresentationGroupsBySourceAndUsesDisplayLabels() {
         let seratoMetadata = ExternalDJMetadata(
             id: UUID(),
@@ -840,6 +1068,60 @@ struct SoriaTests {
         #expect(snapshot.embeddingUpdatedAt != nil)
         #expect(snapshot.segmentCount == 3)
         #expect(snapshot.embeddedSegmentCount == 3)
+    }
+
+    @Test func rekordboxXMLImportPopulatesMembershipCatalogForMatchedIndexedTracksOnly() throws {
+        let directory = try makeTemporaryDirectory()
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let database = try LibraryDatabase(databaseURL: databaseURL)
+        let importer = ExternalMetadataService()
+
+        let matchedTrack = makeTrack(
+            path: "/Users/test/Music/Matched Track.mp3",
+            title: "Matched Track",
+            analyzedAt: Date()
+        )
+        try database.upsertTrack(matchedTrack)
+
+        let xmlURL = directory.appendingPathComponent("rekordbox-import.xml")
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <DJ_PLAYLISTS Version="1.0.0">
+          <COLLECTION Entries="2">
+            <TRACK TrackID="match-1" Location="/Users/test/Music/Matched Track.mp3" />
+            <TRACK TrackID="miss-1" Location="/Users/test/Music/Unmatched Track.mp3" />
+          </COLLECTION>
+          <PLAYLISTS>
+            <NODE Name="ROOT">
+              <NODE Name="Festival">
+                <NODE Name="Day 1">
+                  <NODE Name="Sunrise">
+                    <TRACK Key="match-1" />
+                    <TRACK Key="miss-1" />
+                  </NODE>
+                </NODE>
+              </NODE>
+            </NODE>
+          </PLAYLISTS>
+        </DJ_PLAYLISTS>
+        """.write(to: xmlURL, atomically: true, encoding: .utf8)
+
+        let imported = try importer.importRekordboxXML(from: xmlURL)
+        let entriesByPath = Dictionary(grouping: imported, by: \.trackPath)
+        if let entries = entriesByPath[matchedTrack.filePath] {
+            try database.replaceExternalMetadata(
+                trackID: matchedTrack.id,
+                source: .rekordbox,
+                entries: entries
+            )
+        }
+
+        let facets = try database.fetchMembershipFacets(source: .rekordbox)
+        let snapshots = try database.fetchTrackMembershipSnapshots(trackIDs: [matchedTrack.id])
+
+        #expect(facets.count == 1)
+        #expect(facets.first?.membershipPath == "Festival / Day 1 / Sunrise")
+        #expect(snapshots[matchedTrack.id]?.rekordboxMembershipPaths == ["Festival / Day 1 / Sunrise"])
     }
 
     @Test func membershipNormalizationSupportsUnionScopeQueriesAndScopedReadyCounts() throws {
