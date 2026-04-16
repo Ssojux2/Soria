@@ -131,14 +131,26 @@ xcodebuild build \
   CODE_SIGNING_REQUIRED=NO
 ```
 
+That command is build-only by design. It verifies that the app compiles, but it does not launch the macOS app bundle after the build finishes.
+
 To build and launch the desktop app from Terminal, use:
 ```bash
 ./Scripts/run_debug_app.sh
 ```
 
+You can also use the top-level shortcut:
+```bash
+make run
+```
+
 If you need a clean rebuild first:
 ```bash
 ./Scripts/run_debug_app.sh --clean
+```
+
+Or:
+```bash
+make run-clean
 ```
 
 Use `open .../Soria.app`, not `.../Contents/MacOS/Soria`, when launching from Terminal. The app is a macOS bundle and is more reliable when started through Launch Services.
