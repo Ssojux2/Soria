@@ -5,7 +5,7 @@ struct MixAssistantView: View {
     @State private var dismissedSelectionSignature: String?
     @State private var includeTagsText: String = ""
     @State private var excludeTagsText: String = ""
-    @State private var isAdvancedScoreExpanded = true
+    @State private var isAdvancedScoreExpanded = false
 
     var body: some View {
         ZStack {
@@ -286,121 +286,139 @@ struct MixAssistantView: View {
 
     private var advancedScoreControls: some View {
         GroupBox {
-            DisclosureGroup("Advanced Score Controls", isExpanded: $isAdvancedScoreExpanded) {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Final and embedding weights are normalized automatically when scoring.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Final Score Weights")
+            VStack(alignment: .leading, spacing: 0) {
+                Button {
+                    isAdvancedScoreExpanded.toggle()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: isAdvancedScoreExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text("Advanced Score Controls")
                             .font(.headline)
-                        NumericSliderField(
-                            title: "Embedding",
-                            value: $viewModel.weights.embed,
-                            range: 0...1,
-                            accessibilityIdentifier: "score-weight-embedding"
-                        )
-                        NumericSliderField(title: "BPM", value: $viewModel.weights.bpm, range: 0...1)
-                        NumericSliderField(title: "Key", value: $viewModel.weights.key, range: 0...1)
-                        NumericSliderField(title: "Energy", value: $viewModel.weights.energy, range: 0...1)
-                        NumericSliderField(title: "Transition", value: $viewModel.weights.introOutro, range: 0...1)
-                        NumericSliderField(title: "External", value: $viewModel.weights.external, range: 0...1)
-                        runtimeWeightSummary(
-                            title: "Normalized Final",
-                            values: [
-                                ("Embed", viewModel.normalizedRecommendationWeights.embed),
-                                ("BPM", viewModel.normalizedRecommendationWeights.bpm),
-                                ("Key", viewModel.normalizedRecommendationWeights.key),
-                                ("Energy", viewModel.normalizedRecommendationWeights.energy),
-                                ("Transition", viewModel.normalizedRecommendationWeights.introOutro),
-                                ("External", viewModel.normalizedRecommendationWeights.external)
-                            ]
-                        )
-                    }
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Embedding Mix Weights")
-                            .font(.headline)
-                        NumericSliderField(title: "Track", value: $viewModel.vectorWeights.track, range: 0...1)
-                        NumericSliderField(title: "Intro", value: $viewModel.vectorWeights.intro, range: 0...1)
-                        NumericSliderField(title: "Middle", value: $viewModel.vectorWeights.middle, range: 0...1)
-                        NumericSliderField(title: "Outro", value: $viewModel.vectorWeights.outro, range: 0...1)
-                        runtimeWeightSummary(
-                            title: "Normalized Embedding",
-                            values: [
-                                ("Track", viewModel.normalizedMixsetVectorWeights.track),
-                                ("Intro", viewModel.normalizedMixsetVectorWeights.intro),
-                                ("Middle", viewModel.normalizedMixsetVectorWeights.middle),
-                                ("Outro", viewModel.normalizedMixsetVectorWeights.outro)
-                            ]
-                        )
-                    }
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Mix Constraints")
-                            .font(.headline)
-                        OptionalNumericSliderField(
-                            title: "BPM Min",
-                            value: $viewModel.constraints.targetBPMMin,
-                            range: 60...180,
-                            defaultValue: viewModel.selectedTracks.first?.bpm ?? 118,
-                            step: 0.5
-                        )
-                        OptionalNumericSliderField(
-                            title: "BPM Max",
-                            value: $viewModel.constraints.targetBPMMax,
-                            range: 60...180,
-                            defaultValue: viewModel.selectedTracks.first?.bpm ?? 128,
-                            step: 0.5
-                        )
-                        OptionalNumericSliderField(
-                            title: "Max Minutes",
-                            value: $viewModel.constraints.maxDurationMinutes,
-                            range: 1...20,
-                            defaultValue: 8,
-                            step: 0.25
-                        )
-                        NumericSliderField(title: "Key Strictness", value: $viewModel.constraints.keyStrictness, range: 0...1)
-                        NumericSliderField(title: "Genre Continuity", value: $viewModel.constraints.genreContinuity, range: 0...1)
-                        NumericSliderField(
-                            title: "External Priority",
-                            value: $viewModel.constraints.externalMetadataPriority,
-                            range: 0...1
-                        )
-                    }
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Picker("Focus", selection: $viewModel.constraints.analysisFocus) {
-                            Text("Any Focus").tag(Optional<AnalysisFocus>.none)
-                            ForEach(AnalysisFocus.allCases) { focus in
-                                Text(focus.displayName).tag(Optional(focus))
-                            }
-                        }
-                        .frame(width: 220)
-
-                        TextField("Include tags or text", text: $includeTagsText)
-                            .textFieldStyle(.roundedBorder)
-                            .onChange(of: includeTagsText) { _, newValue in
-                                viewModel.constraints.includeTags = splitTags(newValue)
-                            }
-
-                        TextField("Exclude tags or text", text: $excludeTagsText)
-                            .textFieldStyle(.roundedBorder)
-                            .onChange(of: excludeTagsText) { _, newValue in
-                                viewModel.constraints.excludeTags = splitTags(newValue)
-                            }
-                    }
-
-                    HStack {
-                        Button("Reset to Defaults") {
-                            viewModel.resetMixsetScoringControls()
-                            hydrateTagEditorsFromConstraints()
-                        }
                         Spacer()
                     }
+                    .contentShape(Rectangle())
                 }
-                .padding(.top, 12)
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("advanced-score-controls-toggle")
+
+                if isAdvancedScoreExpanded {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Final and embedding weights are normalized automatically when scoring.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Final Score Weights")
+                                .font(.headline)
+                            NumericSliderField(
+                                title: "Embedding",
+                                value: $viewModel.weights.embed,
+                                range: 0...1,
+                                accessibilityIdentifier: "score-weight-embedding"
+                            )
+                            NumericSliderField(title: "BPM", value: $viewModel.weights.bpm, range: 0...1)
+                            NumericSliderField(title: "Key", value: $viewModel.weights.key, range: 0...1)
+                            NumericSliderField(title: "Energy", value: $viewModel.weights.energy, range: 0...1)
+                            NumericSliderField(title: "Transition", value: $viewModel.weights.introOutro, range: 0...1)
+                            NumericSliderField(title: "External", value: $viewModel.weights.external, range: 0...1)
+                            runtimeWeightSummary(
+                                title: "Normalized Final",
+                                values: [
+                                    ("Embed", viewModel.normalizedRecommendationWeights.embed),
+                                    ("BPM", viewModel.normalizedRecommendationWeights.bpm),
+                                    ("Key", viewModel.normalizedRecommendationWeights.key),
+                                    ("Energy", viewModel.normalizedRecommendationWeights.energy),
+                                    ("Transition", viewModel.normalizedRecommendationWeights.introOutro),
+                                    ("External", viewModel.normalizedRecommendationWeights.external)
+                                ]
+                            )
+                        }
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Embedding Mix Weights")
+                                .font(.headline)
+                            NumericSliderField(title: "Track", value: $viewModel.vectorWeights.track, range: 0...1)
+                            NumericSliderField(title: "Intro", value: $viewModel.vectorWeights.intro, range: 0...1)
+                            NumericSliderField(title: "Middle", value: $viewModel.vectorWeights.middle, range: 0...1)
+                            NumericSliderField(title: "Outro", value: $viewModel.vectorWeights.outro, range: 0...1)
+                            runtimeWeightSummary(
+                                title: "Normalized Embedding",
+                                values: [
+                                    ("Track", viewModel.normalizedMixsetVectorWeights.track),
+                                    ("Intro", viewModel.normalizedMixsetVectorWeights.intro),
+                                    ("Middle", viewModel.normalizedMixsetVectorWeights.middle),
+                                    ("Outro", viewModel.normalizedMixsetVectorWeights.outro)
+                                ]
+                            )
+                        }
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Mix Constraints")
+                                .font(.headline)
+                            OptionalNumericSliderField(
+                                title: "BPM Min",
+                                value: $viewModel.constraints.targetBPMMin,
+                                range: 60...180,
+                                defaultValue: viewModel.selectedTracks.first?.bpm ?? 118,
+                                step: 0.5
+                            )
+                            OptionalNumericSliderField(
+                                title: "BPM Max",
+                                value: $viewModel.constraints.targetBPMMax,
+                                range: 60...180,
+                                defaultValue: viewModel.selectedTracks.first?.bpm ?? 128,
+                                step: 0.5
+                            )
+                            OptionalNumericSliderField(
+                                title: "Max Minutes",
+                                value: $viewModel.constraints.maxDurationMinutes,
+                                range: 1...20,
+                                defaultValue: 8,
+                                step: 0.25
+                            )
+                            NumericSliderField(title: "Key Strictness", value: $viewModel.constraints.keyStrictness, range: 0...1)
+                            NumericSliderField(title: "Genre Continuity", value: $viewModel.constraints.genreContinuity, range: 0...1)
+                            NumericSliderField(
+                                title: "External Priority",
+                                value: $viewModel.constraints.externalMetadataPriority,
+                                range: 0...1
+                            )
+                        }
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Picker("Focus", selection: $viewModel.constraints.analysisFocus) {
+                                Text("Any Focus").tag(Optional<AnalysisFocus>.none)
+                                ForEach(AnalysisFocus.allCases) { focus in
+                                    Text(focus.displayName).tag(Optional(focus))
+                                }
+                            }
+                            .frame(width: 220)
+
+                            TextField("Include tags or text", text: $includeTagsText)
+                                .textFieldStyle(.roundedBorder)
+                                .onChange(of: includeTagsText) { _, newValue in
+                                    viewModel.constraints.includeTags = splitTags(newValue)
+                                }
+
+                            TextField("Exclude tags or text", text: $excludeTagsText)
+                                .textFieldStyle(.roundedBorder)
+                                .onChange(of: excludeTagsText) { _, newValue in
+                                    viewModel.constraints.excludeTags = splitTags(newValue)
+                                }
+                        }
+
+                        HStack {
+                            Button("Reset to Defaults") {
+                                viewModel.resetMixsetScoringControls()
+                                hydrateTagEditorsFromConstraints()
+                            }
+                            Spacer()
+                        }
+                    }
+                    .padding(.top, 12)
+                }
             }
         }
         .accessibilityIdentifier("advanced-score-controls")

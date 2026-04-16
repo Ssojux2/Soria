@@ -98,7 +98,13 @@ final class SoriaUITests: XCTestCase {
         let app = launchApp(libraryState: .prepared, startInMixAssistant: true)
 
         XCTAssertTrue(element(in: app, identifier: "advanced-score-controls").waitForExistence(timeout: 10))
+        XCTAssertFalse(element(in: app, identifier: "score-weight-embedding").exists)
         XCTAssertFalse(app.buttons["Find Similar Tracks"].exists)
+
+        let advancedControlsButton = element(in: app, identifier: "advanced-score-controls-toggle")
+        XCTAssertTrue(advancedControlsButton.waitForExistence(timeout: 10))
+        advancedControlsButton.click()
+        XCTAssertTrue(element(in: app, identifier: "score-weight-embedding").waitForExistence(timeout: 10))
 
         let openFiltersButton = element(in: app, identifier: "scope-filter-open-recommendation")
         XCTAssertTrue(openFiltersButton.waitForExistence(timeout: 10))
