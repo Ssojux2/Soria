@@ -60,9 +60,9 @@ final class LibraryDatabase {
         let sql = """
         INSERT INTO tracks (
             id, file_path, file_name, title, artist, album, genre, duration, sample_rate, bpm, musical_key,
-            modified_time, content_hash, analyzed_at, embedding_profile_id, embedding_updated_at,
+            modified_time, content_hash, analyzed_at, embedding_profile_id, embedding_pipeline_id, embedding_updated_at,
             has_serato, has_rekordbox, bpm_source, key_source
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(file_path) DO UPDATE SET
             file_name = excluded.file_name,
             title = excluded.title,
@@ -77,6 +77,7 @@ final class LibraryDatabase {
             content_hash = excluded.content_hash,
             analyzed_at = excluded.analyzed_at,
             embedding_profile_id = excluded.embedding_profile_id,
+            embedding_pipeline_id = excluded.embedding_pipeline_id,
             embedding_updated_at = excluded.embedding_updated_at,
             has_serato = excluded.has_serato,
             has_rekordbox = excluded.has_rekordbox,
@@ -99,11 +100,12 @@ final class LibraryDatabase {
             bind(statement, index: 13, text: track.contentHash)
             bind(statement, index: 14, text: track.analyzedAt.map { Self.iso8601.string(from: $0) })
             bind(statement, index: 15, text: track.embeddingProfileID)
-            bind(statement, index: 16, text: track.embeddingUpdatedAt.map { Self.iso8601.string(from: $0) })
-            sqlite3_bind_int(statement, 17, track.hasSeratoMetadata ? 1 : 0)
-            sqlite3_bind_int(statement, 18, track.hasRekordboxMetadata ? 1 : 0)
-            bind(statement, index: 19, text: track.bpmSource?.rawValue)
-            bind(statement, index: 20, text: track.keySource?.rawValue)
+            bind(statement, index: 16, text: track.embeddingPipelineID)
+            bind(statement, index: 17, text: track.embeddingUpdatedAt.map { Self.iso8601.string(from: $0) })
+            sqlite3_bind_int(statement, 18, track.hasSeratoMetadata ? 1 : 0)
+            sqlite3_bind_int(statement, 19, track.hasRekordboxMetadata ? 1 : 0)
+            bind(statement, index: 20, text: track.bpmSource?.rawValue)
+            bind(statement, index: 21, text: track.keySource?.rawValue)
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 throw DatabaseError.writeFailed
             }
@@ -153,7 +155,7 @@ final class LibraryDatabase {
             let updateSQL = """
             UPDATE tracks
             SET analyzed_at = ?, track_embedding_json = ?, analysis_summary_json = ?,
-                embedding_profile_id = NULL, embedding_updated_at = NULL
+                embedding_profile_id = NULL, embedding_pipeline_id = NULL, embedding_updated_at = NULL
             WHERE id = ?;
             """
             try withStatement(updateSQL) { statement in
@@ -213,7 +215,7 @@ final class LibraryDatabase {
             let updateTrackSQL = """
             UPDATE tracks
             SET track_embedding_json = ?, analysis_summary_json = ?,
-                embedding_profile_id = NULL, embedding_updated_at = NULL
+                embedding_profile_id = NULL, embedding_pipeline_id = NULL, embedding_updated_at = NULL
             WHERE id = ?;
             """
             try withStatement(updateTrackSQL) { statement in
@@ -274,11 +276,12 @@ final class LibraryDatabase {
         }
     }
 
-    func fetchReadyTrackIDs(profileID: String) throws -> Set<UUID> {
+    func fetchReadyTrackIDs(profileID: String, pipelineID: String) throws -> Set<UUID> {
         let sql = """
         SELECT id
         FROM tracks
         WHERE embedding_profile_id = ?
+          AND embedding_pipeline_id = ?
           AND embedding_updated_at IS NOT NULL
           AND track_embedding_json IS NOT NULL
           AND track_embedding_json <> ''
@@ -294,6 +297,7 @@ final class LibraryDatabase {
         """
         return try withStatement(sql) { statement in
             bind(statement, index: 1, text: profileID)
+            bind(statement, index: 2, text: pipelineID)
             var output: Set<UUID> = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 guard let idText = sqliteString(statement, index: 0), let id = UUID(uuidString: idText) else {
@@ -308,18 +312,20 @@ final class LibraryDatabase {
     func markTrackEmbeddingIndexed(
         trackID: UUID,
         embeddingProfileID: String,
+        embeddingPipelineID: String,
         indexedAt: Date = Date()
     ) throws {
         try withStatement(
             """
             UPDATE tracks
-            SET embedding_profile_id = ?, embedding_updated_at = ?
+            SET embedding_profile_id = ?, embedding_pipeline_id = ?, embedding_updated_at = ?
             WHERE id = ?;
             """
         ) { statement in
             bind(statement, index: 1, text: embeddingProfileID)
-            bind(statement, index: 2, text: Self.iso8601.string(from: indexedAt))
-            bind(statement, index: 3, text: trackID.uuidString)
+            bind(statement, index: 2, text: embeddingPipelineID)
+            bind(statement, index: 3, text: Self.iso8601.string(from: indexedAt))
+            bind(statement, index: 4, text: trackID.uuidString)
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 throw DatabaseError.writeFailed
             }
@@ -327,6 +333,7 @@ final class LibraryDatabase {
         _ = try verifyPersistedEmbeddingState(
             trackID: trackID,
             expectedEmbeddingProfileID: embeddingProfileID,
+            expectedEmbeddingPipelineID: embeddingPipelineID,
             context: "markTrackEmbeddingIndexed"
         )
     }
@@ -334,10 +341,11 @@ final class LibraryDatabase {
     func verifyPersistedEmbeddingState(
         trackID: UUID,
         expectedEmbeddingProfileID: String? = nil,
+        expectedEmbeddingPipelineID: String? = nil,
         context: String = "verifyPersistedEmbeddingState"
     ) throws -> PersistedEmbeddingStateSnapshot {
         let trackSQL = """
-        SELECT analyzed_at, track_embedding_json, analysis_summary_json, embedding_profile_id, embedding_updated_at
+        SELECT analyzed_at, track_embedding_json, analysis_summary_json, embedding_profile_id, embedding_pipeline_id, embedding_updated_at
         FROM tracks
         WHERE id = ?
         LIMIT 1;
@@ -350,7 +358,8 @@ final class LibraryDatabase {
             let trackEmbeddingJSON = sqliteString(statement, index: 1)
             let analysisSummaryJSON = sqliteString(statement, index: 2)
             let embeddingProfileID = sqliteString(statement, index: 3)
-            let embeddingUpdatedAt = sqliteString(statement, index: 4).flatMap { Self.iso8601.date(from: $0) }
+            let embeddingPipelineID = sqliteString(statement, index: 4)
+            let embeddingUpdatedAt = sqliteString(statement, index: 5).flatMap { Self.iso8601.date(from: $0) }
 
             return PersistedEmbeddingStateSnapshot(
                 trackID: trackID,
@@ -358,6 +367,7 @@ final class LibraryDatabase {
                 hasTrackEmbedding: Self.hasNonEmptyJSONPayload(trackEmbeddingJSON),
                 hasAnalysisSummary: Self.hasNonEmptyJSONPayload(analysisSummaryJSON),
                 embeddingProfileID: embeddingProfileID,
+                embeddingPipelineID: embeddingPipelineID,
                 embeddingUpdatedAt: embeddingUpdatedAt,
                 segmentCount: 0,
                 embeddedSegmentCount: 0
@@ -397,23 +407,25 @@ final class LibraryDatabase {
         let embeddingUpdatedAtText = snapshot.embeddingUpdatedAt.map { Self.iso8601.string(from: $0) } ?? "nil"
 
         let isProfileValid = expectedEmbeddingProfileID.map { snapshot.embeddingProfileID == $0 } ?? true
+        let isPipelineValid = expectedEmbeddingPipelineID.map { snapshot.embeddingPipelineID == $0 } ?? true
         guard
             snapshot.analyzedAt != nil,
             snapshot.hasTrackEmbedding,
             snapshot.hasAnalysisSummary,
             snapshot.embeddingUpdatedAt != nil,
             isProfileValid,
+            isPipelineValid,
             snapshot.segmentCount > 0,
             snapshot.segmentCount == snapshot.embeddedSegmentCount
         else {
             AppLogger.shared.error(
-                "Database embedding state verification failed | context=\(context) | trackID=\(trackID.uuidString) | expectedProfile=\(expectedEmbeddingProfileID ?? "nil") | actualProfile=\(snapshot.embeddingProfileID ?? "nil") | analyzedAt=\(analyzedAtText) | embeddingUpdatedAt=\(embeddingUpdatedAtText) | segmentCount=\(snapshot.segmentCount) | embeddedSegmentCount=\(snapshot.embeddedSegmentCount) | hasTrackEmbedding=\(snapshot.hasTrackEmbedding) | hasAnalysisSummary=\(snapshot.hasAnalysisSummary)"
+                "Database embedding state verification failed | context=\(context) | trackID=\(trackID.uuidString) | expectedProfile=\(expectedEmbeddingProfileID ?? "nil") | actualProfile=\(snapshot.embeddingProfileID ?? "nil") | expectedPipeline=\(expectedEmbeddingPipelineID ?? "nil") | actualPipeline=\(snapshot.embeddingPipelineID ?? "nil") | analyzedAt=\(analyzedAtText) | embeddingUpdatedAt=\(embeddingUpdatedAtText) | segmentCount=\(snapshot.segmentCount) | embeddedSegmentCount=\(snapshot.embeddedSegmentCount) | hasTrackEmbedding=\(snapshot.hasTrackEmbedding) | hasAnalysisSummary=\(snapshot.hasAnalysisSummary)"
             )
             throw DatabaseError.writeFailed
         }
 
         AppLogger.shared.info(
-            "Database embedding state verified | context=\(context) | trackID=\(trackID.uuidString) | profile=\(snapshot.embeddingProfileID ?? "nil") | analyzedAt=\(analyzedAtText) | embeddingUpdatedAt=\(embeddingUpdatedAtText) | segmentCount=\(snapshot.segmentCount) | embeddedSegmentCount=\(snapshot.embeddedSegmentCount)"
+            "Database embedding state verified | context=\(context) | trackID=\(trackID.uuidString) | profile=\(snapshot.embeddingProfileID ?? "nil") | pipeline=\(snapshot.embeddingPipelineID ?? "nil") | analyzedAt=\(analyzedAtText) | embeddingUpdatedAt=\(embeddingUpdatedAtText) | segmentCount=\(snapshot.segmentCount) | embeddedSegmentCount=\(snapshot.embeddedSegmentCount)"
         )
         return snapshot
     }
@@ -441,7 +453,7 @@ final class LibraryDatabase {
                 """
                 UPDATE tracks
                 SET analyzed_at = NULL, track_embedding_json = NULL, analysis_summary_json = NULL,
-                    embedding_profile_id = NULL, embedding_updated_at = NULL
+                    embedding_profile_id = NULL, embedding_pipeline_id = NULL, embedding_updated_at = NULL
                 WHERE id = ?;
                 """
             ) { statement in
@@ -714,10 +726,11 @@ final class LibraryDatabase {
 
     func fetchScopedReadyTrackIDs(
         matching scopeFilter: LibraryScopeFilter,
-        profileID: String
+        profileID: String,
+        pipelineID: String
     ) throws -> Set<UUID> {
         if scopeFilter.isEmpty {
-            return try fetchReadyTrackIDs(profileID: profileID)
+            return try fetchReadyTrackIDs(profileID: profileID, pipelineID: pipelineID)
         }
 
         let predicate = membershipScopePredicate(for: scopeFilter)
@@ -726,6 +739,7 @@ final class LibraryDatabase {
         FROM tracks
         INNER JOIN track_memberships ON track_memberships.track_id = tracks.id
         WHERE tracks.embedding_profile_id = ?
+          AND tracks.embedding_pipeline_id = ?
           AND tracks.embedding_updated_at IS NOT NULL
           AND tracks.track_embedding_json IS NOT NULL
           AND tracks.track_embedding_json <> ''
@@ -743,7 +757,8 @@ final class LibraryDatabase {
 
         return try withStatement(sql) { statement in
             bind(statement, index: 1, text: profileID)
-            bindAll(statement, values: predicate.values, startingAt: 2)
+            bind(statement, index: 2, text: pipelineID)
+            bindAll(statement, values: predicate.values, startingAt: 3)
             var output: Set<UUID> = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 guard let idText = sqliteString(statement, index: 0), let id = UUID(uuidString: idText) else {
@@ -927,6 +942,7 @@ final class LibraryDatabase {
             track_embedding_json TEXT,
             analysis_summary_json TEXT,
             embedding_profile_id TEXT,
+            embedding_pipeline_id TEXT,
             embedding_updated_at TEXT,
             bpm_source TEXT,
             key_source TEXT
@@ -1052,6 +1068,9 @@ final class LibraryDatabase {
         if try !columnExists(table: "tracks", column: "embedding_profile_id") {
             try exec("ALTER TABLE tracks ADD COLUMN embedding_profile_id TEXT;")
         }
+        if try !columnExists(table: "tracks", column: "embedding_pipeline_id") {
+            try exec("ALTER TABLE tracks ADD COLUMN embedding_pipeline_id TEXT;")
+        }
         if try !columnExists(table: "tracks", column: "embedding_updated_at") {
             try exec("ALTER TABLE tracks ADD COLUMN embedding_updated_at TEXT;")
         }
@@ -1109,7 +1128,7 @@ final class LibraryDatabase {
 
         let modifiedTime = Self.iso8601.date(from: modifiedTimeText) ?? .distantPast
         let analyzedAt = sqliteString(statement, index: 13).flatMap { Self.iso8601.date(from: $0) }
-        let embeddingUpdatedAt = sqliteString(statement, index: 15).flatMap { Self.iso8601.date(from: $0) }
+        let embeddingUpdatedAt = sqliteString(statement, index: 16).flatMap { Self.iso8601.date(from: $0) }
         return Track(
             id: id,
             filePath: filePath,
@@ -1126,11 +1145,12 @@ final class LibraryDatabase {
             contentHash: contentHash,
             analyzedAt: analyzedAt,
             embeddingProfileID: sqliteString(statement, index: 14),
+            embeddingPipelineID: sqliteString(statement, index: 15),
             embeddingUpdatedAt: embeddingUpdatedAt,
-            hasSeratoMetadata: sqlite3_column_int(statement, 16) == 1,
-            hasRekordboxMetadata: sqlite3_column_int(statement, 17) == 1,
-            bpmSource: sqliteString(statement, index: 18).flatMap(TrackMetadataSource.init(rawValue:)),
-            keySource: sqliteString(statement, index: 19).flatMap(TrackMetadataSource.init(rawValue:))
+            hasSeratoMetadata: sqlite3_column_int(statement, 17) == 1,
+            hasRekordboxMetadata: sqlite3_column_int(statement, 18) == 1,
+            bpmSource: sqliteString(statement, index: 19).flatMap(TrackMetadataSource.init(rawValue:)),
+            keySource: sqliteString(statement, index: 20).flatMap(TrackMetadataSource.init(rawValue:))
         )
     }
 
@@ -1269,15 +1289,22 @@ final class LibraryDatabase {
             WHERE track_id IN (
                 SELECT id
                 FROM tracks
-                WHERE embedding_profile_id = '\(EmbeddingProfile.legacyGoogleTextEmbedding004ID)'
+                WHERE embedding_profile_id IN (
+                    '\(EmbeddingProfile.legacyGoogleTextEmbedding004ID)',
+                    '\(EmbeddingProfile.legacyGeminiEmbedding001ID)'
+                )
             );
             """)
             try exec("""
             UPDATE tracks
             SET track_embedding_json = NULL,
                 embedding_profile_id = NULL,
+                embedding_pipeline_id = NULL,
                 embedding_updated_at = NULL
-            WHERE embedding_profile_id = '\(EmbeddingProfile.legacyGoogleTextEmbedding004ID)';
+            WHERE embedding_profile_id IN (
+                '\(EmbeddingProfile.legacyGoogleTextEmbedding004ID)',
+                '\(EmbeddingProfile.legacyGeminiEmbedding001ID)'
+            );
             """)
         }
     }
@@ -1286,9 +1313,11 @@ final class LibraryDatabase {
         try exec("""
         UPDATE tracks
         SET embedding_profile_id = NULL,
+            embedding_pipeline_id = NULL,
             embedding_updated_at = NULL
         WHERE embedding_profile_id IS NOT NULL
           AND (
+            embedding_pipeline_id IS NULL OR
             track_embedding_json IS NULL OR
             track_embedding_json = '' OR
             track_embedding_json = '[]' OR
@@ -1540,7 +1569,7 @@ final class LibraryDatabase {
 
     private let trackSelectColumns = """
     id, file_path, file_name, title, artist, album, genre, duration, sample_rate, bpm, musical_key,
-    modified_time, content_hash, analyzed_at, embedding_profile_id, embedding_updated_at,
+    modified_time, content_hash, analyzed_at, embedding_profile_id, embedding_pipeline_id, embedding_updated_at,
     has_serato, has_rekordbox, bpm_source, key_source
     """
 }
@@ -1573,6 +1602,7 @@ struct PersistedEmbeddingStateSnapshot: Equatable {
     let hasTrackEmbedding: Bool
     let hasAnalysisSummary: Bool
     let embeddingProfileID: String?
+    let embeddingPipelineID: String?
     let embeddingUpdatedAt: Date?
     var segmentCount: Int
     var embeddedSegmentCount: Int

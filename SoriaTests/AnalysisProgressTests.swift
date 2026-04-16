@@ -101,14 +101,14 @@ struct AnalysisProgressTests {
           "apiKeyConfigured": true,
           "pythonExecutable": "/tmp/python",
           "workerScriptPath": "/tmp/main.py",
-          "embeddingProfileID": "google/gemini-embedding-001",
+          "embeddingProfileID": "google/gemini-embedding-2-preview",
           "dependencies": {
             "librosa": true,
             "chromadb": true,
             "requests": true
           },
           "profileStatusByID": {
-            "google/gemini-embedding-001": {
+            "google/gemini-embedding-2-preview": {
               "supported": true,
               "requiresAPIKey": true,
               "dependencyErrors": []
@@ -129,9 +129,9 @@ struct AnalysisProgressTests {
 
         let decoded = try JSONDecoder().decode(WorkerHealthcheckResponse.self, from: Data(json.utf8))
         #expect(decoded.ok)
-        #expect(decoded.embeddingProfileID == "google/gemini-embedding-001")
+        #expect(decoded.embeddingProfileID == "google/gemini-embedding-2-preview")
         #expect(decoded.vectorIndexState?.trackCount == 3)
-        #expect(decoded.profileStatusByID["google/gemini-embedding-001"]?.supported == true)
+        #expect(decoded.profileStatusByID["google/gemini-embedding-2-preview"]?.supported == true)
     }
 
     @Test
@@ -191,14 +191,14 @@ struct AnalysisProgressTests {
             currentTrackPath: "/tmp/stalled.mp3",
             queueIndex: 1,
             totalCount: 1,
-            stage: .embeddingDescriptors,
+            stage: .embeddingAudioSegments,
             stageFraction: 0.72,
             startedAt: startedAt,
             updatedAt: startedAt,
             recentEvents: [
                 AnalysisActivityEvent(
-                    stage: .embeddingDescriptors,
-                    message: "No new worker progress for 12s (last stage: Embedding Descriptors)",
+                    stage: .embeddingAudioSegments,
+                    message: "No new worker progress for 12s (last stage: Embedding Audio Segments)",
                     timestamp: startedAt,
                     fraction: 0.72
                 )
@@ -372,8 +372,8 @@ struct AnalysisProgressTests {
     func friendlyPreparationMessageRemovesDetailedStageContext() {
         let raw = """
         Worker command failed.
-        Last stage: Embedding Descriptors
-        Last event: Building descriptor payload
+        Last stage: Embedding Audio Segments
+        Last event: Preparing audio segment payload
         """
 
         #expect(AppViewModel.friendlyPreparationMessage(from: raw) == "Worker command failed.")
@@ -524,7 +524,8 @@ struct AnalysisProgressTests {
             "options": [
                 "googleAIAPIKey": apiKey,
                 "cacheDirectory": tempDirectory.appendingPathComponent("worker-cache", isDirectory: true).path,
-                "embeddingProfileID": EmbeddingProfile.googleGeminiEmbedding001.id,
+                "embeddingProfileID": EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+                "embeddingPipelineID": EmbeddingPipeline.audioSegmentsV1.id,
                 "analysisFocus": AnalysisFocus.balanced.rawValue
             ]
         ]

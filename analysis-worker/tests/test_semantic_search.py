@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 ANALYSIS_WORKER_ROOT = Path(__file__).resolve().parents[1]
@@ -164,8 +165,9 @@ def _make_segments(track_id: str, vector_by_type: dict[str, list[float]]) -> lis
 
 def test_validate_embedding_profile_success(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeEmbeddingClient:
-        def validate(self, probe_text: str) -> list[float]:
-            assert "validation probe" in probe_text
+        def validate_audio(self, audio_bytes: bytes, mime_type: str) -> list[float]:
+            assert mime_type == "audio/wav"
+            assert audio_bytes
             return [0.2, 0.4]
 
     monkeypatch.setattr(worker_main, "_build_embedding_client", lambda payload, profile: FakeEmbeddingClient())
@@ -183,7 +185,7 @@ def test_validate_embedding_profile_success(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_validate_embedding_profile_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeEmbeddingClient:
-        def validate(self, probe_text: str) -> list[float] | None:
+        def validate_audio(self, audio_bytes: bytes, mime_type: str) -> list[float] | None:
             return None
 
     monkeypatch.setattr(worker_main, "_build_embedding_client", lambda payload, profile: FakeEmbeddingClient())
@@ -194,17 +196,31 @@ def test_validate_embedding_profile_failure(monkeypatch: pytest.MonkeyPatch) -> 
         )
 
 
-def test_embed_descriptors_requires_non_empty_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_embed_audio_segments_requires_non_empty_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeEmbeddingClient:
         _last_error = "Synthetic embedding failure"
+        audio_sampling_rate = 16_000
+        audio_input_kind = "waveform"
 
-        def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
-            return [None for _ in texts]
+        def embed_audio_batch(
+            self,
+            audio_payloads: list[object],
+            sample_rate: int | None = None,
+            mime_type: str = "audio/wav",
+        ) -> list[list[float] | None]:
+            assert sample_rate == 16_000
+            assert mime_type == "audio/wav"
+            return [None for _ in audio_payloads]
 
     monkeypatch.setattr(worker_main, "_build_embedding_client", lambda payload, profile: FakeEmbeddingClient())
+    monkeypatch.setattr(
+        worker_main,
+        "_prepare_audio_segments",
+        lambda **kwargs: [{"segment_type": "intro", "audio_input": np.array([0.1, 0.2]), "sample_rate": 16_000}],
+    )
 
     with pytest.raises(ValueError, match="Synthetic embedding failure"):
-        worker_main.handle_embed_descriptors(
+        worker_main.handle_embed_audio_segments(
             {
                 "filePath": "/tracks/failing.mp3",
                 "segments": [
@@ -273,7 +289,7 @@ def test_search_tracks_applies_deterministic_late_fusion(monkeypatch: pytest.Mon
     _install_fake_chroma(monkeypatch)
 
     class FakeEmbeddingClient:
-        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        def embed_text_batch(self, texts: list[str]) -> list[list[float]]:
             assert texts == ["rolling house groove"]
             return [[1.0, 0.0]]
 
@@ -355,7 +371,7 @@ def test_search_tracks_applies_deterministic_late_fusion(monkeypatch: pytest.Mon
 
 def test_hybrid_query_embeddings_blend_text_and_reference_evenly(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeEmbeddingClient:
-        def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        def embed_text_batch(self, texts: list[str]) -> list[list[float]]:
             assert texts == ["sunrise warmup"]
             return [[1.0, 0.0]]
 
@@ -517,11 +533,26 @@ def test_analyze_does_not_mutate_vector_store(monkeypatch: pytest.MonkeyPatch) -
         }
 
     class FakeEmbeddingClient:
-        def embed_batch(self, texts: list[str]) -> list[list[float]]:
-            return [[1.0, 0.0] for _ in texts]
+        audio_sampling_rate = 16_000
+        audio_input_kind = "waveform"
+
+        def embed_audio_batch(
+            self,
+            audio_payloads: list[object],
+            sample_rate: int | None = None,
+            mime_type: str = "audio/wav",
+        ) -> list[list[float]]:
+            assert sample_rate == 16_000
+            assert mime_type == "audio/wav"
+            return [[1.0, 0.0] for _ in audio_payloads]
 
     monkeypatch.setattr(worker_main, "_load_analyze_track", lambda: fake_analyze_track)
     monkeypatch.setattr(worker_main, "_build_embedding_client", lambda payload, profile: FakeEmbeddingClient())
+    monkeypatch.setattr(
+        worker_main,
+        "_prepare_audio_segments",
+        lambda **kwargs: [{"segment_type": "intro", "audio_input": np.array([0.1, 0.2]), "sample_rate": 16_000}],
+    )
     monkeypatch.setattr(worker_main, "_vector_store", lambda payload, profile: pytest.fail("vector store should not be touched"))
 
     result = worker_main.handle_analyze(
@@ -534,6 +565,7 @@ def test_analyze_does_not_mutate_vector_store(monkeypatch: pytest.MonkeyPatch) -
 
     assert result["trackEmbedding"] == pytest.approx([1.0, 0.0])
     assert result["segments"][0]["embedding"] == pytest.approx([1.0, 0.0])
+    assert result["embeddingPipelineID"] == worker_main.EMBEDDING_PIPELINE_ID
 
 
 def test_vector_maintenance_commands_update_profile_index(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -594,9 +626,10 @@ def test_vector_maintenance_commands_update_profile_index(monkeypatch: pytest.Mo
         }
     )
     assert delete_result["deletedProfileIDs"] == [
-        "google/gemini-embedding-001",
         "google/gemini-embedding-2-preview",
         "local/clap-htsat-unfused",
+        "google/text-embedding-004",
+        "google/gemini-embedding-001",
     ]
 
     rebuilt = worker_main.handle_rebuild_vector_index(

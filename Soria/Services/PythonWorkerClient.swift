@@ -14,6 +14,7 @@ struct WorkerEmbeddingResult: Codable {
     let trackEmbedding: [Double]?
     let segments: [WorkerSegmentResult]
     let embeddingProfileID: String
+    let embeddingPipelineID: String
 }
 
 struct WorkerAnalysisResult: Codable {
@@ -33,6 +34,7 @@ struct WorkerAnalysisResult: Codable {
     let confidence: Double
     let segments: [WorkerSegmentResult]
     let embeddingProfileID: String
+    let embeddingPipelineID: String
 }
 
 struct WorkerTrackSearchResult: Codable {
@@ -134,14 +136,14 @@ final class PythonWorkerClient {
         return try await runGeneric(payload: payload, progress: progress, commandName: payload.command)
     }
 
-    func embedDescriptors(
+    func embedAudioSegments(
         track: Track,
         segments: [TrackSegment],
         externalMetadata: [ExternalDJMetadata] = [],
         progress: WorkerProgressHandler? = nil
     ) async throws -> WorkerEmbeddingResult {
         let payload = WorkerEmbedDescriptorsPayload(
-            command: "embed_descriptors",
+            command: "embed_audio_segments",
             filePath: track.filePath,
             trackMetadata: trackMetadata(for: track, externalMetadata: externalMetadata),
             segments: segments.map {
@@ -156,6 +158,20 @@ final class PythonWorkerClient {
             options: workerOptions()
         )
         return try await runGeneric(payload: payload, progress: progress, commandName: payload.command)
+    }
+
+    func embedDescriptors(
+        track: Track,
+        segments: [TrackSegment],
+        externalMetadata: [ExternalDJMetadata] = [],
+        progress: WorkerProgressHandler? = nil
+    ) async throws -> WorkerEmbeddingResult {
+        try await embedAudioSegments(
+            track: track,
+            segments: segments,
+            externalMetadata: externalMetadata,
+            progress: progress
+        )
     }
 
     func validateEmbeddingProfile() async throws -> WorkerValidationResponse {
@@ -312,6 +328,7 @@ final class PythonWorkerClient {
             googleAIAPIKey: config.googleAIAPIKey,
             cacheDirectory: AppPaths.pythonCacheDirectory.path,
             embeddingProfileID: overrideProfileID ?? config.embeddingProfile.id,
+            embeddingPipelineID: config.embeddingProfile.pipelineID,
             analysisFocus: analysisFocus
         )
     }
@@ -360,7 +377,7 @@ final class PythonWorkerClient {
         WorkerIndexedTrackPayload(
             trackID: track.id.uuidString,
             filePath: track.filePath,
-            scanVersion: "\(track.contentHash)|\(LibraryDatabase.iso8601.string(from: track.modifiedTime))",
+            scanVersion: "\(EmbeddingPipeline.audioSegmentsV1.id)|\(track.contentHash)|\(LibraryDatabase.iso8601.string(from: track.modifiedTime))",
             bpm: track.bpm,
             musicalKey: track.musicalKey,
             genre: track.genre,
@@ -675,7 +692,8 @@ final class PythonWorkerClient {
         options: WorkerOptionsPayload = WorkerOptionsPayload(
             googleAIAPIKey: nil,
             cacheDirectory: "",
-            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding001.id,
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+            embeddingPipelineID: EmbeddingPipeline.audioSegmentsV1.id,
             analysisFocus: nil
         )
     ) -> WorkerTrackSearchPayload {
@@ -838,6 +856,7 @@ struct WorkerOptionsPayload: Codable, Equatable {
     let googleAIAPIKey: String?
     let cacheDirectory: String
     let embeddingProfileID: String
+    let embeddingPipelineID: String
     let analysisFocus: AnalysisFocus?
 }
 

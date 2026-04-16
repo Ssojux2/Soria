@@ -6,6 +6,8 @@ import logging
 import os
 import sys
 import uuid
+import wave
+from io import BytesIO
 from datetime import datetime, timezone
 import inspect
 from pathlib import Path
@@ -14,14 +16,9 @@ from typing import Any, Callable
 import numpy as np
 
 LOGGER = logging.getLogger("soria.worker")
-VALIDATION_PROBE_TEXT = "Soria validation probe for semantic DJ track search."
+EMBEDDING_PIPELINE_ID = "audio_segments_v1"
 PROGRESS_PREFIX = "SORIA_PROGRESS "
 EMBEDDING_PROFILES: dict[str, dict[str, Any]] = {
-    "google/gemini-embedding-001": {
-        "backend": "google_ai",
-        "model": "gemini-embedding-001",
-        "requires_api_key": True,
-    },
     "google/gemini-embedding-2-preview": {
         "backend": "google_ai",
         "model": "gemini-embedding-2-preview",
@@ -33,6 +30,11 @@ EMBEDDING_PROFILES: dict[str, dict[str, Any]] = {
         "requires_api_key": False,
     },
 }
+LEGACY_VECTOR_PROFILE_IDS = (
+    "google/text-embedding-004",
+    "google/gemini-embedding-001",
+)
+ALL_VECTOR_PROFILE_IDS = tuple(EMBEDDING_PROFILES.keys()) + LEGACY_VECTOR_PROFILE_IDS
 
 
 def main() -> int:
@@ -49,8 +51,8 @@ def main() -> int:
         if command == "analyze":
             _print_json(handle_analyze(payload))
             return 0
-        if command == "embed_descriptors":
-            _print_json(handle_embed_descriptors(payload))
+        if command in {"embed_audio_segments", "embed_descriptors"}:
+            _print_json(handle_embed_audio_segments(payload))
             return 0
         if command == "build_query_embeddings":
             _print_json(handle_build_query_embeddings(payload))
@@ -85,7 +87,7 @@ def main() -> int:
 def handle_validate_embedding_profile(payload: dict[str, Any]) -> dict[str, Any]:
     profile = _resolve_embedding_profile(payload)
     client = _build_embedding_client(payload, profile)
-    vector = client.validate(VALIDATION_PROBE_TEXT)
+    vector = client.validate_audio(_validation_probe_audio_bytes(), mime_type="audio/wav")
     if not vector:
         detail = getattr(client, "_last_error", None)
         if detail:
@@ -150,17 +152,18 @@ def handle_analyze(payload: dict[str, Any]) -> dict[str, Any]:
         "trackEmbedding": embedding_result["trackEmbedding"],
         "segments": embedding_result["segments"],
         "embeddingProfileID": embedding_result["embeddingProfileID"],
+        "embeddingPipelineID": embedding_result["embeddingPipelineID"],
     }
 
 
-def handle_embed_descriptors(payload: dict[str, Any]) -> dict[str, Any]:
+def handle_embed_audio_segments(payload: dict[str, Any]) -> dict[str, Any]:
     file_path = payload["filePath"]
     progress = _progress_emitter(file_path)
-    progress("launching", "Preparing descriptor embedding", 0.02)
+    progress("launching", "Preparing audio segment embedding", 0.02)
     track_metadata = payload.get("trackMetadata") or {}
     normalized_segments = _normalize_payload_segments(payload.get("segments") or [])
     if not normalized_segments:
-        raise ValueError("No valid descriptor segments were provided for embedding.")
+        raise ValueError("No valid audio segments were provided for embedding.")
 
     return _embed_track(
         payload=payload,
@@ -210,7 +213,7 @@ def handle_build_query_embeddings(payload: dict[str, Any]) -> dict[str, Any]:
 def handle_healthcheck(payload: dict[str, Any]) -> dict[str, Any]:
     requested_profile_id = str(payload.get("options", {}).get("embeddingProfileID") or "").strip()
     if not requested_profile_id:
-        requested_profile_id = "google/gemini-embedding-001"
+        requested_profile_id = "google/gemini-embedding-2-preview"
     api_key = _resolve_google_ai_api_key(payload.get("options") or {})
     profile_status_by_id = _profile_statuses(payload)
     vector_index_state = None
@@ -253,10 +256,7 @@ def handle_delete_track_vectors(payload: dict[str, Any]) -> dict[str, Any]:
 
     deleted_profiles: list[str] = []
     for profile_id in profile_ids:
-        if profile_id not in EMBEDDING_PROFILES:
-            continue
-        profile = {"id": profile_id, **EMBEDDING_PROFILES[profile_id]}
-        store = _vector_store(payload, profile)
+        store = _vector_store_for_profile_id(payload, profile_id)
         store.delete_track(track_id)
         deleted_profiles.append(profile_id)
 
@@ -297,7 +297,7 @@ def _embed_track(
 
     profile = _resolve_embedding_profile(payload)
     if progress_callback:
-        progress_callback("embedding_descriptors", "Embedding descriptor text", 0.72)
+        progress_callback("embedding_audio_segments", "Embedding audio segments", 0.72)
     client = _call_with_optional_keyword(
         _build_embedding_client,
         "progress_callback",
@@ -305,7 +305,7 @@ def _embed_track(
             None
             if progress_callback is None
             else lambda message, fraction=None: progress_callback(
-                "embedding_descriptors",
+                "embedding_audio_segments",
                 message,
                 fraction,
             )
@@ -313,11 +313,20 @@ def _embed_track(
         payload,
         profile,
     )
-    segment_texts = [segment["descriptor_text"] for segment in normalized_segments]
-    segment_embeddings = client.embed_batch(segment_texts)
+    prepared_audio_segments = _prepare_audio_segments(
+        file_path=file_path,
+        normalized_segments=normalized_segments,
+        target_sample_rate=int(getattr(client, "audio_sampling_rate", 16_000)),
+        output_kind=str(getattr(client, "audio_input_kind", "waveform")),
+    )
+    segment_embeddings = client.embed_audio_batch(
+        [segment["audio_input"] for segment in prepared_audio_segments],
+        sample_rate=int(prepared_audio_segments[0]["sample_rate"]) if prepared_audio_segments else None,
+        mime_type="audio/wav",
+    )
     segment_embeddings = _require_non_empty_embeddings(segment_embeddings, client)
     if progress_callback:
-        progress_callback("embedding_descriptors", "Descriptor embeddings ready", 0.92)
+        progress_callback("embedding_audio_segments", "Audio segment embeddings ready", 0.92)
     weighted_track_embedding = _weighted_embedding(segment_embeddings, normalized_segments)
     if not weighted_track_embedding:
         raise ValueError("Failed to compute a track embedding from the analyzed segments.")
@@ -338,6 +347,7 @@ def _embed_track(
             for segment, embedding in zip(normalized_segments, segment_embeddings)
         ],
         "embeddingProfileID": profile["id"],
+        "embeddingPipelineID": EMBEDDING_PIPELINE_ID,
     }
 
 
@@ -369,7 +379,7 @@ def _text_query_embeddings(
     if not query_text:
         return {}
     client = _build_embedding_client(payload, profile)
-    query_vector = client.embed_batch([query_text])[0]
+    query_vector = client.embed_text_batch([query_text])[0]
     if not query_vector:
         return {}
     normalized = _normalize_query_vector(query_vector)
@@ -417,6 +427,65 @@ def _blend_query_embeddings(
             aggregate = aggregate / norm
         output[collection] = [float(value) for value in aggregate.tolist()]
     return output
+
+
+def _prepare_audio_segments(
+    file_path: str,
+    normalized_segments: list[dict[str, Any]],
+    target_sample_rate: int,
+    output_kind: str,
+) -> list[dict[str, Any]]:
+    from audio import features as audio_features
+
+    audio_features._ensure_librosa()
+    waveform, sample_rate = audio_features.librosa.load(file_path, sr=target_sample_rate, mono=True)
+    if waveform.size == 0:
+        raise ValueError("Empty audio file")
+
+    prepared: list[dict[str, Any]] = []
+    for segment in normalized_segments:
+        start_sample = max(0, int(float(segment["start_sec"]) * sample_rate))
+        end_sample = max(start_sample + 1, int(float(segment["end_sec"]) * sample_rate))
+        clipped_end = min(end_sample, waveform.shape[0])
+        segment_waveform = waveform[start_sample:clipped_end]
+        if segment_waveform.size == 0:
+            segment_waveform = np.zeros(max(1, target_sample_rate // 10), dtype=np.float32)
+        else:
+            segment_waveform = np.asarray(segment_waveform, dtype=np.float32)
+
+        if output_kind == "wav_bytes":
+            audio_input: Any = _encode_wav_bytes(segment_waveform, sample_rate)
+        else:
+            audio_input = segment_waveform
+
+        prepared.append(
+            {
+                "segment_type": segment["segment_type"],
+                "audio_input": audio_input,
+                "sample_rate": sample_rate,
+            }
+        )
+    return prepared
+
+
+def _encode_wav_bytes(waveform: np.ndarray, sample_rate: int) -> bytes:
+    clipped = np.clip(np.asarray(waveform, dtype=np.float32), -1.0, 1.0)
+    pcm16 = (clipped * 32767.0).astype(np.int16)
+    buffer = BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm16.tobytes())
+    return buffer.getvalue()
+
+
+def _validation_probe_audio_bytes() -> bytes:
+    sample_rate = 16_000
+    duration_sec = 0.35
+    timeline = np.linspace(0.0, duration_sec, int(sample_rate * duration_sec), endpoint=False, dtype=np.float32)
+    probe = 0.18 * np.sin(2 * np.pi * 440.0 * timeline)
+    return _encode_wav_bytes(probe, sample_rate)
 
 
 def _normalize_query_vector(vector: list[float]) -> list[float]:
@@ -477,9 +546,8 @@ def _weighted_embedding(
 def _normalize_payload_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for segment in segments:
-        descriptor_text = str(segment.get("descriptorText") or "").strip()
         segment_type = str(segment.get("segmentType") or "").strip()
-        if not descriptor_text or segment_type not in {"intro", "middle", "outro"}:
+        if segment_type not in {"intro", "middle", "outro"}:
             continue
         normalized.append(
             {
@@ -487,7 +555,7 @@ def _normalize_payload_segments(segments: list[dict[str, Any]]) -> list[dict[str
                 "start_sec": float(segment.get("startSec") or 0),
                 "end_sec": float(segment.get("endSec") or 0),
                 "energy_score": float(segment.get("energyScore") or 0),
-                "descriptor_text": descriptor_text,
+                "descriptor_text": str(segment.get("descriptorText") or "").strip(),
             }
         )
     return normalized
@@ -530,7 +598,7 @@ def _normalize_index_segments(segments: list[dict[str, Any]], track_id: str) -> 
         segment_type = str(segment.get("segmentType") or "").strip()
         descriptor_text = str(segment.get("descriptorText") or "").strip()
         embedding = segment.get("embedding")
-        if segment_type not in {"intro", "middle", "outro"} or not descriptor_text:
+        if segment_type not in {"intro", "middle", "outro"}:
             continue
         if not isinstance(embedding, list) or not embedding:
             continue
@@ -569,8 +637,8 @@ def _require_non_empty_embeddings(
             continue
         detail = getattr(client, "_last_error", None)
         if detail:
-            raise ValueError(f"Failed to embed descriptor segment {index + 1}. {detail}")
-        raise ValueError(f"Failed to embed descriptor segment {index + 1}.")
+            raise ValueError(f"Failed to embed audio segment {index + 1}. {detail}")
+        raise ValueError(f"Failed to embed audio segment {index + 1}.")
     return normalized
 
 
@@ -614,7 +682,7 @@ def _vector_index_state(payload: dict[str, Any], profile_id: str) -> dict[str, A
 def _resolve_embedding_profile(payload: dict[str, Any]) -> dict[str, Any]:
     requested_profile_id = str(payload.get("options", {}).get("embeddingProfileID") or "").strip()
     if not requested_profile_id:
-        requested_profile_id = "google/gemini-embedding-001"
+        requested_profile_id = "google/gemini-embedding-2-preview"
     profile = EMBEDDING_PROFILES.get(requested_profile_id)
     if profile is None:
         raise ValueError(f"Unsupported embedding profile: {requested_profile_id}")
@@ -629,7 +697,7 @@ def _profile_ids_from_payload(payload: dict[str, Any]) -> list[str]:
             return output
 
     if payload.get("deleteAllProfiles"):
-        return list(EMBEDDING_PROFILES.keys())
+        return list(ALL_VECTOR_PROFILE_IDS)
 
     return [_resolve_embedding_profile(payload)["id"]]
 
@@ -677,12 +745,16 @@ def _build_embedding_client(
 
 
 def _vector_store(payload: dict[str, Any], profile: dict[str, Any]):
+    return _vector_store_for_profile_id(payload, profile["id"])
+
+
+def _vector_store_for_profile_id(payload: dict[str, Any], profile_id: str):
     ChromaVectorStore = _load_vector_store()
     options = payload.get("options") or {}
     cache_dir = options.get("cacheDirectory") or str(Path.home() / ".soria-cache")
     vector_dir = str(Path(cache_dir) / "vectordb")
     Path(vector_dir).mkdir(parents=True, exist_ok=True)
-    return ChromaVectorStore(persist_dir=vector_dir, profile_id=profile["id"])
+    return ChromaVectorStore(persist_dir=vector_dir, profile_id=profile_id)
 
 
 def _configure_logging(cache_dir: str) -> None:

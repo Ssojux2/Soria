@@ -719,9 +719,29 @@ enum EmbeddingBackendKind: String, Codable, Hashable {
     case clap = "clap"
 }
 
+struct EmbeddingPipeline: Codable, Hashable, Identifiable {
+    let id: String
+    let displayName: String
+
+    static let audioSegmentsV1 = EmbeddingPipeline(
+        id: "audio_segments_v1",
+        displayName: "Audio Segments v1"
+    )
+
+    static func resolve(id: String?) -> EmbeddingPipeline {
+        switch id {
+        case audioSegmentsV1.id:
+            return .audioSegmentsV1
+        default:
+            return .audioSegmentsV1
+        }
+    }
+}
+
 struct EmbeddingProfile: Codable, Hashable, Identifiable {
     static let legacyGoogleTextEmbedding004ID = "google/text-embedding-004"
-    static let legacyGeminiEmbeddingPreviewID = "google/gemini-embedding-2-preview"
+    static let legacyGeminiEmbedding001ID = "google/gemini-embedding-001"
+    static let googleGeminiEmbedding2PreviewID = "google/gemini-embedding-2-preview"
 
     let id: String
     let displayName: String
@@ -729,17 +749,9 @@ struct EmbeddingProfile: Codable, Hashable, Identifiable {
     let backendKind: EmbeddingBackendKind
     let requiresAPIKey: Bool
 
-    static let googleGeminiEmbedding001 = EmbeddingProfile(
-        id: "google/gemini-embedding-001",
-        displayName: "Google AI gemini-embedding-001",
-        modelName: "gemini-embedding-001",
-        backendKind: .googleAI,
-        requiresAPIKey: true
-    )
-
     static let googleGeminiEmbedding2Preview = EmbeddingProfile(
-        id: legacyGeminiEmbeddingPreviewID,
-        displayName: "Google AI gemini-embedding-2-preview (Experimental)",
+        id: googleGeminiEmbedding2PreviewID,
+        displayName: "Google AI gemini-embedding-2-preview",
         modelName: "gemini-embedding-2-preview",
         backendKind: .googleAI,
         requiresAPIKey: true
@@ -754,17 +766,20 @@ struct EmbeddingProfile: Codable, Hashable, Identifiable {
     )
 
     static let all: [EmbeddingProfile] = [
-        .googleGeminiEmbedding001,
         .googleGeminiEmbedding2Preview,
         .clapHTSATUnfused
     ]
 
+    var pipelineID: String {
+        EmbeddingPipeline.audioSegmentsV1.id
+    }
+
     static func resolve(id: String?) -> EmbeddingProfile {
-        guard let id else { return .googleGeminiEmbedding001 }
-        if id == legacyGoogleTextEmbedding004ID {
-            return .googleGeminiEmbedding001
+        guard let id else { return .googleGeminiEmbedding2Preview }
+        if id == legacyGoogleTextEmbedding004ID || id == legacyGeminiEmbedding001ID {
+            return .googleGeminiEmbedding2Preview
         }
-        return all.first(where: { $0.id == id }) ?? .googleGeminiEmbedding001
+        return all.first(where: { $0.id == id }) ?? .googleGeminiEmbedding2Preview
     }
 }
 

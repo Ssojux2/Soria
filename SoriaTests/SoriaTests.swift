@@ -1137,7 +1137,11 @@ struct SoriaTests {
                 waveformPreview: [0.1, 0.2, 0.3]
             )
         )
-        try database.markTrackEmbeddingIndexed(trackID: existingTrack.id, embeddingProfileID: "profile")
+        try database.markTrackEmbeddingIndexed(
+            trackID: existingTrack.id,
+            embeddingProfileID: "profile",
+            embeddingPipelineID: EmbeddingPipeline.audioSegmentsV1.id
+        )
 
         let seratoRecord = VendorLibraryTrackRecord(
             source: .serato,
@@ -1258,7 +1262,8 @@ struct SoriaTests {
         )
         try database.markTrackEmbeddingIndexed(
             trackID: readyTrack.id,
-            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+            embeddingPipelineID: EmbeddingPipeline.audioSegmentsV1.id
         )
 
         let incompleteTrack = makeTrack(
@@ -1299,7 +1304,8 @@ struct SoriaTests {
         do {
             try database.markTrackEmbeddingIndexed(
                 trackID: incompleteTrack.id,
-                embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id
+                embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+                embeddingPipelineID: EmbeddingPipeline.audioSegmentsV1.id
             )
         } catch {
             capturedError = error
@@ -1312,7 +1318,10 @@ struct SoriaTests {
             return false
         }())
 
-        let readyIDs = try database.fetchReadyTrackIDs(profileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id)
+        let readyIDs = try database.fetchReadyTrackIDs(
+            profileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+            pipelineID: EmbeddingPipeline.audioSegmentsV1.id
+        )
         #expect(readyIDs == Set([readyTrack.id]))
     }
 
@@ -1359,19 +1368,22 @@ struct SoriaTests {
         )
         try database.markTrackEmbeddingIndexed(
             trackID: track.id,
-            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding001.id
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+            embeddingPipelineID: EmbeddingPipeline.audioSegmentsV1.id
         )
 
         let snapshot = try database.verifyPersistedEmbeddingState(
             trackID: track.id,
-            expectedEmbeddingProfileID: EmbeddingProfile.googleGeminiEmbedding001.id,
+            expectedEmbeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+            expectedEmbeddingPipelineID: EmbeddingPipeline.audioSegmentsV1.id,
             context: "test"
         )
 
         #expect(snapshot.analyzedAt != nil)
         #expect(snapshot.hasTrackEmbedding)
         #expect(snapshot.hasAnalysisSummary)
-        #expect(snapshot.embeddingProfileID == EmbeddingProfile.googleGeminiEmbedding001.id)
+        #expect(snapshot.embeddingProfileID == EmbeddingProfile.googleGeminiEmbedding2Preview.id)
+        #expect(snapshot.embeddingPipelineID == EmbeddingPipeline.audioSegmentsV1.id)
         #expect(snapshot.embeddingUpdatedAt != nil)
         #expect(snapshot.segmentCount == 3)
         #expect(snapshot.embeddedSegmentCount == 3)
@@ -1435,7 +1447,7 @@ struct SoriaTests {
         let directory = try makeTemporaryDirectory()
         let databaseURL = directory.appendingPathComponent("library.sqlite")
         let database = try LibraryDatabase(databaseURL: databaseURL)
-        let profileID = EmbeddingProfile.googleGeminiEmbedding001.id
+        let profileID = EmbeddingProfile.googleGeminiEmbedding2Preview.id
 
         let warmupTrack = try makeReadyTrack(
             in: database,
@@ -1552,7 +1564,8 @@ struct SoriaTests {
         let scopedTrackIDs = try database.fetchTrackIDs(matching: scopeFilter)
         let scopedReadyTrackIDs = try database.fetchScopedReadyTrackIDs(
             matching: scopeFilter,
-            profileID: profileID
+            profileID: profileID,
+            pipelineID: EmbeddingPipeline.audioSegmentsV1.id
         )
 
         #expect(scopedTrackIDs == Set([warmupTrack.id, peakTrack.id, rekordboxOnlyTrack.id]))
@@ -1569,7 +1582,7 @@ struct SoriaTests {
                 session: ScoreSession(
                     id: UUID(),
                     kind: .search,
-                    embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding001.id,
+                    embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
                     searchMode: "text",
                     queryText: "query-\(index)",
                     seedTrackID: nil,
@@ -1723,6 +1736,7 @@ private func makeTrack(
     musicalKey: String? = nil,
     analyzedAt: Date? = nil,
     embeddingProfileID: String? = nil,
+    embeddingPipelineID: String? = nil,
     embeddingUpdatedAt: Date? = nil,
     hasSeratoMetadata: Bool = false,
     hasRekordboxMetadata: Bool = false,
@@ -1745,6 +1759,7 @@ private func makeTrack(
         contentHash: title,
         analyzedAt: analyzedAt,
         embeddingProfileID: embeddingProfileID,
+        embeddingPipelineID: embeddingPipelineID,
         embeddingUpdatedAt: embeddingUpdatedAt,
         hasSeratoMetadata: hasSeratoMetadata,
         hasRekordboxMetadata: hasRekordboxMetadata,
@@ -1881,7 +1896,11 @@ private func makeReadyTrack(
             waveformPreview: [0.1, 0.2, 0.3]
         )
     )
-    try database.markTrackEmbeddingIndexed(trackID: track.id, embeddingProfileID: profileID)
+    try database.markTrackEmbeddingIndexed(
+        trackID: track.id,
+        embeddingProfileID: profileID,
+        embeddingPipelineID: EmbeddingPipeline.audioSegmentsV1.id
+    )
     return track
 }
 

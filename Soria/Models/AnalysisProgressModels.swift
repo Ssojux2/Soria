@@ -4,7 +4,12 @@ struct AnalysisStage: RawRepresentable, Codable, Hashable, Sendable {
     let rawValue: String
 
     init(rawValue: String) {
-        self.rawValue = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized == "embedding_descriptors" {
+            self.rawValue = "embedding_audio_segments"
+        } else {
+            self.rawValue = normalized
+        }
     }
 
     static let queued = AnalysisStage(rawValue: "queued")
@@ -12,7 +17,8 @@ struct AnalysisStage: RawRepresentable, Codable, Hashable, Sendable {
     static let loadingAudio = AnalysisStage(rawValue: "loading_audio")
     static let extractingFeatures = AnalysisStage(rawValue: "extracting_features")
     static let buildingSegments = AnalysisStage(rawValue: "building_segments")
-    static let embeddingDescriptors = AnalysisStage(rawValue: "embedding_descriptors")
+    static let embeddingAudioSegments = AnalysisStage(rawValue: "embedding_audio_segments")
+    static let embeddingDescriptors = embeddingAudioSegments
     static let returningResult = AnalysisStage(rawValue: "returning_result")
 
     nonisolated var displayName: String {
@@ -27,8 +33,8 @@ struct AnalysisStage: RawRepresentable, Codable, Hashable, Sendable {
             return "Extracting Features"
         case .buildingSegments:
             return "Building Segments"
-        case .embeddingDescriptors:
-            return "Embedding Descriptors"
+        case .embeddingAudioSegments:
+            return "Embedding Audio Segments"
         case .returningResult:
             return "Returning Result"
         default:

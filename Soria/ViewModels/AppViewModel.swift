@@ -935,7 +935,8 @@ final class AppViewModel: ObservableObject {
                 modifiedTime: now,
                 contentHash: "ready-track-hash",
                 analyzedAt: now,
-                embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding001.id,
+                embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+                embeddingPipelineID: EmbeddingPipeline.audioSegmentsV1.id,
                 embeddingUpdatedAt: now,
                 hasSeratoMetadata: true,
                 hasRekordboxMetadata: true,
@@ -959,6 +960,7 @@ final class AppViewModel: ObservableObject {
                 contentHash: "pending-track-hash",
                 analyzedAt: nil,
                 embeddingProfileID: nil,
+                embeddingPipelineID: nil,
                 embeddingUpdatedAt: nil,
                 hasSeratoMetadata: true,
                 hasRekordboxMetadata: false,
@@ -2169,7 +2171,10 @@ final class AppViewModel: ObservableObject {
     func refreshTracks() async {
         do {
             tracks = try database.fetchAllTracks()
-            readyTrackIDs = try database.fetchReadyTrackIDs(profileID: embeddingProfile.id)
+            readyTrackIDs = try database.fetchReadyTrackIDs(
+                profileID: embeddingProfile.id,
+                pipelineID: embeddingProfile.pipelineID
+            )
             membershipSnapshotsByTrackID = try database.fetchTrackMembershipSnapshots(trackIDs: tracks.map(\.id))
             scopeTrackCache.removeAll()
             try refreshMembershipFacets()
@@ -2267,20 +2272,21 @@ final class AppViewModel: ObservableObject {
 
                 if canReembed {
                     let workerStartedAt = Date()
-                    let result = try await worker.embedDescriptors(
+                    let result = try await worker.embedAudioSegments(
                         track: track,
                         segments: existingSegments,
                         externalMetadata: externalMetadata,
                         progress: progressHandler
                     )
                     logAnalysisEvent(
-                        "worker_embed_descriptors_completed",
+                        "worker_embed_audio_segments_completed",
                         track: track,
                         queueIndex: queueIndex,
                         totalCount: tracksToAnalyze.count,
                         elapsedMs: max(Int(Date().timeIntervalSince(workerStartedAt) * 1000), 0),
                         extra: [
                             "embeddingProfileID": result.embeddingProfileID,
+                            "embeddingPipelineID": result.embeddingPipelineID,
                             "segmentCount": "\(result.segments.count)"
                         ]
                     )
@@ -2319,14 +2325,21 @@ final class AppViewModel: ObservableObject {
                         elapsedMs: max(Int(Date().timeIntervalSince(vectorUpsertStartedAt) * 1000), 0)
                     )
                     let markIndexedStartedAt = Date()
-                    try database.markTrackEmbeddingIndexed(trackID: track.id, embeddingProfileID: result.embeddingProfileID)
+                    try database.markTrackEmbeddingIndexed(
+                        trackID: track.id,
+                        embeddingProfileID: result.embeddingProfileID,
+                        embeddingPipelineID: result.embeddingPipelineID
+                    )
                     logAnalysisEvent(
                         "database_mark_track_embedding_indexed_completed",
                         track: track,
                         queueIndex: queueIndex,
                         totalCount: tracksToAnalyze.count,
                         elapsedMs: max(Int(Date().timeIntervalSince(markIndexedStartedAt) * 1000), 0),
-                        extra: ["embeddingProfileID": result.embeddingProfileID]
+                        extra: [
+                            "embeddingProfileID": result.embeddingProfileID,
+                            "embeddingPipelineID": result.embeddingPipelineID
+                        ]
                     )
                     updateAnalysisState(trackID: track.id, state: .succeeded, message: "Done")
                     cancelAnalysisProgressWatchdog()
@@ -2353,6 +2366,7 @@ final class AppViewModel: ObservableObject {
                         elapsedMs: max(Int(Date().timeIntervalSince(workerStartedAt) * 1000), 0),
                         extra: [
                             "embeddingProfileID": result.embeddingProfileID,
+                            "embeddingPipelineID": result.embeddingPipelineID,
                             "segmentCount": "\(result.segments.count)"
                         ]
                     )
@@ -2427,6 +2441,7 @@ final class AppViewModel: ObservableObject {
                         }
                         updatedTrack.analyzedAt = Date()
                         updatedTrack.embeddingProfileID = nil
+                        updatedTrack.embeddingPipelineID = nil
                         updatedTrack.embeddingUpdatedAt = nil
                         let upsertTrackStartedAt = Date()
                         try database.upsertTrack(updatedTrack)
@@ -2447,14 +2462,21 @@ final class AppViewModel: ObservableObject {
                             elapsedMs: max(Int(Date().timeIntervalSince(vectorUpsertStartedAt) * 1000), 0)
                         )
                         let markIndexedStartedAt = Date()
-                        try database.markTrackEmbeddingIndexed(trackID: track.id, embeddingProfileID: result.embeddingProfileID)
+                        try database.markTrackEmbeddingIndexed(
+                            trackID: track.id,
+                            embeddingProfileID: result.embeddingProfileID,
+                            embeddingPipelineID: result.embeddingPipelineID
+                        )
                         logAnalysisEvent(
                             "database_mark_track_embedding_indexed_completed",
                             track: track,
                             queueIndex: queueIndex,
                             totalCount: tracksToAnalyze.count,
                             elapsedMs: max(Int(Date().timeIntervalSince(markIndexedStartedAt) * 1000), 0),
-                            extra: ["embeddingProfileID": result.embeddingProfileID]
+                            extra: [
+                                "embeddingProfileID": result.embeddingProfileID,
+                                "embeddingPipelineID": result.embeddingPipelineID
+                            ]
                         )
                     }
                     updateAnalysisState(trackID: track.id, state: .succeeded, message: "Done")
@@ -3353,7 +3375,10 @@ final class AppViewModel: ObservableObject {
             }
 
             workerProfileStatuses = healthcheck.profileStatusByID
-            readyTrackIDs = try database.fetchReadyTrackIDs(profileID: embeddingProfile.id)
+            readyTrackIDs = try database.fetchReadyTrackIDs(
+                profileID: embeddingProfile.id,
+                pipelineID: embeddingProfile.pipelineID
+            )
 
             guard workerProfileStatuses[embeddingProfile.id]?.supported ?? true else {
                 validationStatus = .failed(selectedEmbeddingProfileDependencyMessage ?? "The active embedding profile is unavailable.")
@@ -3384,7 +3409,11 @@ final class AppViewModel: ObservableObject {
             return
         }
 
-        let repairSignature = vectorRepairSignature(profileID: embeddingProfile.id, manifestHash: readyManifestHash)
+        let repairSignature = vectorRepairSignature(
+            profileID: embeddingProfile.id,
+            pipelineID: embeddingProfile.pipelineID,
+            manifestHash: readyManifestHash
+        )
         if AppSettingsStore.automaticVectorRepairSignature(profileID: embeddingProfile.id) == repairSignature {
             return
         }
@@ -3413,8 +3442,8 @@ final class AppViewModel: ObservableObject {
         AppLogger.shared.info("Automatically rebuilt the \(embeddingProfile.id) vector index.")
     }
 
-    private func vectorRepairSignature(profileID: String, manifestHash: String) -> String {
-        let joined = [profileID, manifestHash].joined(separator: "\n")
+    private func vectorRepairSignature(profileID: String, pipelineID: String, manifestHash: String) -> String {
+        let joined = [profileID, pipelineID, manifestHash].joined(separator: "\n")
         let digest = SHA256.hash(data: Data(joined.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }

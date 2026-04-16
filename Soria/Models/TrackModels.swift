@@ -52,14 +52,21 @@ struct Track: Identifiable, Codable, Hashable {
     var contentHash: String
     var analyzedAt: Date?
     var embeddingProfileID: String?
+    var embeddingPipelineID: String? = nil
     var embeddingUpdatedAt: Date?
     var hasSeratoMetadata: Bool
     var hasRekordboxMetadata: Bool
     var bpmSource: TrackMetadataSource?
     var keySource: TrackMetadataSource?
 
+    func hasCurrentEmbedding(profileID: String, pipelineID: String) -> Bool {
+        embeddingProfileID == profileID
+            && embeddingPipelineID == pipelineID
+            && embeddingUpdatedAt != nil
+    }
+
     func hasCurrentEmbedding(profileID: String) -> Bool {
-        embeddingProfileID == profileID && embeddingUpdatedAt != nil
+        hasCurrentEmbedding(profileID: profileID, pipelineID: EmbeddingPipeline.audioSegmentsV1.id)
     }
 
     static func empty(path: String, modifiedTime: Date, hash: String) -> Track {
@@ -79,6 +86,7 @@ struct Track: Identifiable, Codable, Hashable {
             contentHash: hash,
             analyzedAt: nil,
             embeddingProfileID: nil,
+            embeddingPipelineID: nil,
             embeddingUpdatedAt: nil,
             hasSeratoMetadata: false,
             hasRekordboxMetadata: false,

@@ -5,7 +5,7 @@ import Testing
 extension SoriaTests {
     @Test
     func validationStatusResetsWhenKeyChanges() {
-        let profile = EmbeddingProfile.googleGeminiEmbedding001
+        let profile = EmbeddingProfile.googleGeminiEmbedding2Preview
         let validatedAt = Date(timeIntervalSince1970: 1_716_000_000)
         let storedHash = AppSettingsStore.hashAPIKey("valid-key")
 
@@ -40,24 +40,28 @@ extension SoriaTests {
                 apiKey: "same-key",
                 profile: .clapHTSATUnfused,
                 storedKeyHash: storedHash,
-                storedProfileID: EmbeddingProfile.googleGeminiEmbedding001.id,
+                storedProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
                 storedAt: validatedAt
             ) == .unvalidated
         )
     }
 
     @Test
-    func legacyProfileIDResolvesToGeminiStable() {
+    func legacyProfileIDsResolveToGeminiPreview() {
         #expect(
             EmbeddingProfile.resolve(id: EmbeddingProfile.legacyGoogleTextEmbedding004ID)
-                == .googleGeminiEmbedding001
+                == .googleGeminiEmbedding2Preview
+        )
+        #expect(
+            EmbeddingProfile.resolve(id: EmbeddingProfile.legacyGeminiEmbedding001ID)
+                == .googleGeminiEmbedding2Preview
         )
     }
 
     @Test
     func analysisScopeMappingFollowsSelectedUnanalyzedAndAllRules() {
         let selectedID = UUID()
-        let currentProfile = EmbeddingProfile.googleGeminiEmbedding001.id
+        let currentProfile = EmbeddingProfile.googleGeminiEmbedding2Preview.id
         let selectedTrack = makeTrack(
             id: selectedID,
             analyzedAt: Date(timeIntervalSince1970: 10),
@@ -143,7 +147,7 @@ extension SoriaTests {
     func unvalidatedStateDisablesAnalysisAndSearch() {
         let selectedTrack = makeTrack(
             analyzedAt: Date(timeIntervalSince1970: 10),
-            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding001.id,
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
             embeddingUpdatedAt: Date(timeIntervalSince1970: 20)
         )
         let tracks = [selectedTrack]
@@ -158,7 +162,7 @@ extension SoriaTests {
                 tracks: tracks,
                 selectedTrackID: selectedTrack.id,
                 readyTrackIDs: Set([selectedTrack.id]),
-                activeProfileID: EmbeddingProfile.googleGeminiEmbedding001.id
+                activeProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id
             ) == false
         )
 

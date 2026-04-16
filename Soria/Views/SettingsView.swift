@@ -27,7 +27,7 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
 
                         if viewModel.embeddingProfile == .googleGeminiEmbedding2Preview {
-                            Text("Experimental preview profile. Prefer gemini-embedding-001 for stable day-to-day analysis.")
+                            Text("This is the default Google audio embedding path for direct segment-to-vector preparation.")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }

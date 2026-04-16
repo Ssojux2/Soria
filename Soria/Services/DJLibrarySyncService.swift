@@ -795,6 +795,9 @@ final class DJLibrarySyncService {
             try database.clearAnalysis(trackID: existing.id)
             await invalidateVectorIndex(existing)
             track.analyzedAt = nil
+            track.embeddingProfileID = nil
+            track.embeddingPipelineID = nil
+            track.embeddingUpdatedAt = nil
             if track.bpmSource == .soriaAnalysis {
                 track.bpm = nil
                 track.bpmSource = nil

@@ -102,7 +102,7 @@ class ChromaVectorStore:
                         "energy_score": float(segment["energy_score"]),
                     }
                 )
-                documents.append(str(segment["descriptor_text"]))
+                documents.append(str(segment["descriptor_text"] or f"{base_metadata['file_path']} {collection_key}"))
 
             self.collections[collection_key].upsert(
                 ids=ids,

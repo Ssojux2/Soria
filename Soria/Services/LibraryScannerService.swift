@@ -86,6 +86,7 @@ final class LibraryScannerService {
                         contentHash: hash,
                         analyzedAt: fileChanged ? nil : track.analyzedAt,
                         embeddingProfileID: fileChanged ? nil : track.embeddingProfileID,
+                        embeddingPipelineID: fileChanged ? nil : track.embeddingPipelineID,
                         embeddingUpdatedAt: fileChanged ? nil : track.embeddingUpdatedAt,
                         hasSeratoMetadata: track.hasSeratoMetadata,
                         hasRekordboxMetadata: track.hasRekordboxMetadata,
