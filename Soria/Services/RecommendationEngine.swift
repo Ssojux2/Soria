@@ -33,15 +33,17 @@ struct RecommendationEngine {
         vectorBreakdownByPath: [String: VectorScoreBreakdown] = [:],
         constraints: RecommendationConstraints,
         weights: RecommendationWeights,
+        vectorWeights: MixsetVectorWeights,
         limit: Int,
         excludeTrackIDs: Set<UUID>
     ) -> [RecommendationCandidate] {
+        let effectiveConstraints = constraints.normalizedForScoring()
         let filtered = candidates.filter { track in
             guard !excludeTrackIDs.contains(track.id), track.id != seed.id else { return false }
             return matchesConstraints(
                 track: track,
                 summary: summariesByTrackID[track.id],
-                constraints: constraints
+                constraints: effectiveConstraints
             )
         }
 
@@ -61,22 +63,29 @@ struct RecommendationEngine {
             )
             let embedScore = vectorBreakdown.fusedScore
             let bpmScore = bpmCompatibility(seed: seed.bpm, next: track.bpm)
-            let harmonicScore = keyCompatibility(seed: seed.musicalKey, next: track.musicalKey, strictness: constraints.keyStrictness)
+            let harmonicScore = keyCompatibility(
+                seed: seed.musicalKey,
+                next: track.musicalKey,
+                strictness: effectiveConstraints.keyStrictness
+            )
             let energyScore = energyFlow(
                 seed: seed,
                 seedSummary: seedSummary,
                 next: track,
                 nextSummary: summariesByTrackID[track.id],
-                continuity: constraints.genreContinuity
+                continuity: effectiveConstraints.genreContinuity
             )
             let transitionScore = transitionSuitability(
                 seed: seed,
                 seedSummary: seedSummary,
                 next: track,
                 nextSummary: summariesByTrackID[track.id],
-                continuity: constraints.genreContinuity
+                continuity: effectiveConstraints.genreContinuity
             )
-            let externalScore = externalMetadataConfidence(for: track, prioritize: constraints.prioritizeExternalMetadata)
+            let externalScore = externalMetadataConfidence(
+                for: track,
+                priority: effectiveConstraints.externalMetadataPriority
+            )
             let summary = summariesByTrackID[track.id]
 
             let breakdown = ScoreBreakdown(
@@ -93,7 +102,19 @@ struct RecommendationEngine {
                 track: track,
                 score: breakdown.finalScore(weights: weights),
                 breakdown: breakdown,
-                vectorBreakdown: vectorBreakdown,
+                vectorBreakdown: VectorScoreBreakdown(
+                    fusedScore: vectorWeights.fusedScore(
+                        trackScore: vectorBreakdown.trackScore,
+                        introScore: vectorBreakdown.introScore,
+                        middleScore: vectorBreakdown.middleScore,
+                        outroScore: vectorBreakdown.outroScore
+                    ),
+                    trackScore: vectorBreakdown.trackScore,
+                    introScore: vectorBreakdown.introScore,
+                    middleScore: vectorBreakdown.middleScore,
+                    outroScore: vectorBreakdown.outroScore,
+                    bestMatchedCollection: vectorBreakdown.bestMatchedCollection
+                ),
                 analysisFocus: summary?.analysisFocus,
                 mixabilityTags: summary?.mixabilityTags ?? [],
                 matchReasons: matchReasons(
@@ -222,11 +243,17 @@ struct RecommendationEngine {
         return min(1.0, score)
     }
 
-    private func externalMetadataConfidence(for track: Track, prioritize: Bool) -> Double {
-        guard prioritize else { return 0.5 }
-        if track.hasSeratoMetadata && track.hasRekordboxMetadata { return 1.0 }
-        if track.hasSeratoMetadata || track.hasRekordboxMetadata { return 0.75 }
-        return 0.35
+    private func externalMetadataConfidence(for track: Track, priority: Double) -> Double {
+        let vendorCoverageScore: Double
+        if track.hasSeratoMetadata && track.hasRekordboxMetadata {
+            vendorCoverageScore = 1.0
+        } else if track.hasSeratoMetadata || track.hasRekordboxMetadata {
+            vendorCoverageScore = 0.75
+        } else {
+            vendorCoverageScore = 0.35
+        }
+        let clampedPriority = min(max(priority, 0), 1)
+        return 0.5 + ((vendorCoverageScore - 0.5) * clampedPriority)
     }
 
     private func matchesTagFilters(

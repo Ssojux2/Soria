@@ -3,110 +3,100 @@ import SwiftUI
 struct MixAssistantView: View {
     @ObservedObject var viewModel: AppViewModel
     @State private var dismissedSelectionSignature: String?
-    @State private var similarBPMMinText: String = ""
-    @State private var similarBPMMaxText: String = ""
-    @State private var similarMusicalKeyText: String = ""
-    @State private var similarGenreText: String = ""
-    @State private var similarMaxDurationText: String = ""
-    @State private var similarMixabilityTagsText: String = ""
-    @State private var similarAnalysisFocus: AnalysisFocus?
-    @State private var similarResultLimit: Int = 25
-    @State private var mixBPMMinText: String = ""
-    @State private var mixBPMMaxText: String = ""
     @State private var includeTagsText: String = ""
     @State private var excludeTagsText: String = ""
-    @State private var mixMaxDurationText: String = ""
+    @State private var isAdvancedScoreExpanded = true
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .center, spacing: 12) {
-                        headerTitle
-                        Spacer(minLength: 12)
-                        modePicker
-                            .frame(width: 280)
-                    }
+        ZStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    headerTitle
 
-                    VStack(alignment: .leading, spacing: 10) {
-                        headerTitle
-                        modePicker
-                            .frame(maxWidth: 320)
-                    }
-                }
+                    Text(viewModel.mixAssistantMode.helperText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
 
-                Text(viewModel.mixAssistantMode.helperText)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    GroupBox("Current Library Selection") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(viewModel.mixAssistantReferenceLabel)
+                                .font(.headline)
 
-                GroupBox("Current Library Selection") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(viewModel.mixAssistantReferenceLabel)
-                            .font(.headline)
-
-                        Text(viewModel.selectionReadiness.referenceSummaryText)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-
-                        if viewModel.mixAssistantSelectionChips.isEmpty {
-                            Text("Select one or more tracks in the library to use them as the current reference.")
+                            Text(viewModel.selectionReadiness.referenceSummaryText)
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
-                        } else {
-                            chipWrap(viewModel.mixAssistantSelectionChips)
+
+                            if viewModel.mixAssistantSelectionChips.isEmpty {
+                                Text("Select one or more tracks in the library to use them as the current reference.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                chipWrap(viewModel.mixAssistantSelectionChips)
+                            }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
 
-                if shouldShowSelectionReadinessBanner {
-                    SelectionReadinessBanner(
-                        readiness: viewModel.selectionReadiness,
-                        canAnalyzePending: viewModel.canAnalyzePendingSelection,
-                        onAnalyzePending: {
-                            dismissedSelectionSignature = nil
-                            viewModel.analyzePendingSelection()
-                        },
-                        onContinueWithReady: {
-                            dismissedSelectionSignature = viewModel.selectionReadiness.signature
-                        },
-                        onReviewSelection: {
-                            dismissedSelectionSignature = nil
-                            viewModel.reviewSelectedTracks()
-                        }
-                    )
-                }
+                    if shouldShowSelectionReadinessBanner {
+                        SelectionReadinessBanner(
+                            readiness: viewModel.selectionReadiness,
+                            canAnalyzePending: viewModel.canAnalyzePendingSelection,
+                            onAnalyzePending: {
+                                dismissedSelectionSignature = nil
+                                viewModel.analyzePendingSelection()
+                            },
+                            onContinueWithReady: {
+                                dismissedSelectionSignature = viewModel.selectionReadiness.signature
+                            },
+                            onReviewSelection: {
+                                dismissedSelectionSignature = nil
+                                viewModel.reviewSelectedTracks()
+                            }
+                        )
+                    }
 
-                if let dependencyMessage = viewModel.selectedEmbeddingProfileDependencyMessage {
-                    Text(dependencyMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else if !viewModel.hasValidatedEmbeddingProfile {
-                    Text("Validate the active analysis setup in Settings before running similarity or mixset actions.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+                    if let dependencyMessage = viewModel.selectedEmbeddingProfileDependencyMessage {
+                        Text(dependencyMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else if !viewModel.hasValidatedEmbeddingProfile {
+                        Text("Validate the active analysis setup in Settings before running mixset actions.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
 
-                switch viewModel.mixAssistantMode {
-                case .similarTracks:
-                    similarTracksPanel
-                case .buildMixset:
                     buildMixsetPanel
                 }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            .padding()
-            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
-            hydrateMixFiltersFromConstraints()
+            hydrateTagEditorsFromConstraints()
         }
         .onChange(of: viewModel.selectionReadiness.signature) { _, newValue in
             if dismissedSelectionSignature != newValue {
                 dismissedSelectionSignature = nil
             }
         }
+        .onChange(of: viewModel.constraints.includeTags) { _, newValue in
+            let joined = newValue.joined(separator: ", ")
+            if includeTagsText != joined {
+                includeTagsText = joined
+            }
+        }
+        .onChange(of: viewModel.constraints.excludeTags) { _, newValue in
+            let joined = newValue.joined(separator: ", ")
+            if excludeTagsText != joined {
+                excludeTagsText = joined
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            AccessibilityMarker(identifier: "mix-assistant-info-view", label: "Mix Assistant Info")
+        }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("mix-assistant-info-view")
     }
 
@@ -118,188 +108,6 @@ struct MixAssistantView: View {
     private var headerTitle: some View {
         Text("Mix Assistant")
             .font(.title2.bold())
-    }
-
-    private var modePicker: some View {
-        Picker("Mode", selection: $viewModel.mixAssistantMode) {
-            ForEach(MixAssistantMode.allCases) { mode in
-                Text(mode.displayName).tag(mode)
-            }
-        }
-        .pickerStyle(.segmented)
-    }
-
-    private var similarTracksPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center, spacing: 12) {
-                    TextField(
-                        "Describe the sound you want, or leave empty to use the selected tracks only",
-                        text: $viewModel.mixAssistantSimilarQueryText
-                    )
-                    .textFieldStyle(.roundedBorder)
-
-                    Stepper("Results \(similarResultLimit)", value: $similarResultLimit, in: 10...100)
-                        .frame(width: 180, alignment: .leading)
-
-                    similarTracksButtonRow
-                }
-
-                VStack(alignment: .leading, spacing: 10) {
-                    TextField(
-                        "Describe the sound you want, or leave empty to use the selected tracks only",
-                        text: $viewModel.mixAssistantSimilarQueryText
-                    )
-                    .textFieldStyle(.roundedBorder)
-
-                    HStack {
-                        Stepper("Results \(similarResultLimit)", value: $similarResultLimit, in: 10...100)
-                            .frame(width: 180, alignment: .leading)
-                        Spacer()
-                    }
-
-                    similarTracksButtonRow
-                }
-            }
-
-            LibraryScopeFilterSection(
-                viewModel: viewModel,
-                target: .search,
-                title: "DJ Scope",
-                initiallyExpanded: false
-            )
-
-            HStack {
-                TextField("BPM Min", text: $similarBPMMinText)
-                    .frame(width: 80)
-                TextField("BPM Max", text: $similarBPMMaxText)
-                    .frame(width: 80)
-                TextField("Key", text: $similarMusicalKeyText)
-                    .frame(width: 80)
-                TextField("Genre", text: $similarGenreText)
-                    .frame(width: 120)
-                TextField("Max Minutes", text: $similarMaxDurationText)
-                    .frame(width: 100)
-                Picker("Focus", selection: $similarAnalysisFocus) {
-                    Text("Any Focus").tag(Optional<AnalysisFocus>.none)
-                    ForEach(AnalysisFocus.allCases) { focus in
-                        Text(focus.displayName).tag(Optional(focus))
-                    }
-                }
-                .frame(width: 180)
-                Spacer()
-            }
-
-            HStack {
-                TextField("Mixability tags (comma separated)", text: $similarMixabilityTagsText)
-                    .textFieldStyle(.roundedBorder)
-                Spacer()
-            }
-
-            if !viewModel.searchStatusMessage.isEmpty {
-                Text(viewModel.searchStatusMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-
-            Table(viewModel.searchResults, selection: $viewModel.selectedSearchResultID) {
-                TableColumn("Track") { row in
-                    HStack(spacing: 8) {
-                        VStack(alignment: .leading) {
-                            Text(row.track.title)
-                            Text(row.track.artist)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer(minLength: 8)
-                        Button("+") { viewModel.appendToPlaylist(row.track) }
-                    }
-                }
-                TableColumn("Score") { row in
-                    Text(String(format: "%.3f", row.score))
-                }
-                TableColumn("Best Match") { row in
-                    Text(row.bestMatchedCollection)
-                }
-                TableColumn("Focus") { row in
-                    Text(row.analysisFocus?.displayName ?? "-")
-                }
-                TableColumn("Tags") { row in
-                    Text(row.mixabilityTags.prefix(3).joined(separator: ", ").isEmpty ? "-" : row.mixabilityTags.prefix(3).joined(separator: ", "))
-                }
-                TableColumn("Why") { row in
-                    Text(row.matchReasons.joined(separator: " • "))
-                        .lineLimit(2)
-                }
-            }
-            .frame(minHeight: 240, maxHeight: 360)
-
-            if let selectedSearchResult = viewModel.selectedSearchResult {
-                GroupBox("Selected Match Breakdown") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("\(selectedSearchResult.track.title) - \(selectedSearchResult.track.artist)")
-                            .font(.headline)
-                        vectorBreakdownSection(
-                            breakdown: selectedSearchResult.vectorBreakdown,
-                            bestMatch: selectedSearchResult.bestMatchedCollection
-                        )
-                        if !selectedSearchResult.matchedMemberships.isEmpty {
-                            detailLine(
-                                "Matched Scope",
-                                selectedSearchResult.matchedMemberships.joined(separator: " • ")
-                            )
-                        }
-                        if let focus = selectedSearchResult.analysisFocus {
-                            detailLine("Focus", focus.displayName)
-                        }
-                        if !selectedSearchResult.mixabilityTags.isEmpty {
-                            detailLine("Tags", selectedSearchResult.mixabilityTags.joined(separator: ", "))
-                        }
-                        if !selectedSearchResult.matchReasons.isEmpty {
-                            Text(selectedSearchResult.matchReasons.joined(separator: " • "))
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                        if let scoreSessionID = selectedSearchResult.scoreSessionID {
-                            Text("Score session \(scoreSessionID.uuidString.prefix(8))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-        }
-    }
-
-    private var similarTracksButtonRow: some View {
-        HStack(spacing: 8) {
-            if shouldShowSimilarScopeAnalyzeCTA {
-                Button("Analyze Scope") {
-                    viewModel.analyzeScopedTracks(for: .search)
-                }
-                Text("No ready tracks are available in the current search scope yet.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            } else {
-                Button(viewModel.isSearching ? "Cancel" : "Find Similar Tracks") {
-                    if viewModel.isSearching {
-                        viewModel.cancelSearch()
-                    } else {
-                        viewModel.searchSimilarTracks(
-                            bpmMin: Double(similarBPMMinText),
-                            bpmMax: Double(similarBPMMaxText),
-                            musicalKey: similarMusicalKeyText,
-                            genre: similarGenreText,
-                            analysisFocus: similarAnalysisFocus,
-                            mixabilityTags: splitTags(similarMixabilityTagsText),
-                            maxDurationMinutes: Double(similarMaxDurationText),
-                            limit: similarResultLimit
-                        )
-                    }
-                }
-                .disabled(!viewModel.isSearching && !viewModel.canRunSimilarTrackActions)
-            }
-        }
     }
 
     private var buildMixsetPanel: some View {
@@ -322,61 +130,11 @@ struct MixAssistantView: View {
                 viewModel: viewModel,
                 target: .recommendation,
                 title: "DJ Scope",
-                initiallyExpanded: false
+                initiallyExpanded: false,
+                accessibilityIdentifier: "recommendation-dj-scope-summary"
             )
 
-            HStack {
-                Text("Key Strictness")
-                Slider(value: $viewModel.constraints.keyStrictness, in: 0...1)
-                    .frame(width: 140)
-                Text(String(format: "%.2f", viewModel.constraints.keyStrictness))
-                    .font(.system(.body, design: .monospaced))
-                Text("Genre Continuity")
-                Slider(value: $viewModel.constraints.genreContinuity, in: 0...1)
-                    .frame(width: 140)
-                Text(String(format: "%.2f", viewModel.constraints.genreContinuity))
-                    .font(.system(.body, design: .monospaced))
-                Toggle("Prioritize External Metadata", isOn: $viewModel.constraints.prioritizeExternalMetadata)
-                    .toggleStyle(.checkbox)
-                Spacer()
-            }
-
-            HStack {
-                Text("BPM Range")
-                TextField("Min", text: $mixBPMMinText)
-                    .frame(width: 60)
-                TextField("Max", text: $mixBPMMaxText)
-                    .frame(width: 60)
-                Picker("Focus", selection: $viewModel.constraints.analysisFocus) {
-                    Text("Any Focus").tag(Optional<AnalysisFocus>.none)
-                    ForEach(AnalysisFocus.allCases) { focus in
-                        Text(focus.displayName).tag(Optional(focus))
-                    }
-                }
-                .frame(width: 170)
-                Text("Max Minutes")
-                TextField("Minutes", text: $mixMaxDurationText)
-                    .frame(width: 70)
-                Stepper("Path Length \(viewModel.playlistTargetCount)", value: $viewModel.playlistTargetCount, in: 2...24)
-                    .frame(width: 180)
-                Button("Apply Filters") {
-                    viewModel.constraints.targetBPMMin = Double(mixBPMMinText)
-                    viewModel.constraints.targetBPMMax = Double(mixBPMMaxText)
-                    viewModel.constraints.maxDurationMinutes = Double(mixMaxDurationText)
-                }
-                Spacer()
-            }
-
-            HStack {
-                TextField("Include tags or text", text: $includeTagsText)
-                    .textFieldStyle(.roundedBorder)
-                TextField("Exclude tags or text", text: $excludeTagsText)
-                    .textFieldStyle(.roundedBorder)
-                Button("Apply Tags") {
-                    viewModel.constraints.includeTags = splitTags(includeTagsText)
-                    viewModel.constraints.excludeTags = splitTags(excludeTagsText)
-                }
-            }
+            advancedScoreControls
 
             if !viewModel.recommendationStatusMessage.isEmpty {
                 Text(viewModel.recommendationStatusMessage)
@@ -407,7 +165,8 @@ struct MixAssistantView: View {
                 TableColumn("External") { row in Text(String(format: "%.2f", row.breakdown.externalMetadataScore)) }
                 TableColumn("Focus") { row in Text(row.analysisFocus?.displayName ?? "-") }
                 TableColumn("Tags") { row in
-                    Text(row.mixabilityTags.prefix(3).joined(separator: ", ").isEmpty ? "-" : row.mixabilityTags.prefix(3).joined(separator: ", "))
+                    let preview = row.mixabilityTags.prefix(3).joined(separator: ", ")
+                    Text(preview.isEmpty ? "-" : preview)
                 }
             }
             .frame(minHeight: 220, idealHeight: 260, maxHeight: 320)
@@ -525,6 +284,128 @@ struct MixAssistantView: View {
         .frame(width: 180, alignment: .leading)
     }
 
+    private var advancedScoreControls: some View {
+        GroupBox {
+            DisclosureGroup("Advanced Score Controls", isExpanded: $isAdvancedScoreExpanded) {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Final and embedding weights are normalized automatically when scoring.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Final Score Weights")
+                            .font(.headline)
+                        NumericSliderField(
+                            title: "Embedding",
+                            value: $viewModel.weights.embed,
+                            range: 0...1,
+                            accessibilityIdentifier: "score-weight-embedding"
+                        )
+                        NumericSliderField(title: "BPM", value: $viewModel.weights.bpm, range: 0...1)
+                        NumericSliderField(title: "Key", value: $viewModel.weights.key, range: 0...1)
+                        NumericSliderField(title: "Energy", value: $viewModel.weights.energy, range: 0...1)
+                        NumericSliderField(title: "Transition", value: $viewModel.weights.introOutro, range: 0...1)
+                        NumericSliderField(title: "External", value: $viewModel.weights.external, range: 0...1)
+                        runtimeWeightSummary(
+                            title: "Normalized Final",
+                            values: [
+                                ("Embed", viewModel.normalizedRecommendationWeights.embed),
+                                ("BPM", viewModel.normalizedRecommendationWeights.bpm),
+                                ("Key", viewModel.normalizedRecommendationWeights.key),
+                                ("Energy", viewModel.normalizedRecommendationWeights.energy),
+                                ("Transition", viewModel.normalizedRecommendationWeights.introOutro),
+                                ("External", viewModel.normalizedRecommendationWeights.external)
+                            ]
+                        )
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Embedding Mix Weights")
+                            .font(.headline)
+                        NumericSliderField(title: "Track", value: $viewModel.vectorWeights.track, range: 0...1)
+                        NumericSliderField(title: "Intro", value: $viewModel.vectorWeights.intro, range: 0...1)
+                        NumericSliderField(title: "Middle", value: $viewModel.vectorWeights.middle, range: 0...1)
+                        NumericSliderField(title: "Outro", value: $viewModel.vectorWeights.outro, range: 0...1)
+                        runtimeWeightSummary(
+                            title: "Normalized Embedding",
+                            values: [
+                                ("Track", viewModel.normalizedMixsetVectorWeights.track),
+                                ("Intro", viewModel.normalizedMixsetVectorWeights.intro),
+                                ("Middle", viewModel.normalizedMixsetVectorWeights.middle),
+                                ("Outro", viewModel.normalizedMixsetVectorWeights.outro)
+                            ]
+                        )
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Mix Constraints")
+                            .font(.headline)
+                        OptionalNumericSliderField(
+                            title: "BPM Min",
+                            value: $viewModel.constraints.targetBPMMin,
+                            range: 60...180,
+                            defaultValue: viewModel.selectedTracks.first?.bpm ?? 118,
+                            step: 0.5
+                        )
+                        OptionalNumericSliderField(
+                            title: "BPM Max",
+                            value: $viewModel.constraints.targetBPMMax,
+                            range: 60...180,
+                            defaultValue: viewModel.selectedTracks.first?.bpm ?? 128,
+                            step: 0.5
+                        )
+                        OptionalNumericSliderField(
+                            title: "Max Minutes",
+                            value: $viewModel.constraints.maxDurationMinutes,
+                            range: 1...20,
+                            defaultValue: 8,
+                            step: 0.25
+                        )
+                        NumericSliderField(title: "Key Strictness", value: $viewModel.constraints.keyStrictness, range: 0...1)
+                        NumericSliderField(title: "Genre Continuity", value: $viewModel.constraints.genreContinuity, range: 0...1)
+                        NumericSliderField(
+                            title: "External Priority",
+                            value: $viewModel.constraints.externalMetadataPriority,
+                            range: 0...1
+                        )
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Picker("Focus", selection: $viewModel.constraints.analysisFocus) {
+                            Text("Any Focus").tag(Optional<AnalysisFocus>.none)
+                            ForEach(AnalysisFocus.allCases) { focus in
+                                Text(focus.displayName).tag(Optional(focus))
+                            }
+                        }
+                        .frame(width: 220)
+
+                        TextField("Include tags or text", text: $includeTagsText)
+                            .textFieldStyle(.roundedBorder)
+                            .onChange(of: includeTagsText) { _, newValue in
+                                viewModel.constraints.includeTags = splitTags(newValue)
+                            }
+
+                        TextField("Exclude tags or text", text: $excludeTagsText)
+                            .textFieldStyle(.roundedBorder)
+                            .onChange(of: excludeTagsText) { _, newValue in
+                                viewModel.constraints.excludeTags = splitTags(newValue)
+                            }
+                    }
+
+                    HStack {
+                        Button("Reset to Defaults") {
+                            viewModel.resetMixsetScoringControls()
+                            hydrateTagEditorsFromConstraints()
+                        }
+                        Spacer()
+                    }
+                }
+                .padding(.top, 12)
+            }
+        }
+        .accessibilityIdentifier("advanced-score-controls")
+    }
+
     @ViewBuilder
     private func chipWrap(_ chips: [String]) -> some View {
         ViewThatFits(in: .horizontal) {
@@ -551,12 +432,9 @@ struct MixAssistantView: View {
             .background(Color.secondary.opacity(0.12), in: Capsule())
     }
 
-    private func hydrateMixFiltersFromConstraints() {
-        mixBPMMinText = viewModel.constraints.targetBPMMin.map { String(format: "%.1f", $0) } ?? ""
-        mixBPMMaxText = viewModel.constraints.targetBPMMax.map { String(format: "%.1f", $0) } ?? ""
+    private func hydrateTagEditorsFromConstraints() {
         includeTagsText = viewModel.constraints.includeTags.joined(separator: ", ")
         excludeTagsText = viewModel.constraints.excludeTags.joined(separator: ", ")
-        mixMaxDurationText = viewModel.constraints.maxDurationMinutes.map { String(format: "%.1f", $0) } ?? ""
     }
 
     private func splitTags(_ input: String) -> [String] {
@@ -566,16 +444,20 @@ struct MixAssistantView: View {
             .filter { !$0.isEmpty }
     }
 
-    private var shouldShowSimilarScopeAnalyzeCTA: Bool {
-        let filter = viewModel.scopeFilter(for: .search)
-        let statistics = viewModel.scopeStatistics(for: .search)
-        return !filter.isEmpty && statistics.ready == 0 && statistics.needsPreparation > 0
-    }
-
     private var shouldShowRecommendationScopeAnalyzeCTA: Bool {
         let filter = viewModel.scopeFilter(for: .recommendation)
         let statistics = viewModel.scopeStatistics(for: .recommendation)
         return !filter.isEmpty && statistics.ready == 0 && statistics.needsPreparation > 0
+    }
+
+    private func runtimeWeightSummary(title: String, values: [(String, Double)]) -> some View {
+        let summary = values
+            .map { "\($0.0) \(String(format: "%.2f", $0.1))" }
+            .joined(separator: " • ")
+
+        return Text("\(title): \(summary)")
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 
     private func breakdownRow(_ label: String, _ value: Double) -> some View {
@@ -625,6 +507,80 @@ struct MixAssistantView: View {
             return "Outro"
         default:
             return collection.capitalized
+        }
+    }
+}
+
+private struct NumericSliderField: View {
+    let title: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    var step: Double = 0.01
+    var accessibilityIdentifier: String?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .frame(width: 140, alignment: .leading)
+            Slider(value: $value, in: range, step: step)
+            TextField(
+                title,
+                value: $value,
+                format: FloatingPointFormatStyle<Double>.number.precision(.fractionLength(2))
+            )
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 80)
+            .font(.system(.body, design: .monospaced))
+        }
+        .accessibilityIdentifier(accessibilityIdentifier ?? "numeric-slider-\(title.lowercased().replacingOccurrences(of: " ", with: "-"))")
+    }
+}
+
+private struct OptionalNumericSliderField: View {
+    let title: String
+    @Binding var value: Double?
+    let range: ClosedRange<Double>
+    let defaultValue: Double
+    var step: Double = 0.01
+
+    private var isEnabled: Binding<Bool> {
+        Binding(
+            get: { value != nil },
+            set: { enabled in
+                value = enabled ? (value ?? defaultValue) : nil
+            }
+        )
+    }
+
+    private var resolvedValue: Binding<Double> {
+        Binding(
+            get: { value ?? defaultValue },
+            set: { value = $0 }
+        )
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Toggle(isOn: isEnabled) {
+                Text(title)
+                    .frame(width: 140, alignment: .leading)
+            }
+            .toggleStyle(.checkbox)
+            Slider(value: resolvedValue, in: range, step: step)
+                .disabled(value == nil)
+            TextField(
+                title,
+                value: resolvedValue,
+                format: FloatingPointFormatStyle<Double>.number.precision(.fractionLength(2))
+            )
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 80)
+            .font(.system(.body, design: .monospaced))
+            .disabled(value == nil)
+            Button("Clear") {
+                value = nil
+            }
+            .disabled(value == nil)
         }
     }
 }

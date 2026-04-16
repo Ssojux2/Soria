@@ -13,6 +13,11 @@ enum AppPaths {
     static let pythonCacheDirectory = appSupportDirectory.appendingPathComponent("worker-cache", isDirectory: true)
     static let exportsDirectory = appSupportDirectory.appendingPathComponent("exports", isDirectory: true)
     static let logsDirectory = appSupportDirectory.appendingPathComponent("logs", isDirectory: true)
+    static func makeRecoveryDatabaseURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("Soria-recovery-\(UUID().uuidString)")
+            .appendingPathExtension("sqlite")
+    }
 
     static func ensureDirectories() {
         let fm = FileManager.default

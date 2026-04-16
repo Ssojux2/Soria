@@ -4,176 +4,107 @@ struct LibraryView: View {
     @ObservedObject var viewModel: AppViewModel
 
     var body: some View {
+        GeometryReader { proxy in
+            VStack(alignment: .leading, spacing: 10) {
+                libraryControlsPanel(maxHeight: controlsPanelHeight(for: proxy.size.height))
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: 96,
+                        idealHeight: controlsPanelIdealHeight(for: proxy.size.height),
+                        maxHeight: controlsPanelHeight(for: proxy.size.height),
+                        alignment: .top
+                    )
+
+                libraryTracksTable
+                    .frame(maxWidth: .infinity, minHeight: 140, maxHeight: .infinity)
+                    .layoutPriority(1)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .overlay(alignment: .topLeading) {
+            AccessibilityMarker(identifier: "library-view", label: "Library View")
+        }
+        .accessibilityIdentifier("library-view")
+    }
+
+    private var libraryTracksTable: some View {
+        ZStack {
+            Table(viewModel.filteredTracks, selection: viewModel.libraryTableSelection) {
+                TableColumn("Title", value: \.title)
+                TableColumn("Artist", value: \.artist)
+                TableColumn("BPM / Key") { track in
+                    Text(bpmKeySummary(for: track))
+                        .foregroundStyle(.secondary)
+                }
+                TableColumn("Status") { track in
+                    statusBadge(for: track)
+                }
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            HStack(spacing: 2) {
+                AccessibilityMarker(identifier: "library-table", label: "Library Table")
+                AccessibilityMarker(identifier: "library-column-title", label: "Title Column")
+                AccessibilityMarker(identifier: "library-column-artist", label: "Artist Column")
+                AccessibilityMarker(identifier: "library-column-bpm-key", label: "BPM and Key Column")
+                AccessibilityMarker(identifier: "library-column-status", label: "Status Column")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("library-table")
+    }
+
+    private func libraryControlsPanel(maxHeight: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Button("Library Setup") { viewModel.openInitialSetup() }
-                Button("Sync Libraries") { viewModel.syncLibraries() }
-                Button("Rescan Fallback Folder") { viewModel.runFallbackScan() }
-                Button("Choose Fallback Folder") { viewModel.addLibraryRoot() }
-                Spacer()
-                Text("Sources: \(activeSourceCount)")
-                    .foregroundStyle(.secondary)
-                Text("Selected: \(viewModel.selectedTracks.count)")
-                    .foregroundStyle(.secondary)
-                Text("Showing: \(viewModel.filteredTracks.count) / \(viewModel.tracks.count)")
-                    .foregroundStyle(.secondary)
-            }
+            Text("Filter")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
 
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center, spacing: 12) {
-                    Picker("Filter", selection: $viewModel.libraryTrackFilter) {
-                        ForEach(LibraryTrackFilter.allCases) { filter in
-                            Text("\(filter.displayName) (\(viewModel.libraryTrackCount(for: filter)))")
-                                .tag(filter)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-
-                    Spacer(minLength: 12)
-
-                    Text(viewModel.selectionReadiness.referenceSummaryText)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Picker("Filter", selection: $viewModel.libraryTrackFilter) {
-                        ForEach(LibraryTrackFilter.allCases) { filter in
-                            Text(filter.displayName).tag(filter)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-
-                    Text(viewModel.selectionReadiness.referenceSummaryText)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+            Picker("Filter", selection: $viewModel.libraryTrackFilter) {
+                ForEach(LibraryTrackFilter.allCases) { filter in
+                    Text("\(filter.displayName) (\(viewModel.libraryTrackCount(for: filter)))")
+                        .tag(filter)
                 }
             }
-
-            ScopeStatisticsStrip(
-                statistics: viewModel.scopeStatistics(for: .library),
-                coverageText: viewModel.libraryScopeSourceCoverageText
-            )
+            .pickerStyle(.segmented)
 
             LibraryScopeFilterSection(
                 viewModel: viewModel,
                 target: .library,
-                title: "DJ Scope",
-                initiallyExpanded: true
+                title: "Advanced Filters",
+                initiallyExpanded: false
             )
-
-            if viewModel.selectionReadiness.hasSelection {
-                GroupBox(viewModel.selectionReadiness.selectedCount > 1 ? "Selection Actions" : "Track Actions") {
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 10) {
-                            Button(viewModel.selectionReadiness.selectedCount > 1 ? "Analyze Selection" : "Analyze Track") {
-                                viewModel.analyzeSelectedTracksFromLibrary()
-                            }
-                            .disabled(!viewModel.canRunAnalysis)
-
-                            Button(viewModel.selectionReadiness.selectedCount > 1 ? "Find Shared Vibe" : "Find Similar Tracks") {
-                                viewModel.openMixAssistant(mode: .similarTracks)
-                            }
-
-                            Button(viewModel.selectionReadiness.selectedCount > 1 ? "Start Mixset From Selection" : "Start Mixset From This Track") {
-                                viewModel.openMixAssistant(mode: .buildMixset)
-                            }
-
-                            Spacer()
-                        }
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            Button(viewModel.selectionReadiness.selectedCount > 1 ? "Analyze Selection" : "Analyze Track") {
-                                viewModel.analyzeSelectedTracksFromLibrary()
-                            }
-                            .disabled(!viewModel.canRunAnalysis)
-
-                            Button(viewModel.selectionReadiness.selectedCount > 1 ? "Find Shared Vibe" : "Find Similar Tracks") {
-                                viewModel.openMixAssistant(mode: .similarTracks)
-                            }
-
-                            Button(viewModel.selectionReadiness.selectedCount > 1 ? "Start Mixset From Selection" : "Start Mixset From This Track") {
-                                viewModel.openMixAssistant(mode: .buildMixset)
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !viewModel.libraryStatusMessage.isEmpty {
-                Text(viewModel.libraryStatusMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-
-            Text("Tip: Cmd/Shift to select multiple tracks.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-
-            if viewModel.scanProgress.isRunning {
-                GroupBox("Library Activity") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ProgressView(
-                            value: Double(viewModel.scanProgress.scannedFiles),
-                            total: Double(max(viewModel.scanProgress.totalFiles, 1))
-                        )
-
-                        Text("Scanned \(viewModel.scanProgress.scannedFiles) / \(viewModel.scanProgress.totalFiles)")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-
-                        if !viewModel.scanProgress.currentFile.isEmpty {
-                            Text(viewModel.scanProgress.currentFile)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-
-            Table(viewModel.filteredTracks, selection: $viewModel.selectedTrackIDs) {
-                TableColumn("Title", value: \.title)
-                TableColumn("Artist", value: \.artist)
-                TableColumn("BPM") { track in
-                    Text(track.bpm.map { String(format: "%.1f", $0) } ?? "-")
-                }
-                TableColumn("Key") { track in
-                    Text(track.musicalKey ?? "-")
-                }
-                TableColumn("Duration") { track in
-                    Text(formatDuration(track.duration))
-                }
-                TableColumn("Genre", value: \.genre)
-                TableColumn("Status") { track in
-                    statusBadge(for: track)
-                }
-                TableColumn("BPM Source") { track in
-                    Text(track.bpmSource?.displayName ?? "-")
-                }
-                TableColumn("Serato") { track in
-                    Image(systemName: track.hasSeratoMetadata ? "checkmark.circle.fill" : "circle")
-                }
-                TableColumn("rekordbox") { track in
-                    Image(systemName: track.hasRekordboxMetadata ? "checkmark.circle.fill" : "circle")
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .accessibilityIdentifier("library-view")
+        .frame(maxWidth: .infinity, maxHeight: maxHeight, alignment: .topLeading)
+        .overlay(alignment: .topLeading) {
+            HStack(spacing: 2) {
+                AccessibilityMarker(identifier: "library-filter-control", label: "Library Filter Control")
+                AccessibilityMarker(identifier: "library-advanced-filters", label: "Library Advanced Filters")
+            }
+        }
     }
 
-    private var activeSourceCount: Int {
-        viewModel.librarySources.filter { $0.enabled && $0.resolvedPath != nil }.count
+    private func controlsPanelIdealHeight(for availableHeight: CGFloat) -> CGFloat {
+        min(max(availableHeight * 0.14, 104), 140)
     }
 
-    private func formatDuration(_ sec: Double) -> String {
-        let t = Int(sec)
-        return String(format: "%d:%02d", t / 60, t % 60)
+    private func controlsPanelHeight(for availableHeight: CGFloat) -> CGFloat {
+        min(max(availableHeight * 0.18, 124), 168)
+    }
+
+    private func bpmKeySummary(for track: Track) -> String {
+        let bpm = track.bpm.map { String(format: "%.1f BPM", $0) }
+        let musicalKey = track.musicalKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var values: [String] = []
+        if let bpm, !bpm.isEmpty {
+            values.append(bpm)
+        }
+        if let musicalKey, !musicalKey.isEmpty {
+            values.append(musicalKey)
+        }
+        return values.isEmpty ? "-" : values.joined(separator: " • ")
     }
 
     @ViewBuilder
@@ -208,214 +139,129 @@ struct LibraryScopeFilterSection: View {
     @ObservedObject var viewModel: AppViewModel
     let target: ScopeFilterTarget
     let title: String
-    private let initiallyExpanded: Bool
-    @State private var isExpanded: Bool
+    private let accessibilityIdentifier: String?
 
     init(
         viewModel: AppViewModel,
         target: ScopeFilterTarget,
         title: String,
-        initiallyExpanded: Bool = false
+        initiallyExpanded: Bool = false,
+        accessibilityIdentifier: String? = nil
     ) {
         self.viewModel = viewModel
         self.target = target
         self.title = title
-        self.initiallyExpanded = initiallyExpanded
-        _isExpanded = State(initialValue: initiallyExpanded)
+        self.accessibilityIdentifier = accessibilityIdentifier
+        _ = initiallyExpanded
     }
 
     var body: some View {
-        GroupBox {
-            DisclosureGroup(isExpanded: $isExpanded) {
-                VStack(alignment: .leading, spacing: 12) {
-                    actionRow
+        let group = GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 12) {
+                        summaryCopy
+                        Spacer(minLength: 12)
+                        openFiltersButton
+                    }
 
-                    ScopeStatisticsStrip(
-                        statistics: viewModel.scopeStatistics(for: target),
-                        coverageText: coverageText
-                    )
-
-                    Text("Selections use union matching across Serato crates and rekordbox playlists.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-
-                    ViewThatFits(in: .horizontal) {
-                        HStack(alignment: .top, spacing: 12) {
-                            facetColumn(
-                                title: "Serato Crates",
-                                facets: viewModel.membershipFacets(for: .serato),
-                                source: .serato
-                            )
-                            facetColumn(
-                                title: "rekordbox Playlists",
-                                facets: viewModel.membershipFacets(for: .rekordbox),
-                                source: .rekordbox
-                            )
-                        }
-
-                        VStack(alignment: .leading, spacing: 12) {
-                            facetColumn(
-                                title: "Serato Crates",
-                                facets: viewModel.membershipFacets(for: .serato),
-                                source: .serato
-                            )
-                            facetColumn(
-                                title: "rekordbox Playlists",
-                                facets: viewModel.membershipFacets(for: .rekordbox),
-                                source: .rekordbox
-                            )
-                        }
+                    VStack(alignment: .leading, spacing: 10) {
+                        summaryCopy
+                        openFiltersButton
                     }
                 }
-                .padding(.top, 8)
-            } label: {
-                HStack {
-                    Text(title)
-                        .font(.headline)
-                    Spacer()
-                    Text(summaryText)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+
+                if !activeChipLabels.isEmpty {
+                    chipWrap(activeChipLabels)
                 }
+
+                ScopeStatisticsStrip(
+                    statistics: viewModel.scopeStatistics(for: target),
+                    coverageText: coverageText
+                )
+            }
+        }
+
+        if let accessibilityIdentifier {
+            group.accessibilityIdentifier(accessibilityIdentifier)
+        } else {
+            group
+        }
+    }
+
+    private var summaryCopy: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.headline)
+            Text(viewModel.scopeSummary(for: target))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            if viewModel.scopeFilter(for: target).isEmpty {
+                Text("Selections use union matching across Serato crates and rekordbox playlists.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Applied filters stay active until you clear them.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
 
-    private var statistics: ScopedTrackStatistics {
-        viewModel.scopeStatistics(for: target)
+    private var openFiltersButton: some View {
+        Button(openFiltersButtonTitle) {
+            viewModel.openScopeInspector(for: target)
+        }
+        .buttonStyle(.bordered)
+        .accessibilityIdentifier("scope-filter-open-\(target.rawValue)")
+    }
+
+    private var openFiltersButtonTitle: String {
+        if viewModel.isScopeInspectorPresented, viewModel.activeScopeInspectorTarget == target {
+            return target == .library ? "Hide Filters" : "Hide Scope"
+        }
+
+        return viewModel.scopeFilter(for: target).isEmpty ? "Open Filters" : "Edit Filters"
+    }
+
+    private var activeChipLabels: [String] {
+        let allLabels = viewModel.selectedScopeChipLabels(for: target)
+        let preview = Array(allLabels.prefix(6))
+        let remainingCount = allLabels.count - preview.count
+        guard remainingCount > 0 else { return preview }
+        return preview + ["+\(remainingCount) more"]
     }
 
     private var coverageText: String {
-        "Serato \(statistics.seratoCoverage) • rekordbox \(statistics.rekordboxCoverage)"
-    }
-
-    private var summaryText: String {
-        if viewModel.scopeFilter(for: target).isEmpty {
-            return "All library files"
-        }
-        return "\(statistics.total) tracks in scope"
+        let statistics = viewModel.scopeStatistics(for: target)
+        return "Serato \(statistics.seratoCoverage) • rekordbox \(statistics.rekordboxCoverage)"
     }
 
     @ViewBuilder
-    private var actionRow: some View {
+    private func chipWrap(_ chips: [String]) -> some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
-                if target == .library {
-                    Button("Select Visible") { viewModel.selectVisibleTracks() }
-                        .disabled(viewModel.filteredTracks.isEmpty)
-
-                    Button("Analyze Visible Unprepared") {
-                        viewModel.analyzeVisibleUnpreparedTracks()
-                    }
-                    .disabled(viewModel.filteredTracks.allSatisfy { viewModel.trackWorkflowStatus(for: $0) == .ready })
-                } else {
-                    Button("Use Library Filter") {
-                        viewModel.copyLibraryScope(to: target)
-                    }
-
-                    if statistics.needsPreparation > 0 {
-                        Button("Analyze Scope") {
-                            viewModel.analyzeScopedTracks(for: target)
-                        }
-                    }
+                ForEach(chips, id: \.self) { chip in
+                    chipView(chip)
                 }
-
-                Button("Clear Scope") {
-                    viewModel.clearScope(for: target)
-                }
-                .disabled(viewModel.scopeFilter(for: target).isEmpty)
-
-                Spacer()
+                Spacer(minLength: 0)
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                if target == .library {
-                    Button("Select Visible") { viewModel.selectVisibleTracks() }
-                        .disabled(viewModel.filteredTracks.isEmpty)
-
-                    Button("Analyze Visible Unprepared") {
-                        viewModel.analyzeVisibleUnpreparedTracks()
-                    }
-                    .disabled(viewModel.filteredTracks.allSatisfy { viewModel.trackWorkflowStatus(for: $0) == .ready })
-                } else {
-                    Button("Use Library Filter") {
-                        viewModel.copyLibraryScope(to: target)
-                    }
-
-                    if statistics.needsPreparation > 0 {
-                        Button("Analyze Scope") {
-                            viewModel.analyzeScopedTracks(for: target)
-                        }
-                    }
+                ForEach(chips, id: \.self) { chip in
+                    chipView(chip)
                 }
-
-                Button("Clear Scope") {
-                    viewModel.clearScope(for: target)
-                }
-                .disabled(viewModel.scopeFilter(for: target).isEmpty)
             }
         }
     }
 
-    private func facetColumn(
-        title: String,
-        facets: [MembershipFacet],
-        source: ExternalDJMetadata.Source
-    ) -> some View {
-        GroupBox(title) {
-            if facets.isEmpty {
-                Text("No \(source.displayName) memberships are synced yet.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 6) {
-                        ForEach(facets) { facet in
-                            Toggle(
-                                isOn: Binding(
-                                    get: {
-                                        viewModel.isMembershipSelected(
-                                            facet.membershipPath,
-                                            source: source,
-                                            target: target
-                                        )
-                                    },
-                                    set: { isSelected in
-                                        viewModel.setMembershipSelection(
-                                            isSelected,
-                                            membershipPath: facet.membershipPath,
-                                            source: source,
-                                            target: target
-                                        )
-                                    }
-                                )
-                            ) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                        Text(facet.displayName)
-                                        Spacer(minLength: 8)
-                                        Text("\(facet.trackCount)")
-                                            .font(.caption.weight(.semibold))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    if let parentPath = facet.parentPath, !parentPath.isEmpty {
-                                        Text(parentPath)
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
-                                    }
-                                }
-                                .padding(.leading, CGFloat(facet.depth) * 12)
-                            }
-                            .toggleStyle(.checkbox)
-                        }
-                    }
-                }
-                .frame(minHeight: 120, maxHeight: 220)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+    private func chipView(_ text: String) -> some View {
+        Text(text)
+            .font(.footnote.weight(.medium))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.secondary.opacity(0.12), in: Capsule())
     }
 }
 

@@ -20,12 +20,17 @@ final class SoriaUITestsLaunchTests: XCTestCase {
     @MainActor
     func testLaunch() throws {
         let app = XCUIApplication()
+        app.launchArguments += [
+            "UITEST_SKIP_INITIAL_SETUP",
+            "UITEST_LIBRARY_STATE=prepared",
+            "-ApplePersistenceIgnoreState",
+            "YES"
+        ]
         app.launch()
-
-        // Insert steps here to perform after app launch but before taking a screenshot,
-        // such as logging into a test account or navigating somewhere in the app
-        // XCUIAutomation Documentation
-        // https://developer.apple.com/documentation/xcuiautomation
+        XCTAssertTrue(
+            app.descendants(matching: .any).matching(identifier: "library-preparation-card").firstMatch
+                .waitForExistence(timeout: 10)
+        )
 
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = "Launch Screen"

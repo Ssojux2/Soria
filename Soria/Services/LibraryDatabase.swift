@@ -17,6 +17,7 @@ final class LibraryDatabase {
         if sqlite3_open(databaseURL.path, &db) != SQLITE_OK {
             throw DatabaseError.openFailed
         }
+        try configureConnection()
         try createSchema()
     }
 
@@ -1139,6 +1140,13 @@ final class LibraryDatabase {
         }
     }
 
+    private func configureConnection() throws {
+        sqlite3_busy_timeout(db, 5_000)
+        try exec("PRAGMA foreign_keys = ON;")
+        try exec("PRAGMA journal_mode = WAL;")
+        try exec("PRAGMA synchronous = NORMAL;")
+    }
+
     private func withStatement<T>(_ sql: String, body: (OpaquePointer?) throws -> T) throws -> T {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
@@ -1542,6 +1550,21 @@ enum DatabaseError: Error {
     case queryFailed
     case writeFailed
     case decodeFailed
+}
+
+extension DatabaseError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .openFailed:
+            return "Failed to open the library database."
+        case .queryFailed:
+            return "A library database query failed."
+        case .writeFailed:
+            return "A library database write failed."
+        case .decodeFailed:
+            return "Stored library data could not be decoded."
+        }
+    }
 }
 
 struct PersistedEmbeddingStateSnapshot: Equatable {

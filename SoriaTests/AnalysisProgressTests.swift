@@ -225,6 +225,256 @@ struct AnalysisProgressTests {
     }
 
     @Test
+    func preparationOverviewPrefersActiveAnalysisOverScanProgress() {
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_100)
+        let activity = AnalysisActivity.started(
+            trackTitle: "Selected Track",
+            trackPath: "/tmp/selected.mp3",
+            queueIndex: 2,
+            totalCount: 4,
+            timeoutSec: 120,
+            startedAt: startedAt
+        )
+
+        let context = PreparationOverviewContext(
+            selectionReadiness: SelectionReadiness(
+                signature: "sel",
+                selectedCount: 1,
+                readyCount: 0,
+                needsAnalysisCount: 1,
+                needsRefreshCount: 0
+            ),
+            filteredTrackCount: 12,
+            filteredNeedsPreparationCount: 6,
+            totalTrackCount: 12,
+            hasSourceSetupIssue: false,
+            hasSyncableSource: true,
+            canPrepareSelection: true,
+            canPrepareVisible: true,
+            preparationBlockedMessage: nil,
+            isAnalyzing: true,
+            isCancellingAnalysis: false,
+            analysisActivity: activity,
+            preparationNotice: nil,
+            analysisErrorMessage: "",
+            scanProgress: ScanJobProgress(
+                scannedFiles: 10,
+                totalFiles: 100,
+                indexedFiles: 4,
+                skippedFiles: 0,
+                duplicateFiles: 0,
+                isRunning: true,
+                currentFile: "example.mp3"
+            ),
+            syncingSourceNames: ["Serato"],
+            libraryStatusMessage: ""
+        )
+
+        let overview = AppViewModel.makePreparationOverview(from: context)
+
+        #expect(overview.phase == .analyzing)
+        #expect(overview.isCancellable)
+        #expect(overview.message.contains("Selected Track"))
+    }
+
+    @Test
+    func preparationOverviewMapsSyncingFailureAndCompletedStates() {
+        let syncingContext = PreparationOverviewContext(
+            selectionReadiness: SelectionReadiness(
+                signature: "",
+                selectedCount: 0,
+                readyCount: 0,
+                needsAnalysisCount: 0,
+                needsRefreshCount: 0
+            ),
+            filteredTrackCount: 0,
+            filteredNeedsPreparationCount: 0,
+            totalTrackCount: 0,
+            hasSourceSetupIssue: false,
+            hasSyncableSource: true,
+            canPrepareSelection: false,
+            canPrepareVisible: false,
+            preparationBlockedMessage: nil,
+            isAnalyzing: false,
+            isCancellingAnalysis: false,
+            analysisActivity: nil,
+            preparationNotice: nil,
+            analysisErrorMessage: "",
+            scanProgress: ScanJobProgress(
+                scannedFiles: 24,
+                totalFiles: 120,
+                indexedFiles: 12,
+                skippedFiles: 0,
+                duplicateFiles: 0,
+                isRunning: true,
+                currentFile: "track.mp3"
+            ),
+            syncingSourceNames: ["rekordbox"],
+            libraryStatusMessage: ""
+        )
+        let failedContext = PreparationOverviewContext(
+            selectionReadiness: SelectionReadiness(
+                signature: "sel",
+                selectedCount: 1,
+                readyCount: 0,
+                needsAnalysisCount: 1,
+                needsRefreshCount: 0
+            ),
+            filteredTrackCount: 1,
+            filteredNeedsPreparationCount: 1,
+            totalTrackCount: 1,
+            hasSourceSetupIssue: false,
+            hasSyncableSource: true,
+            canPrepareSelection: true,
+            canPrepareVisible: true,
+            preparationBlockedMessage: nil,
+            isAnalyzing: false,
+            isCancellingAnalysis: false,
+            analysisActivity: nil,
+            preparationNotice: nil,
+            analysisErrorMessage: "Worker command failed.",
+            scanProgress: ScanJobProgress(),
+            syncingSourceNames: [],
+            libraryStatusMessage: ""
+        )
+        let completedContext = PreparationOverviewContext(
+            selectionReadiness: SelectionReadiness(
+                signature: "ready",
+                selectedCount: 0,
+                readyCount: 0,
+                needsAnalysisCount: 0,
+                needsRefreshCount: 0
+            ),
+            filteredTrackCount: 8,
+            filteredNeedsPreparationCount: 0,
+            totalTrackCount: 8,
+            hasSourceSetupIssue: false,
+            hasSyncableSource: true,
+            canPrepareSelection: false,
+            canPrepareVisible: false,
+            preparationBlockedMessage: nil,
+            isAnalyzing: false,
+            isCancellingAnalysis: false,
+            analysisActivity: nil,
+            preparationNotice: nil,
+            analysisErrorMessage: "",
+            scanProgress: ScanJobProgress(),
+            syncingSourceNames: [],
+            libraryStatusMessage: ""
+        )
+
+        #expect(AppViewModel.makePreparationOverview(from: syncingContext).phase == .syncing)
+        #expect(AppViewModel.makePreparationOverview(from: failedContext).phase == .failed)
+        #expect(AppViewModel.makePreparationOverview(from: completedContext).phase == .completed)
+    }
+
+    @Test
+    func friendlyPreparationMessageRemovesDetailedStageContext() {
+        let raw = """
+        Worker command failed.
+        Last stage: Embedding Descriptors
+        Last event: Building descriptor payload
+        """
+
+        #expect(AppViewModel.friendlyPreparationMessage(from: raw) == "Worker command failed.")
+        #expect(
+            AppViewModel.friendlyPreparationMessage(
+                from: "Worker timed out after 120 seconds.\nLast stage: Returning Result"
+            ) == "Preparation is taking longer than expected. Check the logs if this keeps happening."
+        )
+    }
+
+    @Test
+    func canceledPreparationOverviewReturnsToActionableState() {
+        let context = PreparationOverviewContext(
+            selectionReadiness: SelectionReadiness(
+                signature: "sel",
+                selectedCount: 1,
+                readyCount: 0,
+                needsAnalysisCount: 1,
+                needsRefreshCount: 0
+            ),
+            filteredTrackCount: 4,
+            filteredNeedsPreparationCount: 2,
+            totalTrackCount: 4,
+            hasSourceSetupIssue: false,
+            hasSyncableSource: true,
+            canPrepareSelection: true,
+            canPrepareVisible: true,
+            preparationBlockedMessage: nil,
+            isAnalyzing: false,
+            isCancellingAnalysis: false,
+            analysisActivity: nil,
+            preparationNotice: PreparationNotice(kind: .canceled, message: "Preparation was canceled."),
+            analysisErrorMessage: "",
+            scanProgress: ScanJobProgress(),
+            syncingSourceNames: [],
+            libraryStatusMessage: ""
+        )
+
+        let overview = AppViewModel.makePreparationOverview(from: context)
+
+        #expect(overview.phase == .idle)
+        #expect(overview.primaryAction == .prepareSelection)
+        #expect(overview.isCancellable == false)
+    }
+
+    @Test
+    func finalizeAnalysisSessionClearsCancelingStateAndPublishesNotice() {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_100)
+
+        viewModel.isAnalyzing = true
+        viewModel.isCancellingAnalysis = true
+        viewModel.analysisActivity = AnalysisActivity.started(
+            trackTitle: "Pending Track",
+            trackPath: "/tmp/pending.mp3",
+            queueIndex: 1,
+            totalCount: 1,
+            timeoutSec: 120,
+            startedAt: startedAt
+        )
+
+        viewModel.finalizeAnalysisSession(result: .canceled)
+
+        #expect(viewModel.isAnalyzing == false)
+        #expect(viewModel.isCancellingAnalysis == false)
+        #expect(viewModel.preparationNotice == PreparationNotice(kind: .canceled, message: "Preparation was canceled."))
+    }
+
+    @Test
+    func scopeSummaryTracksSelectedFacetCount() {
+        var filter = LibraryScopeFilter()
+        filter.seratoMembershipPaths = ["Warmup / Deep", "Peak / Tools"]
+        filter.rekordboxMembershipPaths = ["Festival / Day 1 / Sunrise"]
+
+        let statistics = ScopedTrackStatistics(
+            total: 9,
+            ready: 5,
+            needsAnalysis: 3,
+            needsRefresh: 1,
+            seratoCoverage: 6,
+            rekordboxCoverage: 4
+        )
+
+        #expect(filter.selectedFacetCount == 3)
+        #expect(
+            AppViewModel.scopeSummary(
+                target: .recommendation,
+                filter: filter,
+                statistics: statistics
+            ) == "3 filters • 9 tracks in scope"
+        )
+        #expect(
+            AppViewModel.scopeSummary(
+                target: .library,
+                filter: LibraryScopeFilter(),
+                statistics: statistics
+            ) == "All library files"
+        )
+    }
+
+    @Test
     func swiftProcessWorkerAnalyzeSmokeTest() throws {
         guard ProcessInfo.processInfo.environment["SORIA_RUN_WORKER_IPC_TESTS"] == "1" else { return }
 

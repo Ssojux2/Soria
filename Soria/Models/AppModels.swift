@@ -10,27 +10,14 @@ enum SidebarSection: String, CaseIterable, Identifiable {
 }
 
 enum MixAssistantMode: String, CaseIterable, Identifiable {
-    case similarTracks = "similar_tracks"
     case buildMixset = "build_mixset"
 
     var id: String { rawValue }
 
-    var displayName: String {
-        switch self {
-        case .similarTracks:
-            return "Similar Tracks"
-        case .buildMixset:
-            return "Build Mixset"
-        }
-    }
+    var displayName: String { "Build Mixset" }
 
     var helperText: String {
-        switch self {
-        case .similarTracks:
-            return "Use selected library tracks, text, or both together to find matching records."
-        case .buildMixset:
-            return "Use the current selection as the seed for next-track picks and automatic mix paths."
-        }
+        "Use selected library tracks, text, or both together as the seed for next-track picks and automatic mix paths."
     }
 }
 
@@ -59,6 +46,10 @@ struct LibraryScopeFilter: Codable, Hashable {
 
     var isEmpty: Bool {
         seratoMembershipPaths.isEmpty && rekordboxMembershipPaths.isEmpty
+    }
+
+    var selectedFacetCount: Int {
+        seratoMembershipPaths.count + rekordboxMembershipPaths.count
     }
 
     func selectedPaths(for source: ExternalDJMetadata.Source) -> [String] {
@@ -153,6 +144,62 @@ struct ScoreSessionCandidateSnapshot: Codable, Hashable {
     var analysisFocus: AnalysisFocus?
     var mixabilityTags: [String]
     var queryMode: String?
+    var normalizedFinalWeights: RecommendationWeights
+    var normalizedVectorWeights: MixsetVectorWeights
+    var effectiveConstraints: RecommendationConstraints
+
+    init(
+        vectorBreakdown: VectorScoreBreakdown,
+        matchedMemberships: [String],
+        matchReasons: [String],
+        analysisFocus: AnalysisFocus?,
+        mixabilityTags: [String],
+        queryMode: String?,
+        normalizedFinalWeights: RecommendationWeights = .defaults.normalized(),
+        normalizedVectorWeights: MixsetVectorWeights = .defaults.normalized(),
+        effectiveConstraints: RecommendationConstraints = .defaults.normalizedForScoring()
+    ) {
+        self.vectorBreakdown = vectorBreakdown
+        self.matchedMemberships = matchedMemberships
+        self.matchReasons = matchReasons
+        self.analysisFocus = analysisFocus
+        self.mixabilityTags = mixabilityTags
+        self.queryMode = queryMode
+        self.normalizedFinalWeights = normalizedFinalWeights
+        self.normalizedVectorWeights = normalizedVectorWeights
+        self.effectiveConstraints = effectiveConstraints
+    }
+
+    init(from decoder: Decoder) throws {
+        enum CodingKeys: String, CodingKey {
+            case vectorBreakdown
+            case matchedMemberships
+            case matchReasons
+            case analysisFocus
+            case mixabilityTags
+            case queryMode
+            case normalizedFinalWeights
+            case normalizedVectorWeights
+            case effectiveConstraints
+        }
+
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        vectorBreakdown = try container.decode(VectorScoreBreakdown.self, forKey: .vectorBreakdown)
+        matchedMemberships = try container.decodeIfPresent([String].self, forKey: .matchedMemberships) ?? []
+        matchReasons = try container.decodeIfPresent([String].self, forKey: .matchReasons) ?? []
+        analysisFocus = try container.decodeIfPresent(AnalysisFocus.self, forKey: .analysisFocus)
+        mixabilityTags = try container.decodeIfPresent([String].self, forKey: .mixabilityTags) ?? []
+        queryMode = try container.decodeIfPresent(String.self, forKey: .queryMode)
+        normalizedFinalWeights =
+            try container.decodeIfPresent(RecommendationWeights.self, forKey: .normalizedFinalWeights)
+            ?? .defaults.normalized()
+        normalizedVectorWeights =
+            try container.decodeIfPresent(MixsetVectorWeights.self, forKey: .normalizedVectorWeights)
+            ?? .defaults.normalized()
+        effectiveConstraints =
+            try container.decodeIfPresent(RecommendationConstraints.self, forKey: .effectiveConstraints)
+            ?? .defaults.normalizedForScoring()
+    }
 }
 
 struct ScoreSession: Identifiable, Codable, Hashable {
@@ -189,8 +236,7 @@ struct ScoreSessionCandidateRecord: Codable, Hashable {
 enum LibraryTrackFilter: String, CaseIterable, Identifiable {
     case all = "all"
     case ready = "ready"
-    case needsAnalysis = "needs_analysis"
-    case needsRefresh = "needs_refresh"
+    case needsPreparation = "needs_preparation"
 
     var id: String { rawValue }
 
@@ -200,10 +246,8 @@ enum LibraryTrackFilter: String, CaseIterable, Identifiable {
             return "All"
         case .ready:
             return "Ready"
-        case .needsAnalysis:
-            return "Needs Analysis"
-        case .needsRefresh:
-            return "Needs Refresh"
+        case .needsPreparation:
+            return "Needs Prep"
         }
     }
 
@@ -213,12 +257,87 @@ enum LibraryTrackFilter: String, CaseIterable, Identifiable {
             return true
         case .ready:
             return status == .ready
-        case .needsAnalysis:
-            return status == .needsAnalysis
-        case .needsRefresh:
-            return status == .needsRefresh
+        case .needsPreparation:
+            return status == .needsAnalysis || status == .needsRefresh
         }
     }
+}
+
+enum PreparationOverviewPhase: String, Equatable {
+    case idle
+    case syncing
+    case analyzing
+    case completed
+    case failed
+
+    var badgeTitle: String {
+        switch self {
+        case .idle:
+            return "Needs Prep"
+        case .syncing:
+            return "Syncing"
+        case .analyzing:
+            return "Preparing"
+        case .completed:
+            return "Ready"
+        case .failed:
+            return "Attention"
+        }
+    }
+}
+
+enum PreparationOverviewAction: String, Equatable {
+    case prepareSelection
+    case prepareVisible
+    case syncLibrary
+}
+
+enum PreparationNoticeKind: String, Equatable {
+    case canceled
+    case failed
+    case success
+}
+
+struct PreparationNotice: Equatable {
+    let kind: PreparationNoticeKind
+    let message: String
+}
+
+struct PreparationOverviewState: Equatable {
+    let phase: PreparationOverviewPhase
+    let title: String
+    let message: String
+    let progress: Double?
+    let primaryAction: PreparationOverviewAction?
+    let secondaryAction: PreparationOverviewAction?
+    let isCancellable: Bool
+    let showSuccess: Bool
+}
+
+struct PreparationOverviewContext: Equatable {
+    var selectionReadiness = SelectionReadiness(
+        signature: "",
+        selectedCount: 0,
+        readyCount: 0,
+        needsAnalysisCount: 0,
+        needsRefreshCount: 0
+    )
+    var filteredTrackCount: Int = 0
+    var filteredNeedsPreparationCount: Int = 0
+    var totalTrackCount: Int = 0
+    var hasSourceSetupIssue: Bool = false
+    var hasSyncableSource: Bool = false
+    var canPrepareSelection: Bool = false
+    var canPrepareVisible: Bool = false
+    var preparationBlockedMessage: String?
+    var isAnalyzing: Bool = false
+    var isCancellingAnalysis: Bool = false
+    var analysisActivity: AnalysisActivity?
+    var preparationNotice: PreparationNotice?
+    var analysisErrorMessage: String = ""
+    var scanProgress = ScanJobProgress()
+    var syncingSourceNames: [String] = []
+    var libraryStatusMessage: String = ""
 }
 
 enum TrackWorkflowStatus: String, Codable, Hashable {
@@ -325,7 +444,7 @@ struct ScopedTrackStatistics: Equatable {
     }
 }
 
-struct ScanJobProgress {
+struct ScanJobProgress: Equatable {
     var scannedFiles: Int = 0
     var totalFiles: Int = 0
     var indexedFiles: Int = 0
@@ -338,6 +457,23 @@ struct ScanJobProgress {
 struct ExportJobResult {
     var outputPaths: [String]
     var message: String
+    var destinationDescription: String
+    var warnings: [String]
+}
+
+struct DetectedVendorTargets: Equatable {
+    var rekordboxLibraryDirectory: String?
+    var rekordboxSettingsPath: String?
+    var seratoDatabasePath: String?
+    var seratoCratesRoot: String?
+
+    var hasRekordboxInstallation: Bool {
+        rekordboxLibraryDirectory != nil || rekordboxSettingsPath != nil
+    }
+
+    var hasSeratoCratesRoot: Bool {
+        seratoCratesRoot != nil
+    }
 }
 
 enum ValidationStatus: Equatable {

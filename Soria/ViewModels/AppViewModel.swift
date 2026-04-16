@@ -8,42 +8,57 @@ import UniformTypeIdentifiers
 @MainActor
 final class AppViewModel: ObservableObject {
     private static let uiTestMixAssistantArgument = "UITEST_START_IN_MIX_ASSISTANT"
+    private static let uiTestLibraryStatePrefix = "UITEST_LIBRARY_STATE="
 
-    @Published var selectedSection: SidebarSection = .library
-    @Published var tracks: [Track] = []
-    @Published var selectedTrackIDs: Set<UUID> = [] {
+    private enum UITestLibraryState: String {
+        case empty
+        case prepared
+        case analyzing
+    }
+
+    enum AnalysisSessionResult: Equatable {
+        case succeeded
+        case canceled
+        case failed(String?)
+    }
+
+    @Published var selectedSection: SidebarSection = .library {
         didSet {
-            guard selectedTrackIDs != oldValue else { return }
-            recommendations = []
-            searchResults = []
-            recommendationStatusMessage = ""
-            searchStatusMessage = ""
-            selectedRecommendationID = nil
-            Task { await loadSelectedTrackDetails() }
+            if !allowsScopeInspector(for: activeScopeInspectorTarget, in: selectedSection) {
+                closeScopeInspector()
+            }
         }
     }
-    @Published var mixAssistantMode: MixAssistantMode = .similarTracks
-    @Published var libraryTrackFilter: LibraryTrackFilter = .all
-    @Published var libraryScopeFilter = LibraryScopeFilter()
-    @Published var searchScopeFilter = LibraryScopeFilter()
+    @Published var tracks: [Track] = []
+    @Published var selectedTrackIDs: Set<UUID> = []
+    @Published var mixAssistantMode: MixAssistantMode = .buildMixset
+    @Published var libraryTrackFilter: LibraryTrackFilter = .all {
+        didSet {
+            guard libraryTrackFilter != oldValue else { return }
+            reconcileLibrarySelectionToVisibleTracks()
+        }
+    }
+    @Published var libraryScopeFilter = LibraryScopeFilter() {
+        didSet {
+            guard libraryScopeFilter != oldValue else { return }
+            reconcileLibrarySelectionToVisibleTracks()
+        }
+    }
     @Published var recommendationScopeFilter = LibraryScopeFilter()
     @Published var selectedTrackSegments: [TrackSegment] = []
     @Published var selectedTrackAnalysis: TrackAnalysisSummary?
     @Published var selectedTrackExternalMetadata: [ExternalDJMetadata] = []
     @Published var selectedTrackWaveformPreview: [Double] = []
     @Published var selectedRecommendationID: UUID?
-    @Published var selectedSearchResultID: UUID?
     @Published var scanProgress = ScanJobProgress()
     @Published var libraryRoots: [String] = LibraryRootsStore.loadRoots().map(TrackPathNormalizer.normalizedAbsolutePath)
     @Published var librarySources: [LibrarySourceRecord] = []
     @Published private(set) var seratoMembershipFacets: [MembershipFacet] = []
     @Published private(set) var rekordboxMembershipFacets: [MembershipFacet] = []
     @Published var isAnalyzing = false
-    @Published var isSearching = false
     @Published var recommendations: [RecommendationCandidate] = []
     @Published var recommendationStatusMessage: String = ""
     @Published var recommendationQueryText: String = ""
-    @Published var mixAssistantSimilarQueryText: String = ""
     @Published var recommendationResultLimit: Int = 20 {
         didSet {
             let clamped = RecommendationInputState.clampedResultLimit(recommendationResultLimit)
@@ -53,20 +68,21 @@ final class AppViewModel: ObservableObject {
         }
     }
     @Published var libraryStatusMessage: String = ""
-    @Published var searchResults: [TrackSearchResult] = []
-    @Published var searchMode: SearchMode = .text {
-        didSet {
-            searchResults = []
-            searchStatusMessage = ""
-        }
-    }
-    @Published var searchStatusMessage: String = ""
     @Published var exportMessage: String = ""
-    @Published var weights = RecommendationWeights()
-    @Published var constraints = RecommendationConstraints()
+    @Published var exportWarnings: [String] = []
+    @Published var exportDestinationDescription: String = ""
+    @Published var weights = RecommendationWeights() {
+        didSet { persistRecommendationScoringSettings() }
+    }
+    @Published var vectorWeights = MixsetVectorWeights() {
+        didSet { persistRecommendationScoringSettings() }
+    }
+    @Published var constraints = RecommendationConstraints() {
+        didSet { persistRecommendationScoringSettings() }
+    }
     @Published var playlistTracks: [Track] = []
     @Published var playlistTargetCount: Int = 8
-    @Published var selectedExportFormat: ExportFormat = .rekordboxXML
+    @Published var selectedExportTarget: ExportTarget = .rekordboxPlaylistM3U8
     @Published var analysisQueueProgressText: String = ""
     @Published var analysisStateByTrackID: [UUID: TrackAnalysisState] = [:]
     @Published var analysisActivity: AnalysisActivity?
@@ -81,15 +97,14 @@ final class AppViewModel: ObservableObject {
         didSet {
             refreshValidationStatus()
             recommendations = []
-            searchResults = []
             recommendationStatusMessage = ""
-            searchStatusMessage = ""
             scheduleWorkerHealthRefresh()
         }
     }
     @Published var validationStatus: ValidationStatus
     @Published var settingsStatusMessage: String = ""
     @Published var analysisErrorMessage: String = ""
+    @Published var preparationNotice: PreparationNotice?
     @Published var isShowingAnalyzeAllConfirmation = false
     @Published var analyzeAllConfirmationMessage: String = ""
     @Published var isShowingInitialSetupSheet = false
@@ -100,8 +115,10 @@ final class AppViewModel: ObservableObject {
     @Published var isRunningInitialSetup = false
     @Published var analysisScope: AnalysisScope = .selectedTrack
     @Published var isCancellingAnalysis: Bool = false
-    @Published var isCancellingSearch: Bool = false
+    @Published var isScopeInspectorPresented = false
+    @Published var activeScopeInspectorTarget: ScopeFilterTarget?
     @Published private(set) var workerProfileStatuses: [String: WorkerProfileStatus] = [:]
+    @Published private(set) var detectedVendorTargets = DetectedVendorTargets()
 
     private let database: LibraryDatabase
     private let recommendationEngine = RecommendationEngine()
@@ -111,7 +128,6 @@ final class AppViewModel: ObservableObject {
     private var pendingAnalyzeAllTrackIDs: [UUID] = []
     private var analysisTask: Task<Void, Never>?
     private var analysisWatchdogTask: Task<Void, Never>?
-    private var searchTask: Task<Void, Never>?
     private var workerHealthTask: Task<Void, Never>?
     private var validationTask: Task<Void, Never>?
     private var readyTrackIDs: Set<UUID> = []
@@ -138,31 +154,41 @@ final class AppViewModel: ObservableObject {
         await self?.invalidateTrackVectors(for: track)
     }
 
-    init() {
+    init(skipAsyncBootstrap: Bool = false) {
         AppPaths.ensureDirectories()
+        let processInfo = ProcessInfo.processInfo
+        let processArguments = processInfo.arguments
+        let processEnvironment = processInfo.environment
+        let uiTestLibraryState = Self.uiTestLibraryState(from: processArguments)
 
-        if ProcessInfo.processInfo.arguments.contains(Self.uiTestMixAssistantArgument) {
+        if processArguments.contains(Self.uiTestMixAssistantArgument) {
             selectedSection = .mixAssistant
         }
 
-        let loadedAPIKey = AppSettingsStore.loadGoogleAIAPIKey()
+        let loadedAPIKey = AppSettingsStore.loadGoogleAIAPIKey(
+            arguments: processArguments,
+            environment: processEnvironment
+        )
         let loadedPythonPath = AppSettingsStore.loadPythonExecutablePath()
         let loadedWorkerPath = AppSettingsStore.loadWorkerScriptPath()
         let loadedProfile = AppSettingsStore.loadEmbeddingProfile()
+        let loadedWeights = AppSettingsStore.loadRecommendationWeights()
+        let loadedVectorWeights = AppSettingsStore.loadMixsetVectorWeights()
+        let loadedConstraints = AppSettingsStore.loadRecommendationConstraints()
 
         self.googleAIAPIKey = loadedAPIKey
         self.pythonExecutablePath = loadedPythonPath
         self.workerScriptPath = loadedWorkerPath
         self.embeddingProfile = loadedProfile
         self.validationStatus = AppSettingsStore.currentValidationStatus(apiKey: loadedAPIKey, profile: loadedProfile)
+        self.weights = loadedWeights
+        self.vectorWeights = loadedVectorWeights
+        self.constraints = loadedConstraints
 
-        do {
-            let database = try LibraryDatabase()
-            self.database = database
-            self.librarySources = try database.fetchLibrarySources()
-        } catch {
-            fatalError("Database init failed: \(error)")
-        }
+        let databaseBootstrap = Self.bootstrapDatabase()
+        self.database = databaseBootstrap.database
+        self.librarySources = databaseBootstrap.sources
+        self.libraryStatusMessage = databaseBootstrap.statusMessage ?? ""
 
         let hasExistingRoots = !libraryRoots.isEmpty
         if hasExistingRoots {
@@ -171,6 +197,17 @@ final class AppViewModel: ObservableObject {
         }
 
         persistFolderFallbackSource()
+        refreshDetectedVendorTargets()
+
+        if let uiTestLibraryState {
+            applyUITestLibraryState(uiTestLibraryState)
+            AppLogger.shared.info("Loaded UI test library state: \(uiTestLibraryState.rawValue)")
+            return
+        }
+
+        if skipAsyncBootstrap {
+            return
+        }
 
         Task {
             await detectLibrarySources()
@@ -184,6 +221,42 @@ final class AppViewModel: ObservableObject {
 
     var selectedTrack: Track? {
         selectedTracks.first
+    }
+
+    var isSelectedExportTargetAvailable: Bool {
+        switch selectedExportTarget {
+        case .seratoCrate:
+            return detectedVendorTargets.hasSeratoCratesRoot
+        case .rekordboxPlaylistM3U8, .rekordboxLibraryXML:
+            return true
+        }
+    }
+
+    var selectedExportTargetStatusText: String {
+        switch selectedExportTarget {
+        case .rekordboxPlaylistM3U8, .rekordboxLibraryXML:
+            if let libraryDirectory = detectedVendorTargets.rekordboxLibraryDirectory {
+                return "Detected rekordbox library: \(libraryDirectory)"
+            }
+            if let settingsPath = detectedVendorTargets.rekordboxSettingsPath {
+                return "Detected rekordbox settings: \(settingsPath)"
+            }
+            return "rekordbox 6/7 was not detected. Export files can still be imported manually."
+        case .seratoCrate:
+            if let cratesRoot = detectedVendorTargets.seratoCratesRoot {
+                return "Detected Serato crate root: \(cratesRoot)"
+            }
+            return "No writable _Serato_ root was detected for direct crate export."
+        }
+    }
+
+    var libraryTableSelection: Binding<Set<UUID>> {
+        Binding(
+            get: { self.selectedTrackIDs },
+            set: { [weak self] newValue in
+                self?.updateSelectedTrackIDs(newValue, deferSideEffects: true)
+            }
+        )
     }
 
     var selectedTrackIDsInOrder: [UUID] {
@@ -215,11 +288,6 @@ final class AppViewModel: ObservableObject {
         return recommendations.first(where: { $0.id == selectedRecommendationID })
     }
 
-    var selectedSearchResult: TrackSearchResult? {
-        guard let selectedSearchResultID else { return nil }
-        return searchResults.first(where: { $0.id == selectedSearchResultID })
-    }
-
     var nativeLibrarySources: [LibrarySourceRecord] {
         librarySources.filter { $0.kind != .folderFallback }
     }
@@ -247,6 +315,75 @@ final class AppViewModel: ObservableObject {
     var libraryScopeSourceCoverageText: String {
         let counts = filteredTrackCounts(for: libraryScopeFilter)
         return "Serato \(counts.seratoCoverage) • rekordbox \(counts.rekordboxCoverage)"
+    }
+
+    var hasSyncableLibrarySource: Bool {
+        librarySources.contains { $0.enabled && $0.resolvedPath != nil }
+    }
+
+    var hasSourceSetupIssue: Bool {
+        tracks.isEmpty && !hasSyncableLibrarySource
+    }
+
+    var preparationBlockedMessage: String? {
+        if let dependencyMessage = selectedEmbeddingProfileDependencyMessage {
+            return dependencyMessage
+        }
+        if !hasValidatedEmbeddingProfile {
+            return "Validate the active analysis setup in Settings before preparing tracks."
+        }
+        return nil
+    }
+
+    var friendlyPreparationError: String? {
+        if isAnalyzing || isCancellingAnalysis {
+            return nil
+        }
+
+        let candidates: [String?] = [
+            analysisErrorMessage,
+            analysisActivity?.lastErrorMessage,
+            librarySources.first(where: { $0.status == .error })?.lastError
+        ]
+
+        for candidate in candidates {
+            let compact = Self.friendlyPreparationMessage(from: candidate)
+            if let compact, !compact.isEmpty {
+                return compact
+            }
+        }
+
+        if libraryStatusMessage.localizedCaseInsensitiveContains("failed") {
+            return "Library sync could not finish. Check Settings or the logs for details."
+        }
+
+        return nil
+    }
+
+    var preparationOverviewContext: PreparationOverviewContext {
+        PreparationOverviewContext(
+            selectionReadiness: selectionReadiness,
+            filteredTrackCount: filteredTracks.count,
+            filteredNeedsPreparationCount: filteredTracks.filter { trackWorkflowStatus(for: $0) != .ready }.count,
+            totalTrackCount: tracks.count,
+            hasSourceSetupIssue: hasSourceSetupIssue,
+            hasSyncableSource: hasSyncableLibrarySource,
+            canPrepareSelection: canAnalyzePendingSelection,
+            canPrepareVisible: canAnalyzeVisibleTracks,
+            preparationBlockedMessage: preparationBlockedMessage,
+            isAnalyzing: isAnalyzing,
+            isCancellingAnalysis: isCancellingAnalysis,
+            analysisActivity: analysisActivity,
+            preparationNotice: preparationNotice,
+            analysisErrorMessage: friendlyPreparationError ?? "",
+            scanProgress: scanProgress,
+            syncingSourceNames: librarySources.filter { $0.status == .syncing }.map { $0.kind.displayName },
+            libraryStatusMessage: libraryStatusMessage
+        )
+    }
+
+    var preparationOverview: PreparationOverviewState {
+        Self.makePreparationOverview(from: preparationOverviewContext)
     }
 
     var selectionReadiness: SelectionReadiness {
@@ -293,13 +430,6 @@ final class AppViewModel: ObservableObject {
         return !readySelectedReferenceTracks.isEmpty
     }
 
-    var similarTracksInputState: RecommendationInputState? {
-        RecommendationInputState.resolve(
-            queryText: mixAssistantSimilarQueryText,
-            readyReferenceCount: readySelectedReferenceTracks.count
-        )
-    }
-
     var recommendationInputState: RecommendationInputState? {
         RecommendationInputState.resolve(
             queryText: recommendationQueryText,
@@ -307,14 +437,21 @@ final class AppViewModel: ObservableObject {
         )
     }
 
-    var canRunSimilarTrackActions: Bool {
-        guard hasValidatedEmbeddingProfile, isSelectedEmbeddingProfileSupported else { return false }
-        return similarTracksInputState != nil && !isSearching
-    }
-
     var canRunRecommendationActions: Bool {
         guard hasValidatedEmbeddingProfile, isSelectedEmbeddingProfileSupported else { return false }
         return recommendationInputState != nil
+    }
+
+    var normalizedRecommendationWeights: RecommendationWeights {
+        weights.normalized()
+    }
+
+    var normalizedMixsetVectorWeights: MixsetVectorWeights {
+        vectorWeights.normalized()
+    }
+
+    var effectiveRecommendationConstraints: RecommendationConstraints {
+        constraints.normalizedForScoring()
     }
 
     var selectedReferenceTracksMissingEmbeddingCount: Int {
@@ -350,6 +487,11 @@ final class AppViewModel: ObservableObject {
     var canAnalyzePendingSelection: Bool {
         guard hasValidatedEmbeddingProfile, isSelectedEmbeddingProfileSupported else { return false }
         return selectionReadiness.pendingCount > 0 && !isAnalyzing && !isCancellingAnalysis
+    }
+
+    var canAnalyzeVisibleTracks: Bool {
+        guard hasValidatedEmbeddingProfile, isSelectedEmbeddingProfileSupported else { return false }
+        return filteredTracks.contains { trackWorkflowStatus(for: $0) != .ready } && !isAnalyzing && !isCancellingAnalysis
     }
 
     var canRunAnalysis: Bool {
@@ -475,6 +617,9 @@ final class AppViewModel: ObservableObject {
             fallbackTrackPath: trackPath,
             queueIndex: queueIndex,
             totalCount: totalCount
+        )
+        AppLogger.shared.info(
+            "Analysis progress | stage=\(event.stage.rawValue) | queue=\(queueIndex)/\(totalCount) | trackPath=\(trackPath) | message=\(event.message)"
         )
         updateAnalysisState(trackID: trackID, state: .running, message: event.stage.displayName, updatedAt: event.timestamp)
         updateAnalysisQueueTextFromActivity()
@@ -616,6 +761,455 @@ final class AppViewModel: ObservableObject {
             fraction: activity.stageFraction,
             trackPath: activity.currentTrackPath,
             timestamp: now
+        )
+    }
+
+    static func friendlyPreparationMessage(from raw: String?) -> String? {
+        guard let raw else { return nil }
+
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let compact = trimmed
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty && !$0.hasPrefix("Last stage:") && !$0.hasPrefix("Last event:") }
+
+        guard let compact else { return nil }
+
+        if compact.localizedCaseInsensitiveContains("timed out") {
+            return "Preparation is taking longer than expected. Check the logs if this keeps happening."
+        }
+        if compact.localizedCaseInsensitiveContains("canceled") {
+            return "Preparation was canceled."
+        }
+        if compact.localizedCaseInsensitiveContains("Library sync failed") {
+            return "Library sync could not finish. Check Settings or the logs for details."
+        }
+        if compact.localizedCaseInsensitiveContains("validate the current analysis setup") {
+            return "Validate the active analysis setup in Settings before preparing tracks."
+        }
+        return compact
+    }
+
+    private static func uiTestLibraryState(from arguments: [String]) -> UITestLibraryState? {
+        guard let argument = arguments.first(where: { $0.hasPrefix(uiTestLibraryStatePrefix) }) else {
+            return nil
+        }
+        let rawValue = String(argument.dropFirst(uiTestLibraryStatePrefix.count))
+        return UITestLibraryState(rawValue: rawValue)
+    }
+
+    private func applyUITestLibraryState(_ state: UITestLibraryState) {
+        let fixture = Self.uiTestFixture(for: state)
+
+        tracks = fixture.tracks
+        selectedTrackIDs = fixture.selectedTrackIDs
+        selectedTrackSegments = []
+        selectedTrackAnalysis = nil
+        selectedTrackExternalMetadata = []
+        selectedTrackWaveformPreview = []
+        selectedRecommendationID = nil
+        recommendations = []
+        recommendationStatusMessage = ""
+        recommendationQueryText = ""
+        recommendationResultLimit = 20
+        weights = .defaults
+        vectorWeights = .defaults
+        constraints = .defaults
+        libraryTrackFilter = .all
+        libraryScopeFilter = LibraryScopeFilter()
+        recommendationScopeFilter = LibraryScopeFilter()
+        exportMessage = ""
+        playlistTracks = []
+        analysisQueueProgressText = ""
+        analysisStateByTrackID = fixture.analysisStateByTrackID
+        analysisActivity = fixture.analysisActivity
+        scanProgress = ScanJobProgress()
+        librarySources = fixture.librarySources
+        libraryStatusMessage = fixture.libraryStatusMessage
+        seratoMembershipFacets = fixture.seratoMembershipFacets
+        rekordboxMembershipFacets = fixture.rekordboxMembershipFacets
+        readyTrackIDs = fixture.readyTrackIDs
+        membershipSnapshotsByTrackID = [:]
+        scopeTrackCache.removeAll()
+        pendingAnalyzeAllTrackIDs = []
+        pendingAnalysisTrackIDs = fixture.pendingAnalysisTrackIDs
+        isAnalyzing = fixture.isAnalyzing
+        isCancellingAnalysis = false
+        analysisErrorMessage = ""
+        preparationNotice = nil
+        isScopeInspectorPresented = false
+        activeScopeInspectorTarget = nil
+        validationStatus = fixture.validationStatus
+        workerProfileStatuses = [:]
+        settingsStatusMessage = ""
+        libraryRoots = []
+        isShowingInitialSetupSheet = false
+        isRunningInitialSetup = false
+        initialSetupStatusMessage = ""
+        if analysisActivity != nil {
+            updateAnalysisQueueTextFromActivity()
+        }
+    }
+
+    private static func uiTestFixture(
+        for state: UITestLibraryState
+    ) -> (
+        tracks: [Track],
+        readyTrackIDs: Set<UUID>,
+        librarySources: [LibrarySourceRecord],
+        libraryStatusMessage: String,
+        selectedTrackIDs: Set<UUID>,
+        analysisStateByTrackID: [UUID: TrackAnalysisState],
+        analysisActivity: AnalysisActivity?,
+        pendingAnalysisTrackIDs: [UUID],
+        isAnalyzing: Bool,
+        validationStatus: ValidationStatus,
+        seratoMembershipFacets: [MembershipFacet],
+        rekordboxMembershipFacets: [MembershipFacet]
+    ) {
+        let now = Date()
+        let facets = uiTestMembershipFacets()
+
+        let seratoSource = LibrarySourceRecord(
+            id: UUID(),
+            kind: .serato,
+            enabled: true,
+            resolvedPath: "/UITests/Serato",
+            lastSyncAt: now,
+            status: .available,
+            lastError: nil
+        )
+        let rekordboxSource = LibrarySourceRecord(
+            id: UUID(),
+            kind: .rekordbox,
+            enabled: true,
+            resolvedPath: "/UITests/rekordbox/master.db",
+            lastSyncAt: now,
+            status: .available,
+            lastError: nil
+        )
+        let fallbackSource = LibrarySourceRecord(
+            id: UUID(),
+            kind: .folderFallback,
+            enabled: false,
+            resolvedPath: nil,
+            lastSyncAt: nil,
+            status: .disabled,
+            lastError: nil
+        )
+
+        switch state {
+        case .empty:
+            return (
+                tracks: [],
+                readyTrackIDs: Set<UUID>(),
+                librarySources: [seratoSource, rekordboxSource, fallbackSource],
+                libraryStatusMessage: "",
+                selectedTrackIDs: [],
+                analysisStateByTrackID: [:],
+                analysisActivity: nil,
+                pendingAnalysisTrackIDs: [],
+                isAnalyzing: false,
+                validationStatus: .unvalidated,
+                seratoMembershipFacets: facets.serato,
+                rekordboxMembershipFacets: facets.rekordbox
+            )
+        case .prepared, .analyzing:
+            let readyTrackID = UUID()
+            let pendingTrackID = UUID()
+
+            let readyTrack = Track(
+                id: readyTrackID,
+                filePath: "/UITests/Library/ready-track.wav",
+                fileName: "ready-track.wav",
+                title: "Ready Track",
+                artist: "Fixture Artist",
+                album: "Fixture Album",
+                genre: "House",
+                duration: 243,
+                sampleRate: 44100,
+                bpm: 124.0,
+                musicalKey: "8A",
+                modifiedTime: now,
+                contentHash: "ready-track-hash",
+                analyzedAt: now,
+                embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding001.id,
+                embeddingUpdatedAt: now,
+                hasSeratoMetadata: true,
+                hasRekordboxMetadata: true,
+                bpmSource: .serato,
+                keySource: .rekordbox
+            )
+
+            let pendingTrack = Track(
+                id: pendingTrackID,
+                filePath: "/UITests/Library/pending-track.wav",
+                fileName: "pending-track.wav",
+                title: "Pending Track",
+                artist: "Fixture Artist",
+                album: "Fixture Album",
+                genre: "Tech House",
+                duration: 255,
+                sampleRate: 44100,
+                bpm: 126.0,
+                musicalKey: "9A",
+                modifiedTime: now,
+                contentHash: "pending-track-hash",
+                analyzedAt: nil,
+                embeddingProfileID: nil,
+                embeddingUpdatedAt: nil,
+                hasSeratoMetadata: true,
+                hasRekordboxMetadata: false,
+                bpmSource: .audioTags,
+                keySource: .audioTags
+            )
+
+            let analysisActivity: AnalysisActivity? = {
+                guard state == .analyzing else { return nil }
+                return AnalysisActivity.started(
+                    trackTitle: pendingTrack.title,
+                    trackPath: pendingTrack.filePath,
+                    queueIndex: 1,
+                    totalCount: 1,
+                    timeoutSec: 120,
+                    startedAt: now
+                )
+            }()
+
+            return (
+                tracks: [readyTrack, pendingTrack],
+                readyTrackIDs: Set([readyTrackID]),
+                librarySources: [seratoSource, rekordboxSource, fallbackSource],
+                libraryStatusMessage: "",
+                selectedTrackIDs: state == .analyzing ? Set([pendingTrackID]) : [],
+                analysisStateByTrackID: state == .analyzing
+                    ? [
+                        pendingTrackID: TrackAnalysisState(
+                            state: .running,
+                            message: AnalysisStage.launching.displayName,
+                            updatedAt: now
+                        )
+                    ]
+                    : [:],
+                analysisActivity: analysisActivity,
+                pendingAnalysisTrackIDs: state == .analyzing ? [pendingTrackID] : [],
+                isAnalyzing: state == .analyzing,
+                validationStatus: state == .analyzing ? .validated(now) : .unvalidated,
+                seratoMembershipFacets: facets.serato,
+                rekordboxMembershipFacets: facets.rekordbox
+            )
+        }
+    }
+
+    private static func uiTestMembershipFacets() -> (serato: [MembershipFacet], rekordbox: [MembershipFacet]) {
+        let seratoPaths = [
+            "Warmup / Deep",
+            "Warmup / Rollers",
+            "Peak / Tools",
+            "Peak / Anthems",
+            "Peak / Vocal Hits",
+            "Closing / Melodic",
+            "Closing / Euphoria",
+            "Afro / Percussive",
+            "House / Classics",
+            "House / New Heat",
+            "Minimal / Rollers",
+            "Techno / Driving",
+            "Techno / Hypnotic",
+            "Breaks / Leftfield",
+            "Garage / UKG",
+            "Disco / Edits"
+        ]
+        let rekordboxPaths = [
+            "Festival / Day 1 / Sunrise",
+            "Festival / Day 1 / Mainstage",
+            "Club / Friday / Peak",
+            "Club / Saturday / Closing"
+        ]
+
+        return (
+            serato: seratoPaths.enumerated().map { index, path in
+                uiTestMembershipFacet(source: .serato, path: path, trackCount: index % 2 == 0 ? 1 : 2)
+            },
+            rekordbox: rekordboxPaths.enumerated().map { index, path in
+                uiTestMembershipFacet(source: .rekordbox, path: path, trackCount: index % 2 == 0 ? 1 : 2)
+            }
+        )
+    }
+
+    private static func uiTestMembershipFacet(
+        source: ExternalDJMetadata.Source,
+        path: String,
+        trackCount: Int
+    ) -> MembershipFacet {
+        let segments = path.split(separator: "/").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let displayName = segments.last ?? path
+        let parentPath = segments.dropLast().isEmpty ? nil : segments.dropLast().joined(separator: " / ")
+
+        return MembershipFacet(
+            source: source,
+            membershipPath: path,
+            displayName: displayName,
+            parentPath: parentPath,
+            depth: max(segments.count - 1, 0),
+            trackCount: trackCount
+        )
+    }
+
+    static func makePreparationOverview(from context: PreparationOverviewContext) -> PreparationOverviewState {
+        let syncAction: PreparationOverviewAction? = .syncLibrary
+
+        if context.isAnalyzing || context.isCancellingAnalysis {
+            let progress = context.analysisActivity?.overallProgress
+            let trackSummary: String
+            if let activity = context.analysisActivity {
+                trackSummary = activity.totalCount > 1
+                    ? "\(activity.queueIndex) of \(activity.totalCount) • \(activity.currentTrackTitle)"
+                    : activity.currentTrackTitle
+            } else {
+                trackSummary = "Preparing tracks for the active analysis setup."
+            }
+            return PreparationOverviewState(
+                phase: .analyzing,
+                title: context.isCancellingAnalysis ? "Stopping Preparation" : "Preparing Tracks",
+                message: trackSummary,
+                progress: progress,
+                primaryAction: nil,
+                secondaryAction: nil,
+                isCancellable: true,
+                showSuccess: false
+            )
+        }
+
+        if context.scanProgress.isRunning || !context.syncingSourceNames.isEmpty {
+            let sourceSummary = context.syncingSourceNames.isEmpty
+                ? "Updating indexed library files."
+                : "Updating \(context.syncingSourceNames.joined(separator: ", "))."
+            let progress = context.scanProgress.totalFiles > 0
+                ? Double(context.scanProgress.scannedFiles) / Double(max(context.scanProgress.totalFiles, 1))
+                : nil
+            let detail = context.scanProgress.currentFile.isEmpty
+                ? sourceSummary
+                : "\(sourceSummary) Current: \(context.scanProgress.currentFile)"
+            return PreparationOverviewState(
+                phase: .syncing,
+                title: "Syncing Library",
+                message: detail,
+                progress: progress,
+                primaryAction: nil,
+                secondaryAction: nil,
+                isCancellable: false,
+                showSuccess: false
+            )
+        }
+
+        if let notice = context.preparationNotice, notice.kind == .failed {
+            return PreparationOverviewState(
+                phase: .failed,
+                title: "Preparation Needs Attention",
+                message: notice.message,
+                progress: nil,
+                primaryAction: context.canPrepareSelection ? .prepareSelection : (context.canPrepareVisible ? .prepareVisible : syncAction),
+                secondaryAction: context.canPrepareSelection || context.canPrepareVisible ? syncAction : nil,
+                isCancellable: false,
+                showSuccess: false
+            )
+        }
+
+        if !context.analysisErrorMessage.isEmpty {
+            return PreparationOverviewState(
+                phase: .failed,
+                title: "Preparation Needs Attention",
+                message: context.analysisErrorMessage,
+                progress: nil,
+                primaryAction: context.canPrepareSelection ? .prepareSelection : (context.canPrepareVisible ? .prepareVisible : syncAction),
+                secondaryAction: context.canPrepareSelection || context.canPrepareVisible ? syncAction : nil,
+                isCancellable: false,
+                showSuccess: false
+            )
+        }
+
+        if context.hasSourceSetupIssue {
+            return PreparationOverviewState(
+                phase: .idle,
+                title: "Settings Check Needed",
+                message: "Connect or enable a library in Settings to start preparing tracks.",
+                progress: nil,
+                primaryAction: nil,
+                secondaryAction: nil,
+                isCancellable: false,
+                showSuccess: false
+            )
+        }
+
+        if context.selectionReadiness.hasPendingTracks {
+            let message = context.preparationBlockedMessage ?? context.selectionReadiness.bannerMessage
+            return PreparationOverviewState(
+                phase: .idle,
+                title: "Tracks Need Preparation",
+                message: message,
+                progress: nil,
+                primaryAction: context.canPrepareSelection ? .prepareSelection : syncAction,
+                secondaryAction: context.canPrepareSelection ? syncAction : nil,
+                isCancellable: false,
+                showSuccess: false
+            )
+        }
+
+        if context.selectionReadiness.hasSelection {
+            return PreparationOverviewState(
+                phase: .completed,
+                title: "Selection Ready",
+                message: "Everything in the current selection is ready to use.",
+                progress: 1,
+                primaryAction: syncAction,
+                secondaryAction: nil,
+                isCancellable: false,
+                showSuccess: true
+            )
+        }
+
+        if context.filteredNeedsPreparationCount > 0 {
+            let blockedMessage = context.preparationBlockedMessage
+            let message = blockedMessage
+                ?? "\(context.filteredNeedsPreparationCount) visible track(s) still need preparation."
+            return PreparationOverviewState(
+                phase: .idle,
+                title: "Prepare Visible Tracks",
+                message: message,
+                progress: nil,
+                primaryAction: context.canPrepareVisible ? .prepareVisible : syncAction,
+                secondaryAction: context.canPrepareVisible ? syncAction : nil,
+                isCancellable: false,
+                showSuccess: false
+            )
+        }
+
+        if context.filteredTrackCount > 0 || context.totalTrackCount > 0 {
+            return PreparationOverviewState(
+                phase: .completed,
+                title: "Library Ready",
+                message: "Visible tracks are ready to use.",
+                progress: 1,
+                primaryAction: syncAction,
+                secondaryAction: nil,
+                isCancellable: false,
+                showSuccess: true
+            )
+        }
+
+        let emptyMessage = context.preparationBlockedMessage ?? "Sync your DJ libraries to load tracks into Soria."
+        return PreparationOverviewState(
+            phase: .idle,
+            title: "Sync Your Library",
+            message: emptyMessage,
+            progress: nil,
+            primaryAction: syncAction,
+            secondaryAction: nil,
+            isCancellable: false,
+            showSuccess: false
         )
     }
 
@@ -781,10 +1375,17 @@ final class AppViewModel: ObservableObject {
     }
 
     func syncLibraries() {
+        preparationNotice = nil
         Task {
+            let sourceNames = librarySources
+                .filter { $0.kind != .folderFallback && $0.enabled && $0.resolvedPath != nil }
+                .map(\.kind.displayName)
+                .joined(separator: ",")
+            AppLogger.shared.info("Library sync started | sources=\(sourceNames)")
             do {
                 let summary = try await syncLibrariesInternal()
                 libraryStatusMessage = summary ?? "No DJ library sources were synced."
+                AppLogger.shared.info("Library sync completed | summary=\(libraryStatusMessage)")
                 await refreshTracks()
             } catch {
                 libraryStatusMessage = "Library sync failed: \(error.localizedDescription)"
@@ -794,13 +1395,63 @@ final class AppViewModel: ObservableObject {
     }
 
     func runFallbackScan() {
+        preparationNotice = nil
         Task {
+            AppLogger.shared.info(
+                "Fallback scan started | rootCount=\(libraryRoots.count) | roots=\(libraryRoots.joined(separator: ","))"
+            )
             let summary = await runFallbackScanInternal()
             if let summary {
                 libraryStatusMessage = summary
+                AppLogger.shared.info(
+                    "Fallback scan completed | summary=\(summary) | scanned=\(scanProgress.scannedFiles) | indexed=\(scanProgress.indexedFiles) | skipped=\(scanProgress.skippedFiles) | duplicates=\(scanProgress.duplicateFiles)"
+                )
             }
             await refreshTracks()
         }
+    }
+
+    func preparationActionTitle(_ action: PreparationOverviewAction) -> String {
+        switch action {
+        case .prepareSelection:
+            return selectionReadiness.selectedCount == 1 ? "Prepare Track" : "Prepare Selection"
+        case .prepareVisible:
+            return "Prepare Visible"
+        case .syncLibrary:
+            return "Sync Libraries"
+        }
+    }
+
+    func performPreparationAction(_ action: PreparationOverviewAction) {
+        switch action {
+        case .prepareSelection:
+            analyzePendingSelection()
+        case .prepareVisible:
+            analyzeVisibleUnpreparedTracks()
+        case .syncLibrary:
+            syncLibraryFromOverview()
+        }
+    }
+
+    private func syncLibraryFromOverview() {
+        let hasEnabledNativeSource = librarySources.contains {
+            $0.kind != .folderFallback && $0.enabled && $0.resolvedPath != nil
+        }
+
+        if hasEnabledNativeSource {
+            syncLibraries()
+            return
+        }
+
+        let hasEnabledFallbackSource = librarySources.contains {
+            $0.kind == .folderFallback && $0.enabled && $0.resolvedPath != nil
+        }
+        if hasEnabledFallbackSource {
+            runFallbackScan()
+            return
+        }
+
+        AppLogger.shared.info("Library sync skipped | reason=no_enabled_sources")
     }
 
     func choosePythonExecutable() {
@@ -846,7 +1497,6 @@ final class AppViewModel: ObservableObject {
                 AppSettingsStore.clearValidationMetadata()
                 validationStatus = .unvalidated
                 recommendations = []
-                searchResults = []
             }
             settingsStatusMessage = "Analysis settings saved."
             scheduleWorkerHealthRefresh()
@@ -869,6 +1519,12 @@ final class AppViewModel: ObservableObject {
         selectedSection = .mixAssistant
     }
 
+    func resetMixsetScoringControls() {
+        weights = .defaults
+        vectorWeights = .defaults
+        constraints = .defaults
+    }
+
     func analyzeSelectedTracksFromLibrary() {
         analysisScope = .selectedTrack
         requestAnalysis()
@@ -889,13 +1545,70 @@ final class AppViewModel: ObservableObject {
         selectedSection = .library
     }
 
+    func dismissPreparationNotice() {
+        preparationNotice = nil
+    }
+
+    func openScopeInspector(for target: ScopeFilterTarget) {
+        guard allowsScopeInspector(for: target, in: selectedSection) else { return }
+        if isScopeInspectorPresented, activeScopeInspectorTarget == target {
+            closeScopeInspector()
+            return
+        }
+        activeScopeInspectorTarget = target
+        isScopeInspectorPresented = true
+    }
+
+    func closeScopeInspector() {
+        isScopeInspectorPresented = false
+        activeScopeInspectorTarget = nil
+    }
+
+    func selectedFacetCount(for target: ScopeFilterTarget) -> Int {
+        scopeFilter(for: target).selectedFacetCount
+    }
+
+    func scopeSummary(for target: ScopeFilterTarget) -> String {
+        Self.scopeSummary(
+            target: target,
+            filter: scopeFilter(for: target),
+            statistics: scopeStatistics(for: target)
+        )
+    }
+
+    func selectedScopeChipLabels(for target: ScopeFilterTarget, limit: Int? = nil) -> [String] {
+        let filter = scopeFilter(for: target)
+        let labels = filter.seratoMembershipPaths.map { membershipChipLabel(for: $0, source: .serato) }
+            + filter.rekordboxMembershipPaths.map { membershipChipLabel(for: $0, source: .rekordbox) }
+        if let limit {
+            return Array(labels.prefix(limit))
+        }
+        return labels
+    }
+
+    static func scopeSummary(
+        target: ScopeFilterTarget,
+        filter: LibraryScopeFilter,
+        statistics: ScopedTrackStatistics
+    ) -> String {
+        if filter.isEmpty {
+            switch target {
+            case .library:
+                return "All library files"
+            case .search, .recommendation:
+                return "All ready tracks from synced DJ libraries"
+            }
+        }
+
+        let filterLabel = filter.selectedFacetCount == 1 ? "filter" : "filters"
+        return "\(filter.selectedFacetCount) \(filterLabel) • \(statistics.total) tracks in scope"
+    }
+
     func copyLibraryScope(to target: ScopeFilterTarget) {
         switch target {
         case .library:
             return
-        case .search:
-            searchScopeFilter = libraryScopeFilter
-        case .recommendation:
+        case .search, .recommendation:
             recommendationScopeFilter = libraryScopeFilter
         }
     }
@@ -904,9 +1617,7 @@ final class AppViewModel: ObservableObject {
         switch target {
         case .library:
             libraryScopeFilter = LibraryScopeFilter()
-        case .search:
-            searchScopeFilter = LibraryScopeFilter()
-        case .recommendation:
+        case .search, .recommendation:
             recommendationScopeFilter = LibraryScopeFilter()
         }
     }
@@ -928,8 +1639,36 @@ final class AppViewModel: ObservableObject {
         applyScopeFilter(filter, to: target)
     }
 
+    private func membershipChipLabel(for membershipPath: String, source: ExternalDJMetadata.Source) -> String {
+        let displayName = membershipFacets(for: source)
+            .first(where: { $0.membershipPath == membershipPath })?
+            .displayName
+            ?? membershipPath
+                .split(separator: "/")
+                .last
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            ?? membershipPath
+        let sourceName = source == .serato ? "Serato" : "rekordbox"
+        return "\(sourceName): \(displayName)"
+    }
+
+    private func allowsScopeInspector(
+        for target: ScopeFilterTarget?,
+        in section: SidebarSection
+    ) -> Bool {
+        guard let target else { return false }
+        switch section {
+        case .library:
+            return target == .library
+        case .mixAssistant:
+            return target == .recommendation
+        case .exports, .settings:
+            return false
+        }
+    }
+
     func selectVisibleTracks() {
-        selectedTrackIDs = Set(filteredTracks.map(\.id))
+        updateSelectedTrackIDs(Set(filteredTracks.map(\.id)))
     }
 
     func analyzeVisibleUnpreparedTracks() {
@@ -949,9 +1688,7 @@ final class AppViewModel: ObservableObject {
             switch target {
             case .library:
                 analysisQueueProgressText = "No tracks in the current library scope need preparation."
-            case .search:
-                searchStatusMessage = "No tracks in the current search scope need preparation."
-            case .recommendation:
+            case .search, .recommendation:
                 recommendationStatusMessage = "No tracks in the current mix scope need preparation."
             }
             return
@@ -961,6 +1698,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func requestAnalysis() {
+        preparationNotice = nil
         guard isSelectedEmbeddingProfileSupported else {
             analysisErrorMessage = selectedEmbeddingProfileDependencyMessage ?? "The current analysis setup is unavailable."
             return
@@ -1010,6 +1748,7 @@ final class AppViewModel: ObservableObject {
             return
         }
 
+        preparationNotice = nil
         pendingAnalysisTrackIDs = targets.map(\.id)
         for trackID in pendingAnalysisTrackIDs {
             updateAnalysisState(trackID: trackID, state: .queued, message: "Queued")
@@ -1028,23 +1767,61 @@ final class AppViewModel: ObservableObject {
     }
 
     func cancelAnalysis() {
+        guard isAnalyzing, !isCancellingAnalysis else { return }
+        preparationNotice = nil
+        analysisErrorMessage = ""
+        isCancellingAnalysis = true
         analysisTask?.cancel()
         cancelAnalysisProgressWatchdog()
-        isCancellingAnalysis = true
-        analysisErrorMessage = "Cancelling analysis..."
-        for trackID in pendingAnalysisTrackIDs {
-            let currentState = analysisStateByTrackID[trackID]?.state
-            if currentState == .queued || currentState == .running {
-                updateAnalysisState(trackID: trackID, state: .canceled, message: "Canceled")
+
+        if analysisTask == nil {
+            finalizeAnalysisSession(result: .canceled)
+        }
+    }
+
+    func finalizeAnalysisSession(result: AnalysisSessionResult) {
+        let pendingTrackIDs = pendingAnalysisTrackIDs
+
+        cancelAnalysisProgressWatchdog()
+        isAnalyzing = false
+        isCancellingAnalysis = false
+        analysisTask = nil
+        pendingAnalysisTrackIDs = []
+
+        switch result {
+        case .succeeded:
+            analysisErrorMessage = ""
+            preparationNotice = nil
+        case .canceled:
+            analysisErrorMessage = ""
+            preparationNotice = PreparationNotice(kind: .canceled, message: "Preparation was canceled.")
+            for trackID in pendingTrackIDs {
+                let currentState = analysisStateByTrackID[trackID]?.state
+                if currentState == .queued || currentState == .running {
+                    updateAnalysisState(trackID: trackID, state: .canceled, message: "Canceled")
+                }
+            }
+            if let activity = analysisActivity, !activity.isFinished {
+                var updatedActivity = activity
+                updatedActivity.markFinished(state: AnalysisTaskState.canceled, message: "Canceled by user")
+                analysisActivity = updatedActivity
+                updateAnalysisQueueTextFromActivity()
+            }
+        case let .failed(message):
+            let failureMessage = Self.friendlyPreparationMessage(from: message) ?? "Preparation needs attention."
+            analysisErrorMessage = ""
+            preparationNotice = PreparationNotice(kind: .failed, message: failureMessage)
+            if let activity = analysisActivity, !activity.isFinished {
+                var updatedActivity = activity
+                updatedActivity.markFinished(
+                    state: AnalysisTaskState.failed,
+                    errorMessage: failureMessage,
+                    message: "Failed \(activity.currentTrackTitle)"
+                )
+                analysisActivity = updatedActivity
+                updateAnalysisQueueTextFromActivity()
             }
         }
-        if let activity = analysisActivity {
-            var updatedActivity = activity
-            updatedActivity.markFinished(state: AnalysisTaskState.canceled, message: "Canceled by user")
-            analysisActivity = updatedActivity
-            updateAnalysisQueueTextFromActivity()
-        }
-        analysisTask = nil
     }
 
     func generateRecommendations(limit: Int? = nil) {
@@ -1083,6 +1860,7 @@ final class AppViewModel: ObservableObject {
                     vectorBreakdownByPath: seedContext.vectorBreakdownByPath,
                     constraints: constraints,
                     weights: weights,
+                    vectorWeights: vectorWeights,
                     limit: effectiveLimit,
                     excludeTrackIDs: Set(playlistTracks.map(\.id)).union(excludedReferenceTrackIDs)
                 )
@@ -1143,6 +1921,7 @@ final class AppViewModel: ObservableObject {
 
         Task {
             do {
+                let effectiveConstraints = effectiveRecommendationConstraints
                 let embeddingsByTrackID = try loadTrackEmbeddings()
                 let summariesByTrackID = try loadAnalysisSummaries(trackIDs: Array(readyTrackIDs))
                 let excludedReferenceTrackIDs = Set(input.readyReferenceTracks.map(\.id))
@@ -1190,11 +1969,11 @@ final class AppViewModel: ObservableObject {
                     let similarityState = try await similarityState(
                         seed: current,
                         filters: WorkerSimilarityFilters(
-                            bpmMin: constraints.targetBPMMin,
-                            bpmMax: constraints.targetBPMMax,
-                            durationMaxSec: constraints.maxDurationMinutes.map { $0 * 60 },
-                            musicalKey: constraints.keyStrictness > 0.85 ? current.musicalKey : nil,
-                            genre: constraints.genreContinuity > 0.85 ? current.genre : nil
+                            bpmMin: effectiveConstraints.targetBPMMin,
+                            bpmMax: effectiveConstraints.targetBPMMax,
+                            durationMaxSec: effectiveConstraints.maxDurationMinutes.map { $0 * 60 },
+                            musicalKey: effectiveConstraints.keyStrictness > 0.85 ? current.musicalKey : nil,
+                            genre: effectiveConstraints.genreContinuity > 0.85 ? current.genre : nil
                         ),
                         limit: max(15, targetCount * 2),
                         excludedPaths: Set(pathTracks.map(\.filePath)),
@@ -1209,6 +1988,7 @@ final class AppViewModel: ObservableObject {
                         vectorBreakdownByPath: similarityState.vectorBreakdownByPath,
                         constraints: constraints,
                         weights: weights,
+                        vectorWeights: vectorWeights,
                         limit: 1,
                         excludeTrackIDs: Set(pathTracks.map(\.id)).union(excludedReferenceTrackIDs)
                     ).first
@@ -1254,28 +2034,67 @@ final class AppViewModel: ObservableObject {
 
     func exportPlaylist() {
         guard !playlistTracks.isEmpty else { return }
+        guard isSelectedExportTargetAvailable else {
+            exportMessage = "Export failed: \(selectedExportTargetStatusText)"
+            exportWarnings = []
+            exportDestinationDescription = ""
+            return
+        }
 
-        let panel = NSSavePanel()
-        panel.title = "Export Playlist"
-        panel.nameFieldStringValue = "Soria-Recommendation"
-        panel.canCreateDirectories = true
+        let panel = configuredExportSavePanel()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        if panel.runModal() == .OK, let url = panel.url {
-            let outputDirectory = url.deletingLastPathComponent()
-            Task {
-                do {
-                    let result = try exporter.export(
-                        playlistName: url.deletingPathExtension().lastPathComponent,
-                        tracks: playlistTracks,
-                        format: selectedExportFormat,
-                        outputDirectory: outputDirectory
-                    )
-                    exportMessage = "\(result.message): \(result.outputPaths.joined(separator: ", "))"
-                } catch {
-                    exportMessage = "Export failed: \(error.localizedDescription)"
-                }
+        exportWarnings = []
+        exportDestinationDescription = ""
+
+        let playlistName = url.deletingPathExtension().lastPathComponent
+        let outputDirectory = selectedExportTarget.requiresExplicitOutputDirectory ? url.deletingLastPathComponent() : nil
+
+        Task {
+            do {
+                let result = try exporter.export(
+                    playlistName: playlistName,
+                    tracks: playlistTracks,
+                    target: selectedExportTarget,
+                    outputDirectory: outputDirectory,
+                    librarySources: librarySources
+                )
+                exportDestinationDescription = result.destinationDescription
+                exportWarnings = result.warnings
+                exportMessage = "\(result.message): \(result.outputPaths.joined(separator: ", "))"
+                refreshDetectedVendorTargets()
+            } catch {
+                exportMessage = "Export failed: \(error.localizedDescription)"
+                exportWarnings = []
+                exportDestinationDescription = ""
             }
         }
+    }
+
+    private func configuredExportSavePanel() -> NSSavePanel {
+        let panel = NSSavePanel()
+        panel.title = selectedExportTarget == .seratoCrate ? "Create Serato Crate" : "Export Playlist"
+        panel.nameFieldStringValue = "Soria-Recommendation.\(selectedExportTarget.defaultFileExtension)"
+        panel.canCreateDirectories = selectedExportTarget.requiresExplicitOutputDirectory
+        panel.isExtensionHidden = false
+        panel.allowsOtherFileTypes = false
+
+        if let contentType = UTType(filenameExtension: selectedExportTarget.defaultFileExtension) {
+            panel.allowedContentTypes = [contentType]
+        }
+
+        switch selectedExportTarget {
+        case .rekordboxPlaylistM3U8, .rekordboxLibraryXML:
+            panel.message = selectedExportTarget.helperText
+        case .seratoCrate:
+            if let cratesRoot = detectedVendorTargets.seratoCratesRoot {
+                panel.directoryURL = URL(fileURLWithPath: cratesRoot, isDirectory: true)
+                    .appendingPathComponent("Subcrates", isDirectory: true)
+            }
+            panel.message = "Choose the Serato crate name. Soria writes the file directly into the detected _Serato_/Subcrates folder."
+        }
+
+        return panel
     }
 
     func loadExternalMetadata() {
@@ -1343,301 +2162,8 @@ final class AppViewModel: ObservableObject {
         return panel.runModal() == .OK ? panel.urls : nil
     }
 
-    func searchTracks(
-        queryText: String,
-        bpmMin: Double?,
-        bpmMax: Double?,
-        musicalKey: String,
-        genre: String,
-        analysisFocus: AnalysisFocus?,
-        mixabilityTags: [String],
-        maxDurationMinutes: Double?,
-        limit: Int = 25
-    ) {
-        guard hasValidatedEmbeddingProfile else {
-            searchStatusMessage = "Validate the current analysis setup first."
-            return
-        }
-        guard isSelectedEmbeddingProfileSupported else {
-            searchStatusMessage = selectedEmbeddingProfileDependencyMessage ?? "The current analysis setup is unavailable."
-            return
-        }
-
-        let filters = WorkerSimilarityFilters(
-            bpmMin: bpmMin,
-            bpmMax: bpmMax,
-            durationMaxSec: maxDurationMinutes.map { $0 * 60 },
-            musicalKey: musicalKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : musicalKey,
-            genre: genre.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : genre
-        )
-
-        searchTask?.cancel()
-        isSearching = true
-        searchResults = []
-        selectedSearchResultID = nil
-        searchStatusMessage = ""
-
-        searchTask = Task {
-            defer {
-                isSearching = false
-                isCancellingSearch = false
-            }
-
-            do {
-                if Task.isCancelled {
-                    return
-                }
-
-                switch searchMode {
-                case .text:
-                    let trimmedQuery = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmedQuery.isEmpty else {
-                        searchStatusMessage = "Enter a text query first."
-                        return
-                    }
-                    let execution = try await executeVectorSearch(
-                        mode: .text,
-                        queryText: trimmedQuery,
-                        referencePayload: nil,
-                        filters: filters,
-                        limit: limit,
-                        scopeFilter: searchScopeFilter
-                    )
-                    searchResults = try makeTrackSearchResults(
-                        from: execution.candidates,
-                        analysisFocus: analysisFocus,
-                        mixabilityTags: mixabilityTags,
-                        scopeFilter: searchScopeFilter,
-                        mode: .text,
-                        queryText: trimmedQuery,
-                        referenceTrackIDs: [],
-                        candidateCountBeforeScope: execution.candidateCountBeforeScope,
-                        candidateCountAfterScope: execution.candidateCountAfterScope,
-                        limit: limit
-                    )
-
-                case .referenceTrack:
-                    let selectedReferenceTracks = selectedTracks.filter {
-                        readyTrackIDs.contains($0.id)
-                    }
-                    guard !selectedReferenceTracks.isEmpty else {
-                        searchStatusMessage = "Select one or more reference tracks."
-                        return
-                    }
-                    guard let referenceData = buildReferenceTrackSearchPayload(from: selectedReferenceTracks) else {
-                        searchStatusMessage = "Selected track(s) do not have active embeddings yet."
-                        return
-                    }
-
-                    let execution = try await executeVectorSearch(
-                        mode: .reference,
-                        queryText: nil,
-                        referencePayload: referenceData,
-                        filters: filters,
-                        limit: limit,
-                        scopeFilter: searchScopeFilter
-                    )
-                    searchResults = try makeTrackSearchResults(
-                        from: execution.candidates,
-                        analysisFocus: analysisFocus,
-                        mixabilityTags: mixabilityTags,
-                        scopeFilter: searchScopeFilter,
-                        mode: .reference,
-                        queryText: nil,
-                        referenceTrackIDs: selectedReferenceTracks.map(\.id),
-                        candidateCountBeforeScope: execution.candidateCountBeforeScope,
-                        candidateCountAfterScope: execution.candidateCountAfterScope,
-                        limit: limit
-                    )
-                }
-
-                if Task.isCancelled {
-                    return
-                }
-
-                selectedSearchResultID = searchResults.first?.id
-                searchStatusMessage = searchResults.isEmpty ? "No semantic matches found." : "Found \(searchResults.count) semantic matches."
-            } catch {
-                if Task.isCancelled {
-                    return
-                }
-                searchStatusMessage = "Search failed: \(error.localizedDescription)"
-                AppLogger.shared.error("Search failed: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    func searchSimilarTracks(
-        bpmMin: Double?,
-        bpmMax: Double?,
-        musicalKey: String,
-        genre: String,
-        analysisFocus: AnalysisFocus?,
-        mixabilityTags: [String],
-        maxDurationMinutes: Double?,
-        limit: Int = 25
-    ) {
-        guard hasValidatedEmbeddingProfile else {
-            searchStatusMessage = "Validate the current analysis setup first."
-            return
-        }
-        guard isSelectedEmbeddingProfileSupported else {
-            searchStatusMessage = selectedEmbeddingProfileDependencyMessage ?? "The current analysis setup is unavailable."
-            return
-        }
-
-        let queryText = mixAssistantSimilarQueryText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let inputState = RecommendationInputState.resolve(
-            queryText: queryText,
-            readyReferenceCount: readySelectedReferenceTracks.count
-        )
-        guard let inputState else {
-            if queryText.isEmpty, selectedTracks.isEmpty {
-                searchStatusMessage = "Enter text or select one or more library tracks first."
-            } else if queryText.isEmpty {
-                searchStatusMessage = "Prepare at least one selected track first, or add text to search from words alone."
-            } else {
-                searchStatusMessage = "No similarity input is ready yet."
-            }
-            return
-        }
-
-        let filters = WorkerSimilarityFilters(
-            bpmMin: bpmMin,
-            bpmMax: bpmMax,
-            durationMaxSec: maxDurationMinutes.map { $0 * 60 },
-            musicalKey: musicalKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : musicalKey,
-            genre: genre.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : genre
-        )
-
-        searchTask?.cancel()
-        isSearching = true
-        searchResults = []
-        selectedSearchResultID = nil
-        searchStatusMessage = ""
-
-        searchTask = Task {
-            defer {
-                isSearching = false
-                isCancellingSearch = false
-            }
-
-            do {
-                if Task.isCancelled {
-                    return
-                }
-
-                switch inputState.mode {
-                case .text:
-                    let execution = try await executeVectorSearch(
-                        mode: .text,
-                        queryText: inputState.trimmedQueryText,
-                        referencePayload: nil,
-                        filters: filters,
-                        limit: limit,
-                        scopeFilter: searchScopeFilter
-                    )
-                    searchResults = try makeTrackSearchResults(
-                        from: execution.candidates,
-                        analysisFocus: analysisFocus,
-                        mixabilityTags: mixabilityTags,
-                        scopeFilter: searchScopeFilter,
-                        mode: .text,
-                        queryText: inputState.trimmedQueryText,
-                        referenceTrackIDs: [],
-                        candidateCountBeforeScope: execution.candidateCountBeforeScope,
-                        candidateCountAfterScope: execution.candidateCountAfterScope,
-                        limit: limit
-                    )
-
-                case .reference:
-                    guard let referenceData = buildReferenceTrackSearchPayload(from: readySelectedReferenceTracks) else {
-                        searchStatusMessage = "Prepare at least one selected track before using the current selection as a reference."
-                        return
-                    }
-
-                    let execution = try await executeVectorSearch(
-                        mode: .reference,
-                        queryText: nil,
-                        referencePayload: referenceData,
-                        filters: filters,
-                        limit: limit,
-                        scopeFilter: searchScopeFilter
-                    )
-                    searchResults = try makeTrackSearchResults(
-                        from: execution.candidates,
-                        analysisFocus: analysisFocus,
-                        mixabilityTags: mixabilityTags,
-                        scopeFilter: searchScopeFilter,
-                        mode: .reference,
-                        queryText: nil,
-                        referenceTrackIDs: readySelectedReferenceTracks.map(\.id),
-                        candidateCountBeforeScope: execution.candidateCountBeforeScope,
-                        candidateCountAfterScope: execution.candidateCountAfterScope,
-                        limit: limit
-                    )
-
-                case .hybrid:
-                    guard let referenceData = buildReferenceTrackSearchPayload(from: readySelectedReferenceTracks) else {
-                        searchStatusMessage = "Prepare at least one selected track before blending it with text."
-                        return
-                    }
-
-                    let execution = try await executeVectorSearch(
-                        mode: .hybrid,
-                        queryText: inputState.trimmedQueryText,
-                        referencePayload: referenceData,
-                        filters: filters,
-                        limit: limit,
-                        scopeFilter: searchScopeFilter
-                    )
-                    searchResults = try makeTrackSearchResults(
-                        from: execution.candidates,
-                        analysisFocus: analysisFocus,
-                        mixabilityTags: mixabilityTags,
-                        scopeFilter: searchScopeFilter,
-                        mode: .hybrid,
-                        queryText: inputState.trimmedQueryText,
-                        referenceTrackIDs: readySelectedReferenceTracks.map(\.id),
-                        candidateCountBeforeScope: execution.candidateCountBeforeScope,
-                        candidateCountAfterScope: execution.candidateCountAfterScope,
-                        limit: limit
-                    )
-                }
-
-                if Task.isCancelled {
-                    return
-                }
-
-                selectedSearchResultID = searchResults.first?.id
-                searchStatusMessage = searchResults.isEmpty ? "No similar tracks found for the current inputs." : "Found \(searchResults.count) similar tracks."
-            } catch {
-                if Task.isCancelled {
-                    return
-                }
-                searchStatusMessage = "Search failed: \(error.localizedDescription)"
-                AppLogger.shared.error("Search failed: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    func analyzeSelectedTrackForSearch() {
-        analysisScope = .selectedTrack
-        requestAnalysis()
-    }
-
-    func analyzeSelectedTracksForSearch() {
-        analyzePendingSelection()
-    }
-
     func analyzeSelectedTracksForRecommendations() {
         analyzePendingSelection()
-    }
-
-    func cancelSearch() {
-        searchTask?.cancel()
-        isCancellingSearch = true
-        searchStatusMessage = "Canceling search..."
     }
 
     func refreshTracks() async {
@@ -1649,18 +2175,18 @@ final class AppViewModel: ObservableObject {
             try refreshMembershipFacets()
             let availableIDs = Set(tracks.map(\.id))
             analysisStateByTrackID = analysisStateByTrackID.filter { availableIDs.contains($0.key) }
-            if selectedTrackIDs.isEmpty {
-                selectedTrackIDs = tracks.first.map { Set([$0.id]) } ?? []
-            } else {
-                let preservedIDs = selectedTrackIDs.intersection(availableIDs)
-                if preservedIDs.isEmpty {
-                    selectedTrackIDs = tracks.first.map { Set([$0.id]) } ?? []
-                } else {
-                    selectedTrackIDs = preservedIDs
+            let reconciledSelection = resolvedSelection(for: availableIDs)
+            if reconciledSelection != selectedTrackIDs {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    let currentAvailableIDs = Set(self.tracks.map(\.id))
+                    let validSelection = reconciledSelection.intersection(currentAvailableIDs)
+                    guard self.selectedTrackIDs != validSelection else { return }
+                    self.updateSelectedTrackIDs(validSelection)
                 }
+            } else {
+                await loadSelectedTrackDetails()
             }
-
-            await loadSelectedTrackDetails()
         } catch {
             AppLogger.shared.error("Track reload failed: \(error.localizedDescription)")
         }
@@ -1675,25 +2201,22 @@ final class AppViewModel: ObservableObject {
 
         isAnalyzing = true
         analysisErrorMessage = ""
+        preparationNotice = nil
         if analysisActivity == nil {
             prepareAnalysisSession(for: tracksToAnalyze)
         }
         isCancellingAnalysis = false
         let batchStartedAt = Date()
+        var sessionResult: AnalysisSessionResult = .succeeded
         defer {
-            isAnalyzing = false
-            analysisTask = nil
-            pendingAnalysisTrackIDs = []
-            cancelAnalysisProgressWatchdog()
-            if Task.isCancelled {
-                analysisErrorMessage = "Analysis was canceled."
-            }
+            finalizeAnalysisSession(result: sessionResult)
         }
 
         for (index, track) in tracksToAnalyze.enumerated() {
             let queueIndex = index + 1
             let trackStartedAt = Date()
             if Task.isCancelled {
+                sessionResult = .canceled
                 analysisQueueProgressText = "Canceled: \(index) / \(tracksToAnalyze.count)"
                 for pendingTrack in tracksToAnalyze[index...] {
                     updateAnalysisState(trackID: pendingTrack.id, state: .canceled, message: "Canceled")
@@ -1945,6 +2468,7 @@ final class AppViewModel: ObservableObject {
                 }
             } catch {
                 if Task.isCancelled || (error as? WorkerError).map({ if case .cancelled = $0 { return true } else { return false } }) == true {
+                    sessionResult = .canceled
                     updateAnalysisState(trackID: track.id, state: .canceled, message: "Canceled")
                     cancelAnalysisProgressWatchdog()
                     finishAnalysisActivity(
@@ -1964,6 +2488,9 @@ final class AppViewModel: ObservableObject {
                     continue
                 }
                 let decoratedError = decoratedAnalysisError(error)
+                if sessionResult != .canceled {
+                    sessionResult = .failed(decoratedError)
+                }
                 updateAnalysisState(
                     trackID: track.id,
                     state: .failed,
@@ -1976,7 +2503,6 @@ final class AppViewModel: ObservableObject {
                     totalCount: tracksToAnalyze.count,
                     errorMessage: decoratedError
                 )
-                analysisErrorMessage = decoratedError
                 cancelAnalysisProgressWatchdog()
                 AppLogger.shared.error("Analyze failed for \(track.filePath): \(decoratedError)")
             }
@@ -2048,6 +2574,67 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    private func resolvedSelection(for availableIDs: Set<UUID>) -> Set<UUID> {
+        if selectedTrackIDs.isEmpty {
+            return []
+        }
+
+        let preservedIDs = selectedTrackIDs.intersection(availableIDs)
+        if preservedIDs.isEmpty {
+            return []
+        }
+        return preservedIDs
+    }
+
+    private func updateSelectedTrackIDs(_ newValue: Set<UUID>, deferSideEffects: Bool = false) {
+        guard selectedTrackIDs != newValue else { return }
+        selectedTrackIDs = newValue
+
+        if deferSideEffects {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.selectedTrackIDs == newValue else { return }
+                self.handleSelectedTrackIDsChange()
+            }
+        } else {
+            handleSelectedTrackIDsChange()
+        }
+    }
+
+    private func handleSelectedTrackIDsChange() {
+        recommendations = []
+        recommendationStatusMessage = ""
+        selectedRecommendationID = nil
+        Task { await loadSelectedTrackDetails() }
+    }
+
+    private static func bootstrapDatabase() -> (
+        database: LibraryDatabase,
+        sources: [LibrarySourceRecord],
+        statusMessage: String?
+    ) {
+        do {
+            let database = try LibraryDatabase()
+            return (database, try database.fetchLibrarySources(), nil)
+        } catch {
+            AppLogger.shared.error(
+                "Primary database init failed | path=\(AppPaths.databaseURL.path) | error=\(error.localizedDescription)"
+            )
+
+            let recoveryURL = AppPaths.makeRecoveryDatabaseURL()
+            do {
+                let recoveryDatabase = try LibraryDatabase(databaseURL: recoveryURL)
+                let recoverySources = try recoveryDatabase.fetchLibrarySources()
+                let message = "Could not open the existing library database. Soria started with a temporary empty library instead."
+                AppLogger.shared.error(
+                    "Recovery database activated | path=\(recoveryURL.path) | reason=\(error.localizedDescription)"
+                )
+                return (recoveryDatabase, recoverySources, message)
+            } catch {
+                fatalError("Database init failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func buildReferenceTrackSearchPayload(from tracks: [Track]) -> (
         trackEmbedding: [Double],
         segments: [TrackSegment],
@@ -2111,6 +2698,7 @@ final class AppViewModel: ObservableObject {
         limit: Int,
         scopeFilter: LibraryScopeFilter
     ) async throws -> VectorSearchExecution {
+        let workerWeights = normalizedMixsetVectorWeights.asWorkerWeights()
         let excludedPaths = referencePayload?.excludeTrackPaths ?? []
         let baseCandidates = tracks.filter { track in
             readyTrackIDs.contains(track.id)
@@ -2127,7 +2715,8 @@ final class AppViewModel: ObservableObject {
                     query: queryText ?? "",
                     limit: limit,
                     excludeTrackPaths: Array(excludedPaths),
-                    filters: filters
+                    filters: filters,
+                    weights: workerWeights
                 )
             case .reference:
                 guard let referencePayload else {
@@ -2139,7 +2728,8 @@ final class AppViewModel: ObservableObject {
                     trackEmbedding: referencePayload.trackEmbedding,
                     limit: limit,
                     excludeTrackPaths: Array(excludedPaths),
-                    filters: filters
+                    filters: filters,
+                    weights: workerWeights
                 )
             case .hybrid:
                 guard let referencePayload else {
@@ -2151,7 +2741,8 @@ final class AppViewModel: ObservableObject {
                     trackEmbedding: referencePayload.trackEmbedding,
                     limit: limit,
                     excludeTrackPaths: Array(excludedPaths),
-                    filters: filters
+                    filters: filters,
+                    weights: workerWeights
                 )
             }
 
@@ -2184,12 +2775,11 @@ final class AppViewModel: ObservableObject {
             trackEmbedding: referencePayload?.trackEmbedding,
             segments: referencePayload?.segments ?? []
         )
-        let weights = PythonWorkerClient.defaultSearchWeights(for: mode)
         let exactCandidates = try scopedCandidates.compactMap { track -> VectorSearchCandidate? in
             guard let vectorBreakdown = try exactVectorBreakdown(
                 for: track,
                 queryEmbeddings: queryResponse.queryEmbeddings,
-                weights: weights
+                vectorWeights: normalizedMixsetVectorWeights
             ) else {
                 return nil
             }
@@ -2208,111 +2798,6 @@ final class AppViewModel: ObservableObject {
         )
     }
 
-    private func makeTrackSearchResults(
-        from candidates: [VectorSearchCandidate],
-        analysisFocus: AnalysisFocus?,
-        mixabilityTags: [String],
-        scopeFilter: LibraryScopeFilter,
-        mode: WorkerTrackSearchMode,
-        queryText: String?,
-        referenceTrackIDs: [UUID],
-        candidateCountBeforeScope: Int,
-        candidateCountAfterScope: Int,
-        limit: Int
-    ) throws -> [TrackSearchResult] {
-        let summariesByTrackID = try loadAnalysisSummaries(trackIDs: candidates.map(\.track.id))
-        let preliminary = candidates.compactMap { candidate -> TrackSearchResult? in
-            let summary = summariesByTrackID[candidate.track.id]
-            if let analysisFocus, summary?.analysisFocus != analysisFocus {
-                return nil
-            }
-            if !mixabilityTags.isEmpty {
-                let trackTags = Set(summary?.mixabilityTags ?? [])
-                if !mixabilityTags.allSatisfy(trackTags.contains) {
-                    return nil
-                }
-            }
-
-            return TrackSearchResult(
-                track: candidate.track,
-                score: candidate.vectorBreakdown.fusedScore,
-                trackScore: candidate.vectorBreakdown.trackScore,
-                introScore: candidate.vectorBreakdown.introScore,
-                middleScore: candidate.vectorBreakdown.middleScore,
-                outroScore: candidate.vectorBreakdown.outroScore,
-                bestMatchedCollection: collectionDisplayName(candidate.vectorBreakdown.bestMatchedCollection),
-                analysisFocus: summary?.analysisFocus,
-                mixabilityTags: summary?.mixabilityTags ?? [],
-                matchReasons: searchMatchReasons(
-                    summary: summary,
-                    vectorBreakdown: candidate.vectorBreakdown,
-                    matchedMemberships: candidate.matchedMemberships
-                ),
-                scoreSessionID: nil,
-                matchedMemberships: candidate.matchedMemberships,
-                vectorBreakdown: candidate.vectorBreakdown
-            )
-        }
-
-        let session = ScoreSession(
-            id: UUID(),
-            kind: .search,
-            embeddingProfileID: embeddingProfile.id,
-            searchMode: mode.rawValue,
-            queryText: queryText?.trimmingCharacters(in: .whitespacesAndNewlines),
-            seedTrackID: nil,
-            referenceTrackIDs: referenceTrackIDs,
-            scopeFilter: scopeFilter,
-            candidateCountBeforeScope: candidateCountBeforeScope,
-            candidateCountAfterScope: candidateCountAfterScope,
-            resultLimit: limit,
-            createdAt: Date()
-        )
-
-        let sessionCandidates = preliminary.enumerated().map { index, result in
-            ScoreSessionCandidateRecord(
-                trackID: result.track.id,
-                rank: index + 1,
-                finalScore: result.score,
-                vectorBreakdown: result.vectorBreakdown,
-                embeddingSimilarity: nil,
-                bpmCompatibility: nil,
-                harmonicCompatibility: nil,
-                energyFlow: nil,
-                transitionRegionMatch: nil,
-                externalMetadataScore: nil,
-                matchedMemberships: result.matchedMemberships,
-                matchReasons: result.matchReasons,
-                snapshot: ScoreSessionCandidateSnapshot(
-                    vectorBreakdown: result.vectorBreakdown,
-                    matchedMemberships: result.matchedMemberships,
-                    matchReasons: result.matchReasons,
-                    analysisFocus: result.analysisFocus,
-                    mixabilityTags: result.mixabilityTags,
-                    queryMode: mode.rawValue
-                )
-            )
-        }
-        let sessionID = try database.insertScoreSession(session: session, candidates: sessionCandidates)
-        return preliminary.map { result in
-            TrackSearchResult(
-                track: result.track,
-                score: result.score,
-                trackScore: result.trackScore,
-                introScore: result.introScore,
-                middleScore: result.middleScore,
-                outroScore: result.outroScore,
-                bestMatchedCollection: result.bestMatchedCollection,
-                analysisFocus: result.analysisFocus,
-                mixabilityTags: result.mixabilityTags,
-                matchReasons: result.matchReasons,
-                scoreSessionID: sessionID,
-                matchedMemberships: result.matchedMemberships,
-                vectorBreakdown: result.vectorBreakdown
-            )
-        }
-    }
-
     private func trackMatchesSimilarityFilters(track: Track, filters: WorkerSimilarityFilters) -> Bool {
         let bpmValue = track.bpm ?? -1
         if let bpmMin = filters.bpmMin, bpmValue < bpmMin { return false }
@@ -2326,7 +2811,7 @@ final class AppViewModel: ObservableObject {
     private func exactVectorBreakdown(
         for track: Track,
         queryEmbeddings: [String: [Double]],
-        weights: [String: Double]
+        vectorWeights: MixsetVectorWeights
     ) throws -> VectorScoreBreakdown? {
         let trackEmbedding = try database.fetchTrackEmbedding(trackID: track.id)
         let segments = try database.fetchSegments(trackID: track.id).filter { segment in
@@ -2338,11 +2823,12 @@ final class AppViewModel: ObservableObject {
         let introScore = bestSegmentSimilarity(queryEmbeddings["intro"], type: .intro, segments: segments)
         let middleScore = bestSegmentSimilarity(queryEmbeddings["middle"], type: .middle, segments: segments)
         let outroScore = bestSegmentSimilarity(queryEmbeddings["outro"], type: .outro, segments: segments)
-        let fusedScore =
-            (weights["tracks"] ?? 0) * trackScore +
-            (weights["intro"] ?? 0) * introScore +
-            (weights["middle"] ?? 0) * middleScore +
-            (weights["outro"] ?? 0) * outroScore
+        let fusedScore = vectorWeights.fusedScore(
+            trackScore: trackScore,
+            introScore: introScore,
+            middleScore: middleScore,
+            outroScore: outroScore
+        )
 
         let components = [
             ("tracks", trackScore),
@@ -2464,6 +2950,7 @@ final class AppViewModel: ObservableObject {
         limit: Int,
         excludedPaths: Set<String>
     ) async throws -> RecommendationSeedContext {
+        let effectiveConstraints = effectiveRecommendationConstraints
         switch input.state.seedSource {
         case .selectedReference:
             guard let seed = input.readyReferenceTracks.first else {
@@ -2472,11 +2959,11 @@ final class AppViewModel: ObservableObject {
             let similarityState = try await similarityState(
                 seed: seed,
                 filters: WorkerSimilarityFilters(
-                    bpmMin: constraints.targetBPMMin,
-                    bpmMax: constraints.targetBPMMax,
-                    durationMaxSec: constraints.maxDurationMinutes.map { $0 * 60 },
-                    musicalKey: constraints.keyStrictness > 0.85 ? seed.musicalKey : nil,
-                    genre: constraints.genreContinuity > 0.85 ? seed.genre : nil
+                    bpmMin: effectiveConstraints.targetBPMMin,
+                    bpmMax: effectiveConstraints.targetBPMMax,
+                    durationMaxSec: effectiveConstraints.maxDurationMinutes.map { $0 * 60 },
+                    musicalKey: effectiveConstraints.keyStrictness > 0.85 ? seed.musicalKey : nil,
+                    genre: effectiveConstraints.genreContinuity > 0.85 ? seed.genre : nil
                 ),
                 limit: max(limit, 1),
                 excludedPaths: excludedPaths,
@@ -2501,7 +2988,7 @@ final class AppViewModel: ObservableObject {
                 guard recommendationEngine.matchesConstraints(
                     track: track,
                     summary: summariesByTrackID[track.id],
-                    constraints: constraints
+                    constraints: effectiveConstraints
                 ) else {
                     return nil
                 }
@@ -2576,10 +3063,11 @@ final class AppViewModel: ObservableObject {
     }
 
     private func recommendationWorkerFilters() -> WorkerSimilarityFilters {
+        let effectiveConstraints = effectiveRecommendationConstraints
         return WorkerSimilarityFilters(
-            bpmMin: constraints.targetBPMMin,
-            bpmMax: constraints.targetBPMMax,
-            durationMaxSec: constraints.maxDurationMinutes.map { $0 * 60 },
+            bpmMin: effectiveConstraints.targetBPMMin,
+            bpmMax: effectiveConstraints.targetBPMMax,
+            durationMaxSec: effectiveConstraints.maxDurationMinutes.map { $0 * 60 },
             musicalKey: nil,
             genre: nil
         )
@@ -2652,6 +3140,9 @@ final class AppViewModel: ObservableObject {
             resultLimit: resultLimit,
             createdAt: Date()
         )
+        let normalizedFinalWeights = normalizedRecommendationWeights
+        let normalizedVectorWeights = normalizedMixsetVectorWeights
+        let effectiveConstraints = effectiveRecommendationConstraints
         let sessionCandidates = candidates.enumerated().map { index, candidate in
             let matchedMemberships = candidate.matchedMemberships.isEmpty
                 ? membershipSnapshotsByTrackID[candidate.track.id]?.matchedPaths(scopeFilter: recommendationScopeFilter) ?? []
@@ -2675,7 +3166,10 @@ final class AppViewModel: ObservableObject {
                     matchReasons: candidate.matchReasons,
                     analysisFocus: candidate.analysisFocus,
                     mixabilityTags: candidate.mixabilityTags,
-                    queryMode: recommendationInputState?.mode.rawValue
+                    queryMode: recommendationInputState?.mode.rawValue,
+                    normalizedFinalWeights: normalizedFinalWeights,
+                    normalizedVectorWeights: normalizedVectorWeights,
+                    effectiveConstraints: effectiveConstraints
                 )
             )
         }
@@ -2687,6 +3181,12 @@ final class AppViewModel: ObservableObject {
         workerScriptPath = AppSettingsStore.saveWorkerScriptPath(workerScriptPath)
         AppSettingsStore.saveEmbeddingProfile(embeddingProfile)
         try AppSettingsStore.saveGoogleAIAPIKey(googleAIAPIKey)
+    }
+
+    private func persistRecommendationScoringSettings() {
+        AppSettingsStore.saveRecommendationWeights(weights)
+        AppSettingsStore.saveMixsetVectorWeights(vectorWeights)
+        AppSettingsStore.saveRecommendationConstraints(constraints)
     }
 
     private func addLibraryRoots(_ paths: [String]) {
@@ -2772,7 +3272,6 @@ final class AppViewModel: ObservableObject {
         validationStatus = AppSettingsStore.currentValidationStatus(apiKey: googleAIAPIKey, profile: embeddingProfile)
         if !validationStatus.isValidated {
             recommendations = []
-            searchResults = []
         }
     }
 
@@ -2946,6 +3445,7 @@ final class AppViewModel: ObservableObject {
         }
 
         librarySources = detected
+        refreshDetectedVendorTargets()
         for source in detected {
             persistLibrarySource(source)
         }
@@ -3017,6 +3517,7 @@ final class AppViewModel: ObservableObject {
     private func persistLibraryRoots() {
         LibraryRootsStore.saveRoots(libraryRoots)
         persistFolderFallbackSource()
+        refreshDetectedVendorTargets()
     }
 
     private func persistFolderFallbackSource() {
@@ -3036,6 +3537,10 @@ final class AppViewModel: ObservableObject {
             librarySources.sort { $0.kind.rawValue < $1.kind.rawValue }
         }
         try? database.upsertLibrarySource(source)
+    }
+
+    private func refreshDetectedVendorTargets() {
+        detectedVendorTargets = exporter.detectTargets(librarySources: librarySources)
     }
 
     private func refreshMembershipFacets() throws {
@@ -3095,9 +3600,7 @@ final class AppViewModel: ObservableObject {
         switch target {
         case .library:
             return libraryScopeFilter
-        case .search:
-            return searchScopeFilter
-        case .recommendation:
+        case .search, .recommendation:
             return recommendationScopeFilter
         }
     }
@@ -3106,11 +3609,19 @@ final class AppViewModel: ObservableObject {
         switch target {
         case .library:
             libraryScopeFilter = filter
-        case .search:
-            searchScopeFilter = filter
-        case .recommendation:
+        case .search, .recommendation:
             recommendationScopeFilter = filter
         }
+    }
+
+    private func reconcileLibrarySelectionToVisibleTracks() {
+        guard !selectedTrackIDs.isEmpty else { return }
+
+        let visibleTrackIDs = Set(filteredTracks.map(\.id))
+        let reconciledSelection = selectedTrackIDs.intersection(visibleTrackIDs)
+        guard reconciledSelection != selectedTrackIDs else { return }
+
+        updateSelectedTrackIDs(reconciledSelection, deferSideEffects: true)
     }
 
     private func filteredTrackCounts(for filter: LibraryScopeFilter) -> ScopedTrackStatistics {
@@ -3218,27 +3729,6 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func searchMatchReasons(
-        summary: TrackAnalysisSummary?,
-        vectorBreakdown: VectorScoreBreakdown,
-        matchedMemberships: [String]
-    ) -> [String] {
-        var reasons: [String] = [collectionDisplayName(vectorBreakdown.bestMatchedCollection)]
-        if vectorBreakdown.trackScore >= 0.7 {
-            reasons.append("Strong full-track match")
-        }
-        if let matchedMembership = matchedMemberships.first {
-            reasons.append(matchedMembership)
-        }
-        if let summary {
-            reasons.append(summary.analysisFocus.displayName)
-            reasons.append(contentsOf: summary.mixabilityTags.prefix(2).map {
-                $0.replacingOccurrences(of: "_", with: " ").capitalized
-            })
-        }
-        let ordered = NSOrderedSet(array: reasons).array as? [String] ?? reasons
-        return Array(ordered.prefix(3))
-    }
 }
 
 private enum AnalysisMode {
@@ -3299,12 +3789,12 @@ private enum RecommendationResolutionError: LocalizedError {
     }
 }
 
-private struct MetadataImportSummary {
+struct MetadataImportSummary {
     let source: ExternalDJMetadata.Source
     let importedEntries: Int
     let matchedTracks: Int
 
-    var displayText: String {
+    nonisolated var displayText: String {
         let sourceName = source == .rekordbox ? "rekordbox" : "Serato"
         return "\(sourceName): \(matchedTracks) matched / \(importedEntries) imported"
     }

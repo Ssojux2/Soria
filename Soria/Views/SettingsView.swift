@@ -153,11 +153,24 @@ struct SettingsView: View {
                             Button("Library Setup") { viewModel.openInitialSetup() }
                             Button("Refresh Detection") { viewModel.refreshLibrarySourceDetection() }
                             Button("Sync Libraries") { viewModel.syncLibraries() }
-                                .accessibilityIdentifier("settings-sync-libraries-button")
                             Button("Auto-Import Rekordbox XML") { viewModel.autoImportRekordboxXML() }
-                                .accessibilityIdentifier("settings-auto-import-rekordbox-xml-button")
                             Button("Import File…") { viewModel.loadExternalMetadata() }
-                                .accessibilityIdentifier("settings-import-metadata-file-button")
+                        }
+                        .overlay(alignment: .topLeading) {
+                            HStack(spacing: 2) {
+                                AccessibilityMarker(
+                                    identifier: "settings-sync-libraries-button",
+                                    label: "Sync Libraries"
+                                )
+                                AccessibilityMarker(
+                                    identifier: "settings-auto-import-rekordbox-xml-button",
+                                    label: "Auto-Import Rekordbox XML"
+                                )
+                                AccessibilityMarker(
+                                    identifier: "settings-import-metadata-file-button",
+                                    label: "Import Metadata File"
+                                )
+                            }
                         }
                     }
                     .accessibilityIdentifier("settings-library-sources")

@@ -201,7 +201,8 @@ final class PythonWorkerClient {
         query: String,
         limit: Int,
         excludeTrackPaths: [String],
-        filters: WorkerSimilarityFilters
+        filters: WorkerSimilarityFilters,
+        weights: [String: Double]? = nil
     ) async throws -> WorkerTrackSearchResponse {
         try await searchTracks(
             mode: .text,
@@ -211,7 +212,7 @@ final class PythonWorkerClient {
             limit: limit,
             excludeTrackPaths: excludeTrackPaths,
             filters: filters,
-            weights: Self.textSearchWeights
+            weights: weights ?? Self.textSearchWeights
         )
     }
 
@@ -221,7 +222,8 @@ final class PythonWorkerClient {
         trackEmbedding: [Double],
         limit: Int,
         excludeTrackPaths: [String],
-        filters: WorkerSimilarityFilters
+        filters: WorkerSimilarityFilters,
+        weights: [String: Double]? = nil
     ) async throws -> WorkerTrackSearchResponse {
         _ = track
         return try await searchTracks(
@@ -232,7 +234,7 @@ final class PythonWorkerClient {
             limit: limit,
             excludeTrackPaths: excludeTrackPaths,
             filters: filters,
-            weights: Self.referenceSearchWeights
+            weights: weights ?? Self.referenceSearchWeights
         )
     }
 
@@ -242,7 +244,8 @@ final class PythonWorkerClient {
         trackEmbedding: [Double],
         limit: Int,
         excludeTrackPaths: [String],
-        filters: WorkerSimilarityFilters
+        filters: WorkerSimilarityFilters,
+        weights: [String: Double]? = nil
     ) async throws -> WorkerTrackSearchResponse {
         try await searchTracks(
             mode: .hybrid,
@@ -252,7 +255,7 @@ final class PythonWorkerClient {
             limit: limit,
             excludeTrackPaths: excludeTrackPaths,
             filters: filters,
-            weights: Self.hybridSearchWeights
+            weights: weights ?? Self.hybridSearchWeights
         )
     }
 

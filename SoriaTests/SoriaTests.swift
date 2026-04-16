@@ -6,6 +6,21 @@ import Testing
 @MainActor
 @Suite(.serialized)
 struct SoriaTests {
+    @Test func appSettingsBypassSecureLookupsDuringUITestLaunch() {
+        #expect(AppSettingsStore.shouldBypassSecureLookupsForUITests(arguments: ["UITEST_SKIP_INITIAL_SETUP"]))
+        #expect(AppSettingsStore.shouldBypassSecureLookupsForUITests(arguments: ["UITEST_LIBRARY_STATE=prepared"]))
+        #expect(!AppSettingsStore.shouldBypassSecureLookupsForUITests(arguments: ["UITEST_START_IN_MIX_ASSISTANT"]))
+    }
+
+    @Test func appSettingsUseEnvironmentOverrideWhenUITestsBypassKeychain() {
+        let loaded = AppSettingsStore.loadGoogleAIAPIKey(
+            arguments: ["UITEST_LIBRARY_STATE=prepared"],
+            environment: ["GOOGLE_AI_API_KEY": " ui-test-key "]
+        )
+
+        #expect(loaded == "ui-test-key")
+    }
+
     @Test func appSettingsPreferBundledWorkerRuntimeForProtectedLegacyPath() {
         let bundledPath = "/tmp/Soria.app/Contents/Resources/analysis-worker/.venv/bin/python"
         let legacyPath = "\(NSHomeDirectory())/Documents/BluePenguin/Soriga/Soria/analysis-worker/.venv/bin/python"
@@ -78,6 +93,7 @@ struct SoriaTests {
             vectorSimilarityByPath: [:],
             constraints: RecommendationConstraints(),
             weights: RecommendationWeights(),
+            vectorWeights: MixsetVectorWeights(),
             limit: 2,
             excludeTrackIDs: []
         )
@@ -97,6 +113,45 @@ struct SoriaTests {
         )
         let score = breakdown.finalScore(weights: RecommendationWeights())
         #expect(score > 0.99)
+    }
+
+    @Test func recommendationWeightsNormalizeBeforeScoring() {
+        let weights = RecommendationWeights(embed: 4, bpm: 2, key: 2, energy: 1, introOutro: 1, external: 0)
+        let normalized = weights.normalized()
+
+        let totalWeight =
+            normalized.embed
+            + normalized.bpm
+            + normalized.key
+            + normalized.energy
+            + normalized.introOutro
+            + normalized.external
+        #expect(abs(totalWeight - 1.0) < 0.0001)
+
+        let breakdown = ScoreBreakdown(
+            embeddingSimilarity: 0.9,
+            bpmCompatibility: 0.8,
+            harmonicCompatibility: 0.7,
+            energyFlow: 0.6,
+            transitionRegionMatch: 0.5,
+            externalMetadataScore: 0.4
+        )
+        let score = breakdown.finalScore(weights: weights)
+
+        #expect(score >= 0)
+        #expect(score <= 1)
+    }
+
+    @Test func mixsetVectorWeightsNormalizeBeforeFusingScores() {
+        let weights = MixsetVectorWeights(track: 6, intro: 1, middle: 2, outro: 1)
+        let normalized = weights.normalized()
+
+        let totalWeight = normalized.track + normalized.intro + normalized.middle + normalized.outro
+        #expect(abs(totalWeight - 1.0) < 0.0001)
+
+        let fused = weights.fusedScore(trackScore: 0.9, introScore: 0.8, middleScore: 0.7, outroScore: 0.6)
+        #expect(fused >= 0)
+        #expect(fused <= 1)
     }
 
     @Test func recommendationHandlesParallelKeysAndHalfDoubleTempo() {
@@ -130,6 +185,7 @@ struct SoriaTests {
             vectorSimilarityByPath: [:],
             constraints: RecommendationConstraints(),
             weights: RecommendationWeights(),
+            vectorWeights: MixsetVectorWeights(),
             limit: 1,
             excludeTrackIDs: []
         )
@@ -168,6 +224,7 @@ struct SoriaTests {
             vectorSimilarityByPath: [:],
             constraints: RecommendationConstraints(),
             weights: RecommendationWeights(),
+            vectorWeights: MixsetVectorWeights(),
             limit: 1,
             excludeTrackIDs: []
         )
@@ -175,6 +232,75 @@ struct SoriaTests {
         #expect(recommendations.count == 1)
         #expect(recommendations.first?.track.id == vendorOnly.id)
         #expect(recommendations.first?.breakdown.externalMetadataScore ?? 0 >= 0.75)
+    }
+
+    @Test func externalMetadataPriorityInterpolatesBetweenNeutralAndVendorConfidence() {
+        let engine = RecommendationEngine()
+        let seed = makeTrack(
+            path: "/a/seed.mp3",
+            title: "Seed",
+            genre: "House",
+            bpm: 122,
+            musicalKey: "8A",
+            analyzedAt: Date()
+        )
+        let vendorOnly = makeTrack(
+            path: "/a/vendor.mp3",
+            title: "Vendor",
+            genre: "House",
+            bpm: 123,
+            musicalKey: "9A",
+            analyzedAt: Date(),
+            hasSeratoMetadata: true
+        )
+
+        var neutralConstraints = RecommendationConstraints()
+        neutralConstraints.externalMetadataPriority = 0
+        var midConstraints = RecommendationConstraints()
+        midConstraints.externalMetadataPriority = 0.5
+        var strongConstraints = RecommendationConstraints()
+        strongConstraints.externalMetadataPriority = 1
+
+        let neutral = engine.recommendNextTracks(
+            seed: seed,
+            candidates: [vendorOnly],
+            embeddingsByTrackID: [seed.id: [1, 0], vendorOnly.id: [1, 0]],
+            summariesByTrackID: [:],
+            vectorSimilarityByPath: [:],
+            constraints: neutralConstraints,
+            weights: RecommendationWeights(),
+            vectorWeights: MixsetVectorWeights(),
+            limit: 1,
+            excludeTrackIDs: []
+        ).first
+        let mid = engine.recommendNextTracks(
+            seed: seed,
+            candidates: [vendorOnly],
+            embeddingsByTrackID: [seed.id: [1, 0], vendorOnly.id: [1, 0]],
+            summariesByTrackID: [:],
+            vectorSimilarityByPath: [:],
+            constraints: midConstraints,
+            weights: RecommendationWeights(),
+            vectorWeights: MixsetVectorWeights(),
+            limit: 1,
+            excludeTrackIDs: []
+        ).first
+        let strong = engine.recommendNextTracks(
+            seed: seed,
+            candidates: [vendorOnly],
+            embeddingsByTrackID: [seed.id: [1, 0], vendorOnly.id: [1, 0]],
+            summariesByTrackID: [:],
+            vectorSimilarityByPath: [:],
+            constraints: strongConstraints,
+            weights: RecommendationWeights(),
+            vectorWeights: MixsetVectorWeights(),
+            limit: 1,
+            excludeTrackIDs: []
+        ).first
+
+        #expect(abs((neutral?.breakdown.externalMetadataScore ?? -1) - 0.5) < 0.0001)
+        #expect(abs((mid?.breakdown.externalMetadataScore ?? -1) - 0.625) < 0.0001)
+        #expect(abs((strong?.breakdown.externalMetadataScore ?? -1) - 0.75) < 0.0001)
     }
 
     @Test func recommendationFiltersByAnalysisFocusAndCarriesMixabilityMetadata() {
@@ -244,6 +370,7 @@ struct SoriaTests {
             vectorSimilarityByPath: [:],
             constraints: constraints,
             weights: RecommendationWeights(),
+            vectorWeights: MixsetVectorWeights(),
             limit: 2,
             excludeTrackIDs: []
         )
@@ -253,6 +380,70 @@ struct SoriaTests {
         #expect(recommendations.first?.analysisFocus == .warmUpDeep)
         #expect(recommendations.first?.mixabilityTags == ["long_intro", "clean_outro"])
         #expect(recommendations.first?.matchReasons.contains("Warm-up / Deep") == true)
+    }
+
+    @Test func appSettingsPersistScoreControls() {
+        let weights = RecommendationWeights(embed: 0.2, bpm: 0.2, key: 0.2, energy: 0.2, introOutro: 0.1, external: 0.1)
+        let vectorWeights = MixsetVectorWeights(track: 0.5, intro: 0.1, middle: 0.3, outro: 0.1)
+        let constraints = RecommendationConstraints(
+            targetBPMMin: 118,
+            targetBPMMax: 126,
+            analysisFocus: .warmUpDeep,
+            keyStrictness: 0.73,
+            genreContinuity: 0.64,
+            maxDurationMinutes: 7.5,
+            includeTags: ["warm", "rolling"],
+            excludeTags: ["hard"],
+            externalMetadataPriority: 0.42
+        )
+
+        AppSettingsStore.saveRecommendationWeights(weights)
+        AppSettingsStore.saveMixsetVectorWeights(vectorWeights)
+        AppSettingsStore.saveRecommendationConstraints(constraints)
+
+        #expect(AppSettingsStore.loadRecommendationWeights() == weights)
+        #expect(AppSettingsStore.loadMixsetVectorWeights() == vectorWeights)
+        #expect(AppSettingsStore.loadRecommendationConstraints() == constraints)
+
+        AppSettingsStore.saveRecommendationWeights(.defaults)
+        AppSettingsStore.saveMixsetVectorWeights(.defaults)
+        AppSettingsStore.saveRecommendationConstraints(.defaults)
+    }
+
+    @Test func scoreSessionSnapshotStoresScoringConfiguration() throws {
+        let snapshot = ScoreSessionCandidateSnapshot(
+            vectorBreakdown: VectorScoreBreakdown(
+                fusedScore: 0.82,
+                trackScore: 0.9,
+                introScore: 0.7,
+                middleScore: 0.8,
+                outroScore: 0.6,
+                bestMatchedCollection: "tracks"
+            ),
+            matchedMemberships: ["Warmup / Deep"],
+            matchReasons: ["Seed track"],
+            analysisFocus: .warmUpDeep,
+            mixabilityTags: ["long_intro"],
+            queryMode: "hybrid",
+            normalizedFinalWeights: RecommendationWeights(embed: 0.4, bpm: 0.2, key: 0.1, energy: 0.1, introOutro: 0.1, external: 0.1),
+            normalizedVectorWeights: MixsetVectorWeights(track: 0.6, intro: 0.1, middle: 0.2, outro: 0.1),
+            effectiveConstraints: RecommendationConstraints(
+                targetBPMMin: 118,
+                targetBPMMax: 126,
+                analysisFocus: .warmUpDeep,
+                keyStrictness: 0.8,
+                genreContinuity: 0.65,
+                maxDurationMinutes: 7,
+                includeTags: ["warm"],
+                excludeTags: ["hard"],
+                externalMetadataPriority: 0.5
+            )
+        )
+
+        let data = try JSONEncoder().encode(snapshot)
+        let decoded = try JSONDecoder().decode(ScoreSessionCandidateSnapshot.self, from: data)
+
+        #expect(decoded == snapshot)
     }
 
     @Test func seratoMarkers2ParserExtractsCueAndHotCue() {
@@ -468,6 +659,122 @@ struct SoriaTests {
         #expect(tracks.first?.metadata.analysisCachePath == "/Users/test/Library/Pioneer/ANLZ0000.DAT")
         #expect(tracks.first?.metadata.analysisState == "status=1 keyCode=8 bpmRange=5")
         #expect(tracks.first?.metadata.syncVersion == "7.2.8/6")
+    }
+
+    @Test func rekordboxPlaylistsResolveTrackIDsViaKeyTypeZero() throws {
+        let directory = try makeTemporaryDirectory()
+        let databaseURL = directory.appendingPathComponent("networkRecommend.db")
+        try createSQLiteDatabase(
+            at: databaseURL,
+            statements: [
+                """
+                CREATE TABLE manage_tbl (
+                    SongFilePath TEXT,
+                    AnalyzeFilePath TEXT,
+                    AnalyzeStatus INTEGER,
+                    AnalyzeKey INTEGER,
+                    AnalyzeBPMRange INTEGER,
+                    TrackID TEXT,
+                    TrackCheckSum TEXT,
+                    Duration REAL,
+                    RekordboxVersion TEXT,
+                    AnalyzeVersion TEXT
+                );
+                """,
+                """
+                INSERT INTO manage_tbl VALUES (
+                    '/Users/test/Music/Track ID Playlist.mp3',
+                    NULL,
+                    NULL,
+                    NULL,
+                    NULL,
+                    'rk-1',
+                    'checksum-1',
+                    240000,
+                    '7.2.8',
+                    '6'
+                );
+                """
+            ]
+        )
+
+        let playlistsURL = directory.appendingPathComponent("masterPlaylists6.xml")
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <DJ_PLAYLISTS>
+          <PLAYLISTS>
+            <NODE Name="ROOT" Type="0">
+              <NODE Name="Warmup" Type="1" KeyType="0" Entries="1">
+                <TRACK Key="rk-1" />
+              </NODE>
+            </NODE>
+          </PLAYLISTS>
+        </DJ_PLAYLISTS>
+        """.write(to: playlistsURL, atomically: true, encoding: .utf8)
+
+        let service = RekordboxLibraryService()
+        let tracks = try service.loadTracks(from: directory)
+
+        #expect(tracks.count == 1)
+        #expect(tracks.first?.metadata.playlistMemberships == ["Warmup"])
+    }
+
+    @Test func rekordboxPlaylistsResolveLocationsViaKeyTypeOne() throws {
+        let directory = try makeTemporaryDirectory()
+        let databaseURL = directory.appendingPathComponent("networkRecommend.db")
+        try createSQLiteDatabase(
+            at: databaseURL,
+            statements: [
+                """
+                CREATE TABLE manage_tbl (
+                    SongFilePath TEXT,
+                    AnalyzeFilePath TEXT,
+                    AnalyzeStatus INTEGER,
+                    AnalyzeKey INTEGER,
+                    AnalyzeBPMRange INTEGER,
+                    TrackID TEXT,
+                    TrackCheckSum TEXT,
+                    Duration REAL,
+                    RekordboxVersion TEXT,
+                    AnalyzeVersion TEXT
+                );
+                """,
+                """
+                INSERT INTO manage_tbl VALUES (
+                    '/Users/test/Music/Location Key Playlist.mp3',
+                    NULL,
+                    NULL,
+                    NULL,
+                    NULL,
+                    'rk-2',
+                    'checksum-2',
+                    240000,
+                    '7.2.8',
+                    '6'
+                );
+                """
+            ]
+        )
+
+        let playlistsURL = directory.appendingPathComponent("masterPlaylists6.xml")
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <DJ_PLAYLISTS>
+          <PLAYLISTS>
+            <NODE Name="ROOT" Type="0">
+              <NODE Name="Travel" Type="1" KeyType="1" Entries="1">
+                <TRACK Key="file://localhost/Users/test/Music/Location%20Key%20Playlist.mp3" />
+              </NODE>
+            </NODE>
+          </PLAYLISTS>
+        </DJ_PLAYLISTS>
+        """.write(to: playlistsURL, atomically: true, encoding: .utf8)
+
+        let service = RekordboxLibraryService()
+        let tracks = try service.loadTracks(from: directory)
+
+        #expect(tracks.count == 1)
+        #expect(tracks.first?.metadata.playlistMemberships == ["Travel"])
     }
 
     @Test func rekordboxServiceLoadsMasterPlaylists7XMLWhenPresent() throws {
@@ -1293,7 +1600,10 @@ struct SoriaTests {
                             matchReasons: [],
                             analysisFocus: nil,
                             mixabilityTags: [],
-                            queryMode: "text"
+                            queryMode: "text",
+                            normalizedFinalWeights: .defaults.normalized(),
+                            normalizedVectorWeights: .defaults.normalized(),
+                            effectiveConstraints: .defaults.normalizedForScoring()
                         )
                     )
                 ]
@@ -1374,6 +1684,30 @@ struct SoriaTests {
             Set(tracks[0].metadata.playlistMemberships)
                 == Set(["Festival / Day 1 / Sunrise", "Festival / Day 2 / Sunrise"])
         )
+    }
+
+    @Test func metadataImportStatusMessageSummarizesSuccessfulMatches() {
+        let message = AppViewModel.metadataImportStatusMessage(
+            for: [
+                MetadataImportSummary(source: .rekordbox, importedEntries: 18, matchedTracks: 12),
+                MetadataImportSummary(source: .serato, importedEntries: 4, matchedTracks: 4)
+            ]
+        )
+
+        #expect(message.contains("rekordbox: 12 matched / 18 imported"))
+        #expect(message.contains("Serato: 4 matched / 4 imported"))
+        #expect(!message.contains("Sync libraries or scan a fallback folder first."))
+    }
+
+    @Test func metadataImportStatusMessageIncludesFallbackHintWhenNothingMatches() {
+        let message = AppViewModel.metadataImportStatusMessage(
+            for: [
+                MetadataImportSummary(source: .rekordbox, importedEntries: 18, matchedTracks: 0)
+            ]
+        )
+
+        #expect(message.contains("rekordbox: 0 matched / 18 imported"))
+        #expect(message.contains("Sync libraries or scan a fallback folder first."))
     }
 }
 

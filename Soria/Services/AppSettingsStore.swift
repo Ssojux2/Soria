@@ -7,12 +7,17 @@ enum AppSettingsStore {
     private static let lastRekordboxXMLPathKey = "settings.lastRekordboxXMLPath"
     private static let googleAIAPIKeyAccount = "google_ai_api_key"
     private static let legacyGeminiAPIKeyAccount = "gemini_api_key"
+    private static let skipInitialSetupArgument = "UITEST_SKIP_INITIAL_SETUP"
+    private static let uiTestLibraryStatePrefix = "UITEST_LIBRARY_STATE="
     private static let embeddingProfileIDKey = "settings.embeddingProfileID"
     private static let lastValidatedKeyHashKey = "settings.lastValidatedKeyHash"
     private static let lastValidatedProfileIDKey = "settings.lastValidatedProfileID"
     private static let lastValidatedAtKey = "settings.lastValidatedAt"
     private static let automaticVectorRepairSignaturePrefix = "settings.vectorRepairSignature."
     private static let automaticVectorRepairAtPrefix = "settings.vectorRepairAt."
+    private static let recommendationWeightsKey = "settings.recommendationWeights"
+    private static let mixsetVectorWeightsKey = "settings.mixsetVectorWeights"
+    private static let recommendationConstraintsKey = "settings.recommendationConstraints"
     private static let protectedUserFolders = ["Documents", "Desktop", "Downloads"]
 
     static func loadPythonExecutablePath() -> String {
@@ -99,22 +104,31 @@ enum AppSettingsStore {
         UserDefaults.standard.set(normalized, forKey: lastRekordboxXMLPathKey)
     }
 
-    static func loadGoogleAIAPIKey() -> String {
+    static func loadGoogleAIAPIKey(
+        arguments: [String] = ProcessInfo.processInfo.arguments,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String {
+        if shouldBypassSecureLookupsForUITests(arguments: arguments) {
+            return googleAIAPIKeyOverride(in: environment) ?? ""
+        }
+
         let saved = AppKeychain.load(account: googleAIAPIKeyAccount)
             ?? AppKeychain.load(account: legacyGeminiAPIKeyAccount)
         if let saved, !saved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return saved.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        let environment = ProcessInfo.processInfo.environment
-        for key in ["GOOGLE_AI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"] {
-            if let rawValue = environment[key], !rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
+        if let override = googleAIAPIKeyOverride(in: environment) {
+            return override
         }
         return AppKeychain.load(account: googleAIAPIKeyAccount)
             ?? AppKeychain.load(account: legacyGeminiAPIKeyAccount)
             ?? ""
+    }
+
+    static func shouldBypassSecureLookupsForUITests(arguments: [String]) -> Bool {
+        arguments.contains(skipInitialSetupArgument)
+            || arguments.contains(where: { $0.hasPrefix(uiTestLibraryStatePrefix) })
     }
 
     static func saveGoogleAIAPIKey(_ apiKey: String) throws {
@@ -141,6 +155,30 @@ enum AppSettingsStore {
 
     static func saveEmbeddingProfile(_ profile: EmbeddingProfile) {
         UserDefaults.standard.set(profile.id, forKey: embeddingProfileIDKey)
+    }
+
+    static func loadRecommendationWeights() -> RecommendationWeights {
+        loadCodable(RecommendationWeights.self, forKey: recommendationWeightsKey) ?? .defaults
+    }
+
+    static func saveRecommendationWeights(_ weights: RecommendationWeights) {
+        saveCodable(weights, forKey: recommendationWeightsKey)
+    }
+
+    static func loadMixsetVectorWeights() -> MixsetVectorWeights {
+        loadCodable(MixsetVectorWeights.self, forKey: mixsetVectorWeightsKey) ?? .defaults
+    }
+
+    static func saveMixsetVectorWeights(_ weights: MixsetVectorWeights) {
+        saveCodable(weights, forKey: mixsetVectorWeightsKey)
+    }
+
+    static func loadRecommendationConstraints() -> RecommendationConstraints {
+        loadCodable(RecommendationConstraints.self, forKey: recommendationConstraintsKey) ?? .defaults
+    }
+
+    static func saveRecommendationConstraints(_ constraints: RecommendationConstraints) {
+        saveCodable(constraints, forKey: recommendationConstraintsKey)
     }
 
     static func currentValidationStatus(apiKey: String, profile: EmbeddingProfile) -> ValidationStatus {
@@ -225,6 +263,18 @@ enum AppSettingsStore {
 
     static func detectedWorkerScriptPath() -> String? {
         bundledWorkerScriptPath() ?? detectedProjectWorkerScriptPath()
+    }
+
+    private static func googleAIAPIKeyOverride(in environment: [String: String]) -> String? {
+        for key in ["GOOGLE_AI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"] {
+            if let rawValue = environment[key] {
+                let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    return trimmed
+                }
+            }
+        }
+        return nil
     }
 
     static func bundledPythonExecutablePath(bundle: Bundle = .main) -> String? {
@@ -329,5 +379,15 @@ enum AppSettingsStore {
         return protectedUserFolders.contains { folder in
             path.hasPrefix(home + "/\(folder)/")
         }
+    }
+
+    private static func loadCodable<T: Decodable>(_ type: T.Type, forKey key: String) -> T? {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+
+    private static func saveCodable<T: Encodable>(_ value: T, forKey key: String) {
+        guard let data = try? JSONEncoder().encode(value) else { return }
+        UserDefaults.standard.set(data, forKey: key)
     }
 }

@@ -3,6 +3,8 @@ import CoreGraphics
 import SwiftUI
 
 struct ContentView: View {
+    private static let mainWindowAutosaveName = "SoriaMainWindow"
+
     @StateObject private var viewModel = AppViewModel()
     @State private var hasScheduledMainWindowRecovery = false
 
@@ -30,23 +32,62 @@ struct ContentView: View {
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220)
         } detail: {
-            VSplitView {
-                ZStack {
-                    selectedInfoPane
-                }
-                    .frame(minHeight: selectedInfoPaneMinHeight, idealHeight: selectedInfoPaneIdealHeight)
-                    .layoutPriority(1)
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("right-pane-info")
+            Group {
+                if viewModel.selectedSection == .library {
+                    VStack(spacing: 0) {
+                        ZStack {
+                            selectedInfoPane
+                        }
+                        .frame(
+                            minHeight: selectedInfoPaneMinHeight,
+                            idealHeight: selectedInfoPaneIdealHeight,
+                            maxHeight: selectedInfoPaneMaxHeight
+                        )
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("right-pane-info")
 
-                ZStack {
-                    LibraryView(viewModel: viewModel)
+                        Divider()
+
+                        ZStack {
+                            LibraryView(viewModel: viewModel)
+                        }
+                        .frame(minHeight: 420, maxHeight: .infinity)
+                        .layoutPriority(1)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("right-pane-library")
+                    }
+                } else {
+                    VSplitView {
+                        ZStack {
+                            selectedInfoPane
+                        }
+                        .frame(
+                            minHeight: selectedInfoPaneMinHeight,
+                            idealHeight: selectedInfoPaneIdealHeight,
+                            maxHeight: selectedInfoPaneMaxHeight
+                        )
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("right-pane-info")
+
+                        ZStack {
+                            LibraryView(viewModel: viewModel)
+                        }
+                        .frame(minHeight: 420, idealHeight: 560, maxHeight: .infinity)
+                        .layoutPriority(1)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("right-pane-library")
+                    }
                 }
-                    .frame(minHeight: 340, idealHeight: 420)
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("right-pane-library")
             }
             .navigationTitle(viewModel.selectedSection.rawValue)
+            .inspector(isPresented: scopeInspectorBinding) {
+                if let target = viewModel.activeScopeInspectorTarget {
+                    ScopeFilterInspectorView(viewModel: viewModel, target: target)
+                        .inspectorColumnWidth(min: 280, ideal: 360, max: 520)
+                } else {
+                    EmptyView()
+                }
+            }
         }
         .frame(minWidth: 1280, minHeight: 800)
         .background(
@@ -59,10 +100,25 @@ struct ContentView: View {
         }
     }
 
+    private var scopeInspectorBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.isScopeInspectorPresented },
+            set: { isPresented in
+                if isPresented {
+                    viewModel.isScopeInspectorPresented = true
+                } else {
+                    viewModel.closeScopeInspector()
+                }
+            }
+        )
+    }
+
     private func recoverMainWindowIfNeeded(_ window: NSWindow) {
         guard !hasScheduledMainWindowRecovery else { return }
 
         hasScheduledMainWindowRecovery = true
+        window.setFrameAutosaveName(Self.mainWindowAutosaveName)
+        _ = window.setFrameUsingName(Self.mainWindowAutosaveName, force: false)
         window.isRestorable = false
         window.collectionBehavior.insert(.moveToActiveSpace)
 
@@ -77,14 +133,13 @@ struct ContentView: View {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
 
-        guard let targetScreen = primaryDisplayScreen() else { return }
-
         let currentFrame = window.frame
-        let targetFrame = targetScreen.visibleFrame
-        let overlap = currentFrame.intersection(targetFrame)
-        let overlapsPrimaryDisplay = !overlap.isNull && overlap.width >= 180 && overlap.height >= 180
+        if overlapsVisibleScreen(currentFrame) {
+            return
+        }
 
-        guard !overlapsPrimaryDisplay else { return }
+        guard let targetScreen = fallbackScreen() else { return }
+        let targetFrame = targetScreen.visibleFrame
 
         let width = min(max(currentFrame.width, 1280), targetFrame.width)
         let height = min(max(currentFrame.height, 800), targetFrame.height)
@@ -102,7 +157,14 @@ struct ContentView: View {
         window.orderFrontRegardless()
     }
 
-    private func primaryDisplayScreen() -> NSScreen? {
+    private func overlapsVisibleScreen(_ frame: NSRect) -> Bool {
+        NSScreen.screens.contains { screen in
+            let overlap = frame.intersection(screen.visibleFrame)
+            return !overlap.isNull && overlap.width >= 180 && overlap.height >= 180
+        }
+    }
+
+    private func fallbackScreen() -> NSScreen? {
         let mainDisplayID = CGMainDisplayID()
 
         return NSScreen.screens.first {
@@ -129,19 +191,34 @@ struct ContentView: View {
 
     private var selectedInfoPaneMinHeight: CGFloat {
         switch viewModel.selectedSection {
+        case .library:
+            return 200
         case .mixAssistant:
             return 460
         default:
-            return 260
+            return 240
         }
     }
 
     private var selectedInfoPaneIdealHeight: CGFloat {
         switch viewModel.selectedSection {
+        case .library:
+            return 240
         case .mixAssistant:
             return 560
         default:
             return 320
+        }
+    }
+
+    private var selectedInfoPaneMaxHeight: CGFloat {
+        switch viewModel.selectedSection {
+        case .library:
+            return 280
+        case .mixAssistant:
+            return .infinity
+        default:
+            return 360
         }
     }
 

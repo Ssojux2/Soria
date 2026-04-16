@@ -108,10 +108,9 @@ extension SoriaTests {
         #expect(LibraryTrackFilter.all.matches(.needsAnalysis))
         #expect(LibraryTrackFilter.ready.matches(.ready))
         #expect(LibraryTrackFilter.ready.matches(.needsRefresh) == false)
-        #expect(LibraryTrackFilter.needsAnalysis.matches(.needsAnalysis))
-        #expect(LibraryTrackFilter.needsAnalysis.matches(.ready) == false)
-        #expect(LibraryTrackFilter.needsRefresh.matches(.needsRefresh))
-        #expect(LibraryTrackFilter.needsRefresh.matches(.needsAnalysis) == false)
+        #expect(LibraryTrackFilter.needsPreparation.matches(.needsAnalysis))
+        #expect(LibraryTrackFilter.needsPreparation.matches(.needsRefresh))
+        #expect(LibraryTrackFilter.needsPreparation.matches(.ready) == false)
     }
 
     @Test
@@ -133,10 +132,10 @@ extension SoriaTests {
     }
 
     @Test
-    func mixAssistantModeLabelsDescribeTheTwoPrimaryFlows() {
-        #expect(MixAssistantMode.similarTracks.displayName == "Similar Tracks")
+    func mixAssistantModeDescribesBuildMixsetFlow() {
         #expect(MixAssistantMode.buildMixset.displayName == "Build Mixset")
-        #expect(MixAssistantMode.similarTracks.helperText.contains("selected library tracks"))
+        #expect(MixAssistantMode.allCases == [.buildMixset])
+        #expect(MixAssistantMode.buildMixset.helperText.contains("selected library tracks"))
         #expect(MixAssistantMode.buildMixset.helperText.contains("automatic mix paths"))
     }
 

@@ -4,39 +4,95 @@ struct ExportsView: View {
     @ObservedObject var viewModel: AppViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Exports").font(.title2.bold())
-            Text("Playlist items ready: \(viewModel.playlistTracks.count)")
-                .foregroundStyle(.secondary)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Exports")
+                    .font(.title2.bold())
 
-            Picker("Format", selection: $viewModel.selectedExportFormat) {
-                ForEach(ExportFormat.allCases) { format in
-                    Text(format.rawValue).tag(format)
+                Text("Playlist items ready: \(viewModel.playlistTracks.count)")
+                    .foregroundStyle(.secondary)
+
+                Picker("Target", selection: $viewModel.selectedExportTarget) {
+                    ForEach(ExportTarget.allCases) { target in
+                        Text(target.shortLabel).tag(target)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                GroupBox("Selected Target") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(viewModel.selectedExportTarget.displayName)
+                            .font(.headline)
+                        Text(viewModel.selectedExportTarget.helperText)
+                            .foregroundStyle(.secondary)
+                        Text(viewModel.selectedExportTargetStatusText)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                GroupBox("Detected Vendor Paths") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        vendorPathRow(
+                            label: "rekordbox 6/7",
+                            value: viewModel.detectedVendorTargets.rekordboxLibraryDirectory
+                                ?? viewModel.detectedVendorTargets.rekordboxSettingsPath
+                        )
+                        vendorPathRow(
+                            label: "Serato _Serato_",
+                            value: viewModel.detectedVendorTargets.seratoCratesRoot
+                        )
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                Button(viewModel.selectedExportTarget == .seratoCrate ? "Create Serato Crate" : "Export Playlist") {
+                    viewModel.exportPlaylist()
+                }
+                .disabled(viewModel.playlistTracks.isEmpty || !viewModel.isSelectedExportTargetAvailable)
+
+                if !viewModel.exportMessage.isEmpty {
+                    Text(viewModel.exportMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                if !viewModel.exportDestinationDescription.isEmpty {
+                    Text(viewModel.exportDestinationDescription)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                if !viewModel.exportWarnings.isEmpty {
+                    GroupBox("Warnings") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(viewModel.exportWarnings.enumerated()), id: \.offset) { _, warning in
+                                Text("• \(warning)")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
             }
-            .pickerStyle(.segmented)
-
-            if viewModel.selectedExportFormat == .seratoSafePackage {
-                Text("Non-destructive export: M3U + CSV + import guide. Direct Serato crate writes remain disabled on purpose.")
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("Rekordbox XML playlist export with local file paths and playlist grouping.")
-                    .foregroundStyle(.secondary)
-            }
-
-            Button("Export Playlist") {
-                viewModel.exportPlaylist()
-            }
-            .disabled(viewModel.playlistTracks.isEmpty)
-
-            Text(viewModel.exportMessage)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-
-            Spacer()
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("exports-info-view")
+    }
+
+    @ViewBuilder
+    private func vendorPathRow(label: String, value: String?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.headline)
+            Text(value ?? "Not detected")
+                .font(.footnote)
+                .foregroundStyle(value == nil ? .secondary : .primary)
+                .textSelection(.enabled)
+        }
     }
 }
