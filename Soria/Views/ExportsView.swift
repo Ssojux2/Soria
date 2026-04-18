@@ -32,21 +32,6 @@ struct ExportsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                GroupBox("Detected Vendor Paths") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        vendorPathRow(
-                            label: "rekordbox 6/7",
-                            value: viewModel.detectedVendorTargets.rekordboxLibraryDirectory
-                                ?? viewModel.detectedVendorTargets.rekordboxSettingsPath
-                        )
-                        vendorPathRow(
-                            label: "Serato _Serato_",
-                            value: viewModel.detectedVendorTargets.seratoCratesRoot
-                        )
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
                 Button(viewModel.selectedExportTarget == .seratoCrate ? "Create Serato Crate" : "Export Playlist") {
                     viewModel.exportPlaylist()
                 }
@@ -62,6 +47,21 @@ struct ExportsView: View {
                     Text(viewModel.exportDestinationDescription)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+
+                GroupBox("Detected Vendor Paths") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        vendorPathRow(
+                            label: "rekordbox 6/7",
+                            value: viewModel.detectedVendorTargets.rekordboxLibraryDirectory
+                                ?? viewModel.detectedVendorTargets.rekordboxSettingsPath
+                        )
+                        vendorPathRow(
+                            label: "Serato _Serato_",
+                            value: viewModel.detectedVendorTargets.seratoCratesRoot
+                        )
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 if !viewModel.exportWarnings.isEmpty {

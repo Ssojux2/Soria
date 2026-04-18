@@ -32,53 +32,7 @@ struct ContentView: View {
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220)
         } detail: {
-            Group {
-                if viewModel.selectedSection == .library {
-                    VStack(spacing: 0) {
-                        ZStack {
-                            selectedInfoPane
-                        }
-                        .frame(
-                            minHeight: selectedInfoPaneMinHeight,
-                            idealHeight: selectedInfoPaneIdealHeight,
-                            maxHeight: selectedInfoPaneMaxHeight
-                        )
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("right-pane-info")
-
-                        Divider()
-
-                        ZStack {
-                            LibraryView(viewModel: viewModel)
-                        }
-                        .frame(minHeight: 420, maxHeight: .infinity)
-                        .layoutPriority(1)
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("right-pane-library")
-                    }
-                } else {
-                    VSplitView {
-                        ZStack {
-                            selectedInfoPane
-                        }
-                        .frame(
-                            minHeight: selectedInfoPaneMinHeight,
-                            idealHeight: selectedInfoPaneIdealHeight,
-                            maxHeight: selectedInfoPaneMaxHeight
-                        )
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("right-pane-info")
-
-                        ZStack {
-                            LibraryView(viewModel: viewModel)
-                        }
-                        .frame(minHeight: 420, idealHeight: 560, maxHeight: .infinity)
-                        .layoutPriority(1)
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("right-pane-library")
-                    }
-                }
-            }
+            selectedDetailPane
             .navigationTitle(viewModel.selectedSection.rawValue)
             .inspector(isPresented: scopeInspectorBinding) {
                 if let target = viewModel.activeScopeInspectorTarget {
@@ -98,6 +52,10 @@ struct ContentView: View {
         .sheet(isPresented: $viewModel.isShowingInitialSetupSheet) {
             InitialSetupSheet(viewModel: viewModel)
         }
+        .sheet(isPresented: librarySyncSheetBinding) {
+            LibrarySyncSheet(viewModel: viewModel)
+                .interactiveDismissDisabled(viewModel.librarySyncPresentationState?.phase == .running)
+        }
     }
 
     private var scopeInspectorBinding: Binding<Bool> {
@@ -108,6 +66,17 @@ struct ContentView: View {
                     viewModel.isScopeInspectorPresented = true
                 } else {
                     viewModel.closeScopeInspector()
+                }
+            }
+        )
+    }
+
+    private var librarySyncSheetBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.isLibrarySyncSheetPresented },
+            set: { isPresented in
+                if !isPresented {
+                    viewModel.dismissLibrarySyncSheetIfPossible()
                 }
             }
         )
@@ -189,50 +158,39 @@ struct ContentView: View {
         }
     }
 
-    private var selectedInfoPaneMinHeight: CGFloat {
-        switch viewModel.selectedSection {
-        case .library:
-            return 200
-        case .mixAssistant:
-            return 460
-        default:
-            return 240
-        }
-    }
-
-    private var selectedInfoPaneIdealHeight: CGFloat {
-        switch viewModel.selectedSection {
-        case .library:
-            return 240
-        case .mixAssistant:
-            return 560
-        default:
-            return 320
-        }
-    }
-
-    private var selectedInfoPaneMaxHeight: CGFloat {
-        switch viewModel.selectedSection {
-        case .library:
-            return 280
-        case .mixAssistant:
-            return .infinity
-        default:
-            return 360
-        }
-    }
-
     @ViewBuilder
-    private var selectedInfoPane: some View {
+    private var selectedDetailPane: some View {
         switch viewModel.selectedSection {
         case .library:
-            TrackDetailView(viewModel: viewModel)
+            LibraryView(viewModel: viewModel)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("right-pane-library")
         case .mixAssistant:
             MixAssistantView(viewModel: viewModel)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("right-pane-mix-assistant")
         case .exports:
-            ExportsView(viewModel: viewModel)
+            VSplitView {
+                ZStack {
+                    ExportsView(viewModel: viewModel)
+                }
+                .frame(minHeight: 240, idealHeight: 320, maxHeight: 360)
+                .clipped()
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("right-pane-info")
+
+                ZStack {
+                    ExportPlaylistQueueView(viewModel: viewModel)
+                }
+                .frame(minHeight: 420, idealHeight: 560, maxHeight: .infinity)
+                .layoutPriority(1)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("right-pane-playlist-queue")
+            }
         case .settings:
             SettingsView(viewModel: viewModel)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("right-pane-settings")
         }
     }
 }
@@ -262,11 +220,47 @@ private struct InitialSetupSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Connect Your DJ Libraries")
+            Text(sheetTitle)
                 .font(.title2.bold())
 
-            Text("Soria now starts from the libraries that Serato and rekordbox already know about. Use manual folder scanning only as a fallback when a DJ library is unavailable.")
+            Text(sheetDescription)
                 .foregroundStyle(.secondary)
+
+            GroupBox("Analysis Access") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Soria validates the active embedding profile before track preparation can start.")
+                        .foregroundStyle(.secondary)
+
+                    if viewModel.embeddingProfile.requiresAPIKey {
+                        Text("Google AI API Key")
+                            .font(.headline)
+                        SecureField("Paste your Google AI API key", text: $viewModel.googleAIAPIKey)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(viewModel.isRunningInitialSetup)
+                            .accessibilityIdentifier("initial-setup-google-api-key-field")
+                            .onSubmit {
+                                if canStartSetup {
+                                    viewModel.completeInitialSetup()
+                                }
+                            }
+
+                        if viewModel.initialSetupNeedsGoogleAIAPIKey {
+                            Text("Enter your Google AI API key so Soria can validate \(viewModel.embeddingProfile.displayName).")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Text(viewModel.validationStatus.summaryText)
+                        .font(.footnote)
+                        .foregroundStyle(validationStatusColor)
+
+                    Text("Active model: \(viewModel.embeddingProfile.displayName)")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             GroupBox("Auto-Detected DJ Libraries") {
                 VStack(alignment: .leading, spacing: 10) {
@@ -290,12 +284,12 @@ private struct InitialSetupSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            GroupBox("Manual Folder Fallback") {
+            GroupBox("Music Folders") {
                 VStack(alignment: .leading, spacing: 14) {
                     pathLine(
                         title: "Selected Folder",
                         value: viewModel.initialSetupLibraryRoot,
-                        placeholder: "Optional. Choose one folder if you want a manual fallback scan."
+                        placeholder: "Choose one local music folder so Soria can build the authoritative library."
                     )
 
                     HStack {
@@ -320,7 +314,7 @@ private struct InitialSetupSheet: View {
             if viewModel.isRunningInitialSetup || !viewModel.initialSetupStatusMessage.isEmpty {
                 GroupBox("Setup Progress") {
                     VStack(alignment: .leading, spacing: 10) {
-                        if viewModel.scanProgress.isRunning || viewModel.isRunningInitialSetup {
+                        if viewModel.scanProgress.isRunning {
                             ProgressView(
                                 value: Double(viewModel.scanProgress.scannedFiles),
                                 total: Double(max(viewModel.scanProgress.totalFiles, 1))
@@ -334,6 +328,9 @@ private struct InitialSetupSheet: View {
                                     .font(.footnote)
                                     .lineLimit(1)
                             }
+                        } else if viewModel.isRunningInitialSetup {
+                            ProgressView()
+                                .controlSize(.small)
                         }
 
                         if !viewModel.initialSetupStatusMessage.isEmpty {
@@ -354,20 +351,77 @@ private struct InitialSetupSheet: View {
 
                 Spacer()
 
-                Button("Start Setup") {
+                Button(primaryButtonTitle) {
                     viewModel.completeInitialSetup()
                 }
                 .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
                 .disabled(!canStartSetup || viewModel.isRunningInitialSetup)
+                .accessibilityIdentifier("initial-setup-primary-button")
+            }
+            .overlay(alignment: .topLeading) {
+                AccessibilityMarker(
+                    identifier: "initial-setup-primary-button-marker",
+                    label: "Initial Setup Primary Button"
+                )
             }
         }
         .padding(24)
         .frame(minWidth: 680, minHeight: 500)
+        .accessibilityIdentifier("initial-setup-sheet")
     }
 
     private var canStartSetup: Bool {
-        viewModel.nativeLibrarySources.contains { $0.enabled && $0.resolvedPath != nil } ||
-        !viewModel.initialSetupLibraryRoot.isEmpty
+        let hasLibrarySelection =
+            !viewModel.initialSetupLibraryRoot.isEmpty || !viewModel.libraryRoots.isEmpty
+        return !viewModel.initialSetupNeedsGoogleAIAPIKey &&
+            (!viewModel.initialSetupRequiresLibrarySelection || hasLibrarySelection)
+    }
+
+    private var sheetTitle: String {
+        if viewModel.initialSetupNeedsGoogleAIAPIKey && viewModel.initialSetupRequiresLibrarySelection {
+            return "Finish Setup"
+        }
+        if viewModel.initialSetupNeedsGoogleAIAPIKey {
+            return "Connect Google AI"
+        }
+        return "Connect Your Music Library"
+    }
+
+    private var sheetDescription: String {
+        if viewModel.initialSetupNeedsGoogleAIAPIKey && viewModel.initialSetupRequiresLibrarySelection {
+            return "Add your Google AI API key, then choose the local music folders Soria should scan."
+        }
+        if viewModel.initialSetupNeedsGoogleAIAPIKey {
+            return "Add your Google AI API key so Soria can validate the active embedding profile as soon as the app starts."
+        }
+        return "Soria now treats your local music folders as the source of truth. Serato and rekordbox are used only to enrich those tracks with DJ metadata."
+    }
+
+    private var primaryButtonTitle: String {
+        let hasLibrarySelection =
+            !viewModel.initialSetupLibraryRoot.isEmpty || !viewModel.libraryRoots.isEmpty
+
+        if !viewModel.validationStatus.isValidated && hasLibrarySelection {
+            return "Validate and Start Setup"
+        }
+        if !viewModel.validationStatus.isValidated {
+            return "Save and Validate"
+        }
+        if hasLibrarySelection {
+            return "Start Setup"
+        }
+        return "Done"
+    }
+
+    private var validationStatusColor: Color {
+        if viewModel.validationStatus.isValidated {
+            return .green
+        }
+        if case .failed = viewModel.validationStatus {
+            return .red
+        }
+        return .secondary
     }
 
     private func sourceRow(_ source: LibrarySourceRecord) -> some View {
@@ -424,5 +478,87 @@ private struct InitialSetupSheet: View {
                 .textSelection(.enabled)
                 .lineLimit(2)
         }
+    }
+}
+
+private struct LibrarySyncSheet: View {
+    @ObservedObject var viewModel: AppViewModel
+
+    var body: some View {
+        let state = viewModel.librarySyncPresentationState
+
+        VStack(spacing: 20) {
+            VStack(spacing: 6) {
+                Text(state?.title ?? "Refreshing Library")
+                    .font(.title2.bold())
+                    .multilineTextAlignment(.center)
+
+                Text(sheetSubtitle(for: state))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            if let state, !state.sourceNames.isEmpty {
+                Text(state.sourceNames.joined(separator: ", "))
+                    .font(.headline)
+                    .multilineTextAlignment(.center)
+            }
+
+            if state?.phase == .running {
+                if let progress = state?.progress {
+                    ProgressView(value: progress, total: 1)
+                } else if state?.isIndeterminate == true {
+                    ProgressView()
+                }
+            }
+
+            VStack(spacing: 8) {
+                Text(state?.message ?? "Preparing library update.")
+                    .font(.body)
+                    .foregroundStyle(state?.phase == .failed ? .red : .primary)
+                    .multilineTextAlignment(.center)
+
+                if let stats = state?.stats {
+                    Text(progressSummary(for: stats))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .frame(maxWidth: .infinity)
+
+            if state?.phase == .failed {
+                Button("Close") {
+                    viewModel.dismissLibrarySyncSheetIfPossible()
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("library-sync-close-button")
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 480, idealWidth: 540)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .overlay(alignment: .topLeading) {
+            if state?.phase == .running {
+                AccessibilityMarker(
+                    identifier: "library-sync-progress",
+                    label: "Library Sync Progress"
+                )
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("library-sync-sheet")
+    }
+
+    private func sheetSubtitle(for state: LibrarySyncPresentationState?) -> String {
+        if state?.phase == .failed {
+            return "Library sync needs attention before you continue."
+        }
+        return "Analysis options will appear here when library sync finishes."
+    }
+
+    private func progressSummary(for stats: ScanJobProgress) -> String {
+        let scannedTotal = stats.totalFiles > 0 ? "\(stats.scannedFiles) / \(stats.totalFiles)" : "\(stats.scannedFiles)"
+        return "Scanned \(scannedTotal) • Indexed \(stats.indexedFiles) • Skipped \(stats.skippedFiles)"
     }
 }

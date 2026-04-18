@@ -6,54 +6,34 @@ struct TrackDetailView: View {
     var body: some View {
         let overview = viewModel.preparationOverview
 
-        VStack(alignment: .leading, spacing: 16) {
-            header(for: overview)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                header(for: overview)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(selectionHeadline)
-                    .font(.headline)
-                Text(selectionDetail)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-
-            progressSection(for: overview)
-
-            if let notice = viewModel.preparationNotice {
-                preparationNoticeBanner(notice)
-            }
-
-            HStack(spacing: 10) {
-                if let primaryAction = overview.primaryAction {
-                    Button(viewModel.preparationActionTitle(primaryAction)) {
-                        viewModel.performPreparationAction(primaryAction)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .accessibilityIdentifier(preparationActionIdentifier(for: primaryAction))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(selectionHeadline)
+                        .font(.headline)
+                    Text(selectionDetail)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
 
-                if let secondaryAction = overview.secondaryAction {
-                    Button(viewModel.preparationActionTitle(secondaryAction)) {
-                        viewModel.performPreparationAction(secondaryAction)
-                    }
-                    .accessibilityIdentifier(preparationActionIdentifier(for: secondaryAction))
+                progressSection(for: overview)
+
+                if let notice = viewModel.preparationNotice {
+                    preparationNoticeBanner(notice)
                 }
 
-                if overview.isCancellable {
-                    Button(viewModel.isCancellingAnalysis ? "Cancelling..." : "Cancel") {
-                        viewModel.cancelAnalysis()
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.red)
-                    .disabled(viewModel.isCancellingAnalysis)
-                    .accessibilityIdentifier("library-cancel-button")
+                if !vendorReferenceSections.isEmpty {
+                    vendorReferencesSection
                 }
 
-                Spacer()
+                preparationActionRow(for: overview)
             }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .overlay(alignment: .topLeading) {
             HStack(spacing: 2) {
@@ -61,7 +41,7 @@ struct TrackDetailView: View {
                 if let primaryAction = overview.primaryAction {
                     AccessibilityMarker(
                         identifier: preparationActionIdentifier(for: primaryAction),
-                        label: viewModel.preparationActionTitle(primaryAction)
+                        label: primaryActionTitle(for: overview, action: primaryAction)
                     )
                 }
                 if let secondaryAction = overview.secondaryAction {
@@ -94,7 +74,7 @@ struct TrackDetailView: View {
         switch viewModel.selectedTracks.count {
         case 0:
             return viewModel.filteredTracks.isEmpty
-                ? "Use Sync Libraries to load tracks, then select one or more tracks to prepare."
+                ? "Scan Music Folders to load tracks, then select one or more tracks to prepare."
                 : "Use Cmd or Shift to select multiple tracks for preparation."
         case 1:
             let artist = viewModel.selectedTrack?.artist.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -110,38 +90,71 @@ struct TrackDetailView: View {
         }
     }
 
+    private var vendorReferenceSections: [(ExternalDJMetadata.Source, [String])] {
+        ExternalDJMetadata.Source.allCases.compactMap { source in
+            let references = Array(
+                Set(
+                    viewModel.selectedTrackExternalMetadata
+                        .filter { $0.source == source }
+                        .flatMap(\.playlistMemberships)
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+                )
+            )
+            .sorted()
+            guard !references.isEmpty else { return nil }
+            return (source, references)
+        }
+    }
+
     @ViewBuilder
     private func header(for overview: PreparationOverviewState) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Library Preparation")
-                    .font(.title2.bold())
-                Text(overview.title)
-                    .foregroundStyle(.secondary)
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Library Preparation")
+                        .font(.title2.bold())
+                    Text(overview.title)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                PreparationPhaseBadge(phase: overview.phase, showSuccess: overview.showSuccess)
             }
 
-            Spacer()
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Library Preparation")
+                        .font(.title2.bold())
+                    Text(overview.title)
+                        .foregroundStyle(.secondary)
+                }
 
-            PreparationPhaseBadge(phase: overview.phase, showSuccess: overview.showSuccess)
+                PreparationPhaseBadge(phase: overview.phase, showSuccess: overview.showSuccess)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     @ViewBuilder
     private func progressSection(for overview: PreparationOverviewState) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                if let progress = overview.progress {
-                    ProgressView(value: progress, total: 1)
-                        .accessibilityIdentifier("library-preparation-progress")
-                } else if overview.phase == .analyzing || overview.phase == .syncing {
-                    ProgressView()
-                        .accessibilityIdentifier("library-preparation-progress")
-                }
+            if overview.phase != .syncing {
+                HStack(spacing: 10) {
+                    if let progress = overview.progress {
+                        ProgressView(value: progress, total: 1)
+                            .accessibilityIdentifier("library-preparation-progress")
+                    } else if overview.phase == .analyzing {
+                        ProgressView()
+                            .accessibilityIdentifier("library-preparation-progress")
+                    }
 
-                if let progress = overview.progress {
-                    Text("\(Int(progress * 100))%")
-                        .font(.footnote.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                    if let progress = overview.progress {
+                        Text("\(Int(progress * 100))%")
+                            .font(.footnote.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -150,6 +163,28 @@ struct TrackDetailView: View {
                 .foregroundStyle(messageColor(for: overview.phase))
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    @ViewBuilder
+    private var vendorReferencesSection: some View {
+        GroupBox("Vendor References") {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(vendorReferenceSections, id: \.0) { section in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(section.0.displayName)
+                            .font(.footnote.weight(.semibold))
+                        ForEach(section.1, id: \.self) { reference in
+                            Text(reference)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier("library-vendor-references")
     }
 
     @ViewBuilder
@@ -202,6 +237,53 @@ struct TrackDetailView: View {
             return "library-prepare-visible-button"
         case .syncLibrary:
             return "library-sync-button"
+        }
+    }
+
+    private func primaryActionTitle(for overview: PreparationOverviewState, action: PreparationOverviewAction) -> String {
+        overview.primaryActionTitleOverride ?? viewModel.preparationActionTitle(action)
+    }
+
+    @ViewBuilder
+    private func preparationActionRow(for overview: PreparationOverviewState) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                preparationActionButtons(for: overview)
+                Spacer(minLength: 0)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                preparationActionButtons(for: overview)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func preparationActionButtons(for overview: PreparationOverviewState) -> some View {
+        if let primaryAction = overview.primaryAction {
+            Button(primaryActionTitle(for: overview, action: primaryAction)) {
+                viewModel.performPreparationAction(primaryAction)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(overview.isPrimaryActionDisabled)
+            .accessibilityIdentifier(preparationActionIdentifier(for: primaryAction))
+        }
+
+        if let secondaryAction = overview.secondaryAction {
+            Button(viewModel.preparationActionTitle(secondaryAction)) {
+                viewModel.performPreparationAction(secondaryAction)
+            }
+            .accessibilityIdentifier(preparationActionIdentifier(for: secondaryAction))
+        }
+
+        if overview.isCancellable {
+            Button(viewModel.isCancellingAnalysis ? "Cancelling..." : "Cancel") {
+                viewModel.cancelAnalysis()
+            }
+            .buttonStyle(.bordered)
+            .tint(.red)
+            .disabled(viewModel.isCancellingAnalysis)
+            .accessibilityIdentifier("library-cancel-button")
         }
     }
 

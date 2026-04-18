@@ -5,7 +5,10 @@ struct MixAssistantView: View {
     @State private var dismissedSelectionSignature: String?
     @State private var includeTagsText: String = ""
     @State private var excludeTagsText: String = ""
+    @State private var includeFoldersText: String = ""
+    @State private var excludeFoldersText: String = ""
     @State private var isAdvancedScoreExpanded = false
+    @State private var isSelectedRecommendationBreakdownExpanded = true
 
     var body: some View {
         ZStack {
@@ -74,7 +77,7 @@ struct MixAssistantView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
-            hydrateTagEditorsFromConstraints()
+            hydrateConstraintEditorsFromState()
         }
         .onChange(of: viewModel.selectionReadiness.signature) { _, newValue in
             if dismissedSelectionSignature != newValue {
@@ -91,6 +94,18 @@ struct MixAssistantView: View {
             let joined = newValue.joined(separator: ", ")
             if excludeTagsText != joined {
                 excludeTagsText = joined
+            }
+        }
+        .onChange(of: viewModel.constraints.includeFolders) { _, newValue in
+            let joined = newValue.joined(separator: ", ")
+            if includeFoldersText != joined {
+                includeFoldersText = joined
+            }
+        }
+        .onChange(of: viewModel.constraints.excludeFolders) { _, newValue in
+            let joined = newValue.joined(separator: ", ")
+            if excludeFoldersText != joined {
+                excludeFoldersText = joined
             }
         }
         .overlay(alignment: .topLeading) {
@@ -115,13 +130,13 @@ struct MixAssistantView: View {
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .center, spacing: 12) {
                     recommendationQueryField
-                    resultLimitStepper
+                    resultLimitPicker
                     recommendationActions
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
                     recommendationQueryField
-                    resultLimitStepper
+                    resultLimitPicker
                     recommendationActions
                 }
             }
@@ -129,10 +144,11 @@ struct MixAssistantView: View {
             LibraryScopeFilterSection(
                 viewModel: viewModel,
                 target: .recommendation,
-                title: "DJ Scope",
+                title: "Vendor References",
                 initiallyExpanded: false,
                 accessibilityIdentifier: "recommendation-dj-scope-summary"
             )
+            .disabled(viewModel.recommendationInteractionDisabled)
 
             advancedScoreControls
 
@@ -140,9 +156,31 @@ struct MixAssistantView: View {
                 Text(viewModel.recommendationStatusMessage)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("recommendation-status-message")
+            }
+
+            recommendationCurationControls
+
+            if let buildProgress = viewModel.playlistBuildProgress {
+                playlistBuildProgressCard(buildProgress)
             }
 
             Table(viewModel.recommendations, selection: $viewModel.selectedRecommendationID) {
+                TableColumn("") { row in
+                    Toggle(
+                        "",
+                        isOn: Binding(
+                            get: { viewModel.isRecommendationSelectedForCuration(row.track.id) },
+                            set: { isSelected in
+                                viewModel.setRecommendationSelectedForCuration(row.track.id, isSelected: isSelected)
+                            }
+                        )
+                    )
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+                    .disabled(viewModel.recommendationInteractionDisabled)
+                    .accessibilityIdentifier(curationToggleIdentifier(for: row))
+                }
                 TableColumn("Track") { row in
                     HStack(spacing: 8) {
                         VStack(alignment: .leading) {
@@ -152,6 +190,7 @@ struct MixAssistantView: View {
                         }
                         Spacer(minLength: 8)
                         Button("+") { viewModel.appendToPlaylist(row.track) }
+                            .disabled(viewModel.recommendationInteractionDisabled)
                     }
                 }
                 TableColumn("Score") { row in
@@ -163,7 +202,6 @@ struct MixAssistantView: View {
                 TableColumn("Energy") { row in Text(String(format: "%.2f", row.breakdown.energyFlow)) }
                 TableColumn("Transition") { row in Text(String(format: "%.2f", row.breakdown.transitionRegionMatch)) }
                 TableColumn("External") { row in Text(String(format: "%.2f", row.breakdown.externalMetadataScore)) }
-                TableColumn("Focus") { row in Text(row.analysisFocus?.displayName ?? "-") }
                 TableColumn("Tags") { row in
                     let preview = row.mixabilityTags.prefix(3).joined(separator: ", ")
                     Text(preview.isEmpty ? "-" : preview)
@@ -173,39 +211,59 @@ struct MixAssistantView: View {
             .accessibilityIdentifier("recommendations-results-table")
 
             if let selectedRecommendation = viewModel.selectedRecommendation {
-                GroupBox("Selected Recommendation Breakdown") {
+                GroupBox {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("\(selectedRecommendation.track.title) - \(selectedRecommendation.track.artist)")
-                            .font(.headline)
-                        breakdownRow("Embedding", selectedRecommendation.breakdown.embeddingSimilarity)
-                        breakdownRow("BPM", selectedRecommendation.breakdown.bpmCompatibility)
-                        breakdownRow("Key", selectedRecommendation.breakdown.harmonicCompatibility)
-                        breakdownRow("Energy Flow", selectedRecommendation.breakdown.energyFlow)
-                        breakdownRow("Transition", selectedRecommendation.breakdown.transitionRegionMatch)
-                        breakdownRow("External", selectedRecommendation.breakdown.externalMetadataScore)
-                        Divider()
-                        vectorBreakdownSection(
-                            breakdown: selectedRecommendation.vectorBreakdown,
-                            bestMatch: collectionDisplayName(selectedRecommendation.vectorBreakdown.bestMatchedCollection)
-                        )
-                        if !selectedRecommendation.matchedMemberships.isEmpty {
-                            detailLine(
-                                "Matched Scope",
-                                selectedRecommendation.matchedMemberships.joined(separator: " • ")
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                isSelectedRecommendationBreakdownExpanded.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Text("Selected Recommendation Breakdown")
+                                    .font(.headline)
+                                Spacer(minLength: 8)
+                                Image(systemName: isSelectedRecommendationBreakdownExpanded ? "chevron.up" : "chevron.down")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("selected-recommendation-breakdown-toggle")
+
+                        if isSelectedRecommendationBreakdownExpanded {
+                            Text("\(selectedRecommendation.track.title) - \(selectedRecommendation.track.artist)")
+                                .font(.headline)
+                            breakdownRow("Embedding", selectedRecommendation.breakdown.embeddingSimilarity)
+                            breakdownRow("BPM", selectedRecommendation.breakdown.bpmCompatibility)
+                            breakdownRow("Key", selectedRecommendation.breakdown.harmonicCompatibility)
+                            breakdownRow("Energy Flow", selectedRecommendation.breakdown.energyFlow)
+                            breakdownRow("Transition", selectedRecommendation.breakdown.transitionRegionMatch)
+                            breakdownRow("External", selectedRecommendation.breakdown.externalMetadataScore)
+                            Divider()
+                            vectorBreakdownSection(
+                                breakdown: selectedRecommendation.vectorBreakdown,
+                                bestMatch: collectionDisplayName(selectedRecommendation.vectorBreakdown.bestMatchedCollection)
                             )
-                        }
-                        if !selectedRecommendation.mixabilityTags.isEmpty {
-                            detailLine("Tags", selectedRecommendation.mixabilityTags.joined(separator: ", "))
-                        }
-                        if !selectedRecommendation.matchReasons.isEmpty {
-                            Text(selectedRecommendation.matchReasons.joined(separator: " • "))
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
-                        if let scoreSessionID = selectedRecommendation.scoreSessionID {
-                            Text("Score session \(scoreSessionID.uuidString.prefix(8))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            if !selectedRecommendation.matchedMemberships.isEmpty {
+                                detailLine(
+                                    "Matched Scope",
+                                    selectedRecommendation.matchedMemberships.joined(separator: " • ")
+                                )
+                            }
+                            if !selectedRecommendation.mixabilityTags.isEmpty {
+                                detailLine("Tags", selectedRecommendation.mixabilityTags.joined(separator: ", "))
+                            }
+                            if !selectedRecommendation.matchReasons.isEmpty {
+                                Text(selectedRecommendation.matchReasons.joined(separator: " • "))
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if let scoreSessionID = selectedRecommendation.scoreSessionID {
+                                Text("Score session \(scoreSessionID.uuidString.prefix(8))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -219,7 +277,7 @@ struct MixAssistantView: View {
                     .font(.headline)
                 Spacer()
                 Button("Clear") { viewModel.clearPlaylist() }
-                    .disabled(viewModel.playlistTracks.isEmpty)
+                    .disabled(viewModel.playlistTracks.isEmpty || viewModel.isBuildingPlaylist)
             }
 
             List(viewModel.playlistTracks) { track in
@@ -231,6 +289,7 @@ struct MixAssistantView: View {
                     }
                     Spacer()
                     Button("Remove") { viewModel.removeFromPlaylist(track.id) }
+                        .disabled(viewModel.isBuildingPlaylist)
                 }
             }
             .frame(minHeight: 140, idealHeight: 160, maxHeight: 220)
@@ -247,10 +306,14 @@ struct MixAssistantView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else {
-                    Button("Generate") { viewModel.generateRecommendations() }
+                    Button(viewModel.recommendationGenerateButtonTitle) { viewModel.generateRecommendations() }
                         .disabled(!viewModel.canRunRecommendationActions)
-                    Button("Build Playlist Path") { viewModel.buildPlaylistPath() }
-                        .disabled(!viewModel.canRunRecommendationActions)
+                        .accessibilityIdentifier("recommendation-generate-button")
+                    Button(viewModel.isBuildingPlaylist ? "Building Playlist..." : "Build Playlist Path") {
+                        viewModel.buildPlaylistPath()
+                    }
+                    .disabled(!viewModel.canBuildGeneratedPlaylistPath)
+                    .accessibilityIdentifier("recommendation-build-playlist-button")
                 }
             }
 
@@ -261,27 +324,100 @@ struct MixAssistantView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else {
-                    Button("Generate") { viewModel.generateRecommendations() }
+                    Button(viewModel.recommendationGenerateButtonTitle) { viewModel.generateRecommendations() }
                         .disabled(!viewModel.canRunRecommendationActions)
-                    Button("Build Playlist Path") { viewModel.buildPlaylistPath() }
-                        .disabled(!viewModel.canRunRecommendationActions)
+                        .accessibilityIdentifier("recommendation-generate-button")
+                    Button(viewModel.isBuildingPlaylist ? "Building Playlist..." : "Build Playlist Path") {
+                        viewModel.buildPlaylistPath()
+                    }
+                    .disabled(!viewModel.canBuildGeneratedPlaylistPath)
+                    .accessibilityIdentifier("recommendation-build-playlist-button")
                 }
             }
         }
     }
 
+    private var recommendationCurationControls: some View {
+        GroupBox("Generated Matches") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(viewModel.curatedRecommendationsSummaryText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("recommendation-curation-summary")
+
+                HStack(spacing: 8) {
+                    Button("Remove Selected") {
+                        viewModel.removeSelectedGeneratedRecommendations()
+                    }
+                    .disabled(!viewModel.canRemoveSelectedGeneratedRecommendations)
+                    .accessibilityIdentifier("recommendation-remove-selected-button")
+
+                    Button("Restore All") {
+                        viewModel.restoreGeneratedRecommendations()
+                    }
+                    .disabled(!viewModel.canRestoreGeneratedRecommendations)
+                    .accessibilityIdentifier("recommendation-restore-all-button")
+
+                    Spacer(minLength: 0)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func playlistBuildProgressCard(_ progress: PlaylistBuildProgress) -> some View {
+        GroupBox("Playlist Build") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(progress.headlineText)
+                        .font(.headline)
+                        .accessibilityIdentifier("playlist-build-progress-headline")
+                    Spacer()
+                    Text("\(Int(progress.clampedProgress * 100))%")
+                        .font(.footnote.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                ProgressView(value: progress.clampedProgress, total: 1)
+
+                Text(progress.message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("playlist-build-progress-message")
+
+                if !progress.currentSeedTitle.isEmpty {
+                    detailLine("Current Seed", progress.currentSeedTitle)
+                }
+                if let latestTrackTitle = progress.latestTrackTitle, !latestTrackTitle.isEmpty {
+                    detailLine("Latest Track", latestTrackTitle)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier("playlist-build-progress-card")
+    }
+
     private var recommendationQueryField: some View {
         TextField("Describe the mix vibe or transition you want", text: $viewModel.recommendationQueryText)
             .textFieldStyle(.roundedBorder)
+            .disabled(viewModel.recommendationInteractionDisabled)
+            .accessibilityIdentifier("recommendation-query-field")
     }
 
-    private var resultLimitStepper: some View {
-        Stepper(
-            "Results \(viewModel.recommendationResultLimit)",
-            value: $viewModel.recommendationResultLimit,
-            in: RecommendationInputState.minimumResultLimit...RecommendationInputState.maximumResultLimit
-        )
-        .frame(width: 180, alignment: .leading)
+    private var resultLimitPicker: some View {
+        Picker(
+            "Count \(viewModel.recommendationResultLimit)",
+            selection: $viewModel.recommendationResultLimit,
+        ) {
+            ForEach(RecommendationInputState.supportedResultLimits, id: \.self) { limit in
+                Text("\(limit)").tag(limit)
+            }
+        }
+        .pickerStyle(.menu)
+        .frame(width: 140, alignment: .leading)
+        .disabled(viewModel.recommendationInteractionDisabled)
+        .accessibilityIdentifier("recommendation-result-limit-picker")
     }
 
     private var advancedScoreControls: some View {
@@ -379,6 +515,15 @@ struct MixAssistantView: View {
                                 step: 0.25
                             )
                             NumericSliderField(title: "Key Strictness", value: $viewModel.constraints.keyStrictness, range: 0...1)
+                            Picker("Genre Lens", selection: $viewModel.constraints.genreSearchMode) {
+                                ForEach(GenreSearchMode.allCases) { mode in
+                                    Text(mode.displayName).tag(mode)
+                                }
+                            }
+                            .frame(width: 220)
+                            Text(viewModel.constraints.genreSearchMode.helperText)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
                             NumericSliderField(title: "Genre Continuity", value: $viewModel.constraints.genreContinuity, range: 0...1)
                             NumericSliderField(
                                 title: "External Priority",
@@ -407,12 +552,24 @@ struct MixAssistantView: View {
                                 .onChange(of: excludeTagsText) { _, newValue in
                                     viewModel.constraints.excludeTags = splitTags(newValue)
                                 }
+
+                            TextField("Include folders (comma-separated)", text: $includeFoldersText)
+                                .textFieldStyle(.roundedBorder)
+                                .onChange(of: includeFoldersText) { _, newValue in
+                                    viewModel.constraints.includeFolders = splitConstraintValues(newValue)
+                                }
+
+                            TextField("Exclude folders (comma-separated)", text: $excludeFoldersText)
+                                .textFieldStyle(.roundedBorder)
+                                .onChange(of: excludeFoldersText) { _, newValue in
+                                    viewModel.constraints.excludeFolders = splitConstraintValues(newValue)
+                                }
                         }
 
                         HStack {
                             Button("Reset to Defaults") {
                                 viewModel.resetMixsetScoringControls()
-                                hydrateTagEditorsFromConstraints()
+                                hydrateConstraintEditorsFromState()
                             }
                             Spacer()
                         }
@@ -421,6 +578,7 @@ struct MixAssistantView: View {
                 }
             }
         }
+        .disabled(viewModel.recommendationInteractionDisabled)
         .accessibilityIdentifier("advanced-score-controls")
     }
 
@@ -440,6 +598,7 @@ struct MixAssistantView: View {
                 }
             }
         }
+        .disabled(viewModel.isBuildingPlaylist)
     }
 
     private func chipView(_ text: String) -> some View {
@@ -450,12 +609,18 @@ struct MixAssistantView: View {
             .background(Color.secondary.opacity(0.12), in: Capsule())
     }
 
-    private func hydrateTagEditorsFromConstraints() {
+    private func hydrateConstraintEditorsFromState() {
         includeTagsText = viewModel.constraints.includeTags.joined(separator: ", ")
         excludeTagsText = viewModel.constraints.excludeTags.joined(separator: ", ")
+        includeFoldersText = viewModel.constraints.includeFolders.joined(separator: ", ")
+        excludeFoldersText = viewModel.constraints.excludeFolders.joined(separator: ", ")
     }
 
     private func splitTags(_ input: String) -> [String] {
+        splitConstraintValues(input)
+    }
+
+    private func splitConstraintValues(_ input: String) -> [String] {
         input
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -526,6 +691,14 @@ struct MixAssistantView: View {
         default:
             return collection.capitalized
         }
+    }
+
+    private func curationToggleIdentifier(for row: RecommendationCandidate) -> String {
+        let sanitizedTitle = row.track.title
+            .lowercased()
+            .map { $0.isLetter || $0.isNumber ? String($0) : "-" }
+            .joined()
+        return "recommendation-curation-toggle-\(sanitizedTitle)"
     }
 }
 

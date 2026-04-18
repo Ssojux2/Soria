@@ -32,6 +32,64 @@ struct RecommendationCandidate: Identifiable, Hashable {
     let scoreSessionID: UUID?
 }
 
+enum PlaylistBuildStage: String, Hashable, Sendable {
+    case resolvingSeed
+    case preparingCuratedPool
+    case orderingTrack
+    case finalizingQueue
+    case completed
+    case failed
+
+    var displayName: String {
+        switch self {
+        case .resolvingSeed:
+            return "Resolving Seed"
+        case .preparingCuratedPool:
+            return "Preparing Curated Pool"
+        case .orderingTrack:
+            return "Ordering Tracks"
+        case .finalizingQueue:
+            return "Finalizing Queue"
+        case .completed:
+            return "Playlist Ready"
+        case .failed:
+            return "Build Failed"
+        }
+    }
+}
+
+struct PlaylistBuildProgress: Hashable, Sendable {
+    let stage: PlaylistBuildStage
+    let completedCount: Int
+    let totalCount: Int
+    let progress: Double
+    let currentSeedTitle: String
+    let latestTrackTitle: String?
+    let message: String
+
+    var headlineText: String {
+        switch stage {
+        case .orderingTrack:
+            let nextIndex = min(max(completedCount + 1, 1), max(totalCount, 1))
+            return "Ordering track \(nextIndex)/\(max(totalCount, 1))"
+        case .resolvingSeed:
+            return "Resolving seed"
+        case .preparingCuratedPool:
+            return "Preparing curated pool"
+        case .finalizingQueue:
+            return "Finalizing queue"
+        case .completed:
+            return "Playlist ready"
+        case .failed:
+            return "Playlist build failed"
+        }
+    }
+
+    var clampedProgress: Double {
+        min(max(progress, 0), 1)
+    }
+}
+
 struct RecommendationWeights: Codable, Hashable {
     var embed: Double = 0.45
     var bpm: Double = 0.15
@@ -115,12 +173,56 @@ struct MixsetVectorWeights: Codable, Hashable {
     }
 }
 
+enum GenreSearchMode: String, Codable, CaseIterable, Identifiable {
+    case auto
+    case lock
+    case expand
+    case any
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .auto:
+            return "Auto"
+        case .lock:
+            return "Lock"
+        case .expand:
+            return "Expand"
+        case .any:
+            return "Any"
+        }
+    }
+
+    var helperText: String {
+        switch self {
+        case .auto:
+            return "Follow the seed track family when Soria can infer one."
+        case .lock:
+            return "Keep recommendations inside the same genre family."
+        case .expand:
+            return "Favor the same family, but allow related families."
+        case .any:
+            return "Do not use genre family to constrain recommendations."
+        }
+    }
+}
+
+struct GenreDescriptor: Codable, Hashable {
+    let canonicalGenre: String?
+    let primaryFamily: String?
+    let aliases: [String]
+    let relatedFamilies: [String]
+    let pathHints: [String]
+}
+
 struct RecommendationConstraints: Codable, Hashable {
     var targetBPMMin: Double?
     var targetBPMMax: Double?
     var analysisFocus: AnalysisFocus?
     var keyStrictness: Double = 0.6
     var genreContinuity: Double = 0.5
+    var genreSearchMode: GenreSearchMode = .auto
     var maxDurationMinutes: Double?
     var includeFolders: [String] = []
     var excludeFolders: [String] = []
@@ -136,6 +238,7 @@ struct RecommendationConstraints: Codable, Hashable {
         analysisFocus: AnalysisFocus? = nil,
         keyStrictness: Double = 0.6,
         genreContinuity: Double = 0.5,
+        genreSearchMode: GenreSearchMode = .auto,
         maxDurationMinutes: Double? = nil,
         includeFolders: [String] = [],
         excludeFolders: [String] = [],
@@ -148,6 +251,7 @@ struct RecommendationConstraints: Codable, Hashable {
         self.analysisFocus = analysisFocus
         self.keyStrictness = keyStrictness
         self.genreContinuity = genreContinuity
+        self.genreSearchMode = genreSearchMode
         self.maxDurationMinutes = maxDurationMinutes
         self.includeFolders = includeFolders
         self.excludeFolders = excludeFolders
@@ -163,6 +267,7 @@ struct RecommendationConstraints: Codable, Hashable {
             case analysisFocus
             case keyStrictness
             case genreContinuity
+            case genreSearchMode
             case maxDurationMinutes
             case includeFolders
             case excludeFolders
@@ -178,6 +283,7 @@ struct RecommendationConstraints: Codable, Hashable {
         analysisFocus = try container.decodeIfPresent(AnalysisFocus.self, forKey: .analysisFocus)
         keyStrictness = try container.decodeIfPresent(Double.self, forKey: .keyStrictness) ?? Self.defaults.keyStrictness
         genreContinuity = try container.decodeIfPresent(Double.self, forKey: .genreContinuity) ?? Self.defaults.genreContinuity
+        genreSearchMode = try container.decodeIfPresent(GenreSearchMode.self, forKey: .genreSearchMode) ?? Self.defaults.genreSearchMode
         maxDurationMinutes = try container.decodeIfPresent(Double.self, forKey: .maxDurationMinutes)
         includeFolders = try container.decodeIfPresent([String].self, forKey: .includeFolders) ?? []
         excludeFolders = try container.decodeIfPresent([String].self, forKey: .excludeFolders) ?? []

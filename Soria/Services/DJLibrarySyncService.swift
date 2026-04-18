@@ -48,7 +48,10 @@ struct VendorLibraryTrackRecord: Hashable {
 }
 
 struct NativeLibrarySyncSummary {
-    var mergedTrackCount: Int
+    var matchedTrackCount: Int
+    var matchedEntryCount: Int
+    var unmatchedEntryCount: Int
+    var referenceAttachmentCount: Int
     var importedCounts: [LibrarySourceKind: Int]
 
     var displayText: String {
@@ -60,9 +63,9 @@ struct NativeLibrarySyncSummary {
             .joined(separator: " | ")
 
         if orderedCounts.isEmpty {
-            return "No DJ library tracks were synced."
+            return "No vendor metadata sources were refreshed."
         }
-        return "Synced \(mergedTrackCount) canonical tracks. \(orderedCounts)"
+        return "Matched \(matchedTrackCount) local tracks, attached \(referenceAttachmentCount) vendor references, and left \(unmatchedEntryCount) vendor entries unmatched. \(orderedCounts)"
     }
 }
 
@@ -685,6 +688,7 @@ final class DJLibrarySyncService {
         _ sources: [LibrarySourceRecord],
         onProgress: @escaping @Sendable (ScanJobProgress) -> Void
     ) async throws -> NativeLibrarySyncSummary {
+        await Task.yield()
         var importedCounts: [LibrarySourceKind: Int] = [:]
         var importedTracks: [VendorLibraryTrackRecord] = []
 
@@ -705,180 +709,164 @@ final class DJLibrarySyncService {
             }
         }
 
-        let mergedTrackCount = try await syncImportedTracks(importedTracks, onProgress: onProgress)
-        return NativeLibrarySyncSummary(mergedTrackCount: mergedTrackCount, importedCounts: importedCounts)
+        let enrichmentSummary = try await syncImportedTracks(importedTracks, onProgress: onProgress)
+        return NativeLibrarySyncSummary(
+            matchedTrackCount: enrichmentSummary.matchedTrackCount,
+            matchedEntryCount: enrichmentSummary.matchedEntryCount,
+            unmatchedEntryCount: enrichmentSummary.unmatchedEntryCount,
+            referenceAttachmentCount: enrichmentSummary.referenceAttachmentCount,
+            importedCounts: importedCounts
+        )
     }
 
-    @discardableResult
     func syncImportedTracks(
         _ importedTracks: [VendorLibraryTrackRecord],
         onProgress: @escaping @Sendable (ScanJobProgress) -> Void = { _ in }
-    ) async throws -> Int {
+    ) async throws -> VendorEnrichmentSyncSummary {
+        await Task.yield()
         var progress = ScanJobProgress()
         progress.totalFiles = importedTracks.count
         progress.isRunning = true
         onProgress(progress)
 
-        var mergedPaths = Set<String>()
+        let localTracks = try database.fetchScannedTracks()
+        let localTracksByPath = Dictionary(uniqueKeysWithValues: localTracks.map { ($0.filePath, $0) })
+        var localTracksByID = Dictionary(uniqueKeysWithValues: localTracks.map { ($0.id, $0) })
+        let localTracksByHash = Dictionary(
+            grouping: localTracks,
+            by: \.contentHash
+        ).compactMapValues { matches in
+            matches.sorted { lhs, rhs in
+                let lhsDate = lhs.lastSeenInLocalScanAt ?? .distantPast
+                let rhsDate = rhs.lastSeenInLocalScanAt ?? .distantPast
+                if lhsDate == rhsDate {
+                    return lhs.filePath.localizedStandardCompare(rhs.filePath) == .orderedAscending
+                }
+                return lhsDate > rhsDate
+            }.first
+        }
+
+        var importedHashCache: [String: String?] = [:]
+        var groupedEntries: [VendorEnrichmentTarget: [VendorLibraryTrackRecord]] = [:]
+        var matchedTrackIDs = Set<UUID>()
+        var matchedEntryCount = 0
+        var unmatchedEntryCount = 0
+        var referenceAttachmentCount = 0
+
         for importedTrack in importedTracks {
             progress.scannedFiles += 1
             progress.currentFile = importedTrack.fileName
             onProgress(progress)
 
-            try await upsert(importedTrack)
-            mergedPaths.insert(importedTrack.normalizedPath)
-            progress.indexedFiles += 1
+            if let target = resolveEnrichmentTarget(
+                for: importedTrack,
+                localTracksByPath: localTracksByPath,
+                localTracksByHash: localTracksByHash,
+                importedHashCache: &importedHashCache
+            ) {
+                groupedEntries[target, default: []].append(importedTrack)
+                matchedTrackIDs.insert(target.trackID)
+                matchedEntryCount += 1
+                referenceAttachmentCount += importedTrack.metadata.playlistMemberships.count
+                progress.indexedFiles += 1
+            } else {
+                unmatchedEntryCount += 1
+                progress.skippedFiles += 1
+            }
             onProgress(progress)
+        }
+
+        for (target, records) in groupedEntries {
+            guard let localTrack = localTracksByID[target.trackID] else { continue }
+            let updatedTrack = enrich(track: localTrack, with: records, source: target.source)
+            try database.upsertTrack(updatedTrack)
+            localTracksByID[target.trackID] = updatedTrack
+            try database.replaceExternalMetadata(
+                trackID: updatedTrack.id,
+                source: target.source,
+                entries: records.map(\.metadata)
+            )
         }
 
         progress.isRunning = false
         onProgress(progress)
-        return mergedPaths.count
+        return VendorEnrichmentSyncSummary(
+            matchedTrackCount: matchedTrackIDs.count,
+            matchedEntryCount: matchedEntryCount,
+            unmatchedEntryCount: unmatchedEntryCount,
+            referenceAttachmentCount: referenceAttachmentCount
+        )
     }
 
-    private func upsert(_ importedTrack: VendorLibraryTrackRecord) async throws {
-        let normalizedPath = importedTrack.normalizedPath
-        let existing = try database.fetchTrack(path: normalizedPath)
-        let fileURL = URL(fileURLWithPath: normalizedPath)
+    private func resolveEnrichmentTarget(
+        for importedTrack: VendorLibraryTrackRecord,
+        localTracksByPath: [String: Track],
+        localTracksByHash: [String: Track],
+        importedHashCache: inout [String: String?]
+    ) -> VendorEnrichmentTarget? {
+        if let exactTrack = localTracksByPath[importedTrack.normalizedPath] {
+            return VendorEnrichmentTarget(trackID: exactTrack.id, source: importedTrack.source)
+        }
 
-        var track = existing ?? Track.empty(
-            path: normalizedPath,
-            modifiedTime: existing?.modifiedTime ?? .distantPast,
-            hash: existing?.contentHash ?? "vendor:\(normalizedPath)"
-        )
-
-        let fileExists = fileManager.fileExists(atPath: normalizedPath)
-        let attributes = fileExists ? try? fileManager.attributesOfItem(atPath: normalizedPath) : nil
-        let modifiedTime = (attributes?[.modificationDate] as? Date) ?? existing?.modifiedTime ?? .distantPast
-
-        var contentHash = existing?.contentHash ?? "vendor:\(normalizedPath)"
-        var sampleRate = existing?.sampleRate ?? 0
-        var audioMetadata: (
-            title: String,
-            artist: String,
-            album: String,
-            genre: String,
-            duration: TimeInterval,
-            sampleRate: Double,
-            bpm: Double?,
-            musicalKey: String?
-        )?
-
-        let fileChanged: Bool
-        if fileExists {
-            if let existing {
-                fileChanged = existing.modifiedTime != modifiedTime
+        let hash = importedHashCache[importedTrack.normalizedPath] ?? {
+            let path = importedTrack.normalizedPath
+            let pathHash: String?
+            if fileManager.fileExists(atPath: path) {
+                pathHash = FileHashingService.contentHash(for: URL(fileURLWithPath: path))
             } else {
-                fileChanged = true
+                pathHash = nil
             }
-            if fileChanged || existing == nil {
-                contentHash = FileHashingService.contentHash(for: fileURL)
-            }
-            let shouldReadAudioMetadata = existing == nil ||
-                importedTrack.artist.isEmpty ||
-                importedTrack.album.isEmpty ||
-                importedTrack.genre.isEmpty ||
-                importedTrack.duration == nil ||
-                (importedTrack.bpm == nil && track.bpm == nil) ||
-                (importedTrack.musicalKey == nil && track.musicalKey == nil) ||
-                sampleRate == 0
+            importedHashCache[path] = pathHash
+            return pathHash
+        }()
 
-            if shouldReadAudioMetadata {
-                audioMetadata = await AudioMetadataReader.readMetadata(for: fileURL)
-                sampleRate = audioMetadata?.sampleRate ?? sampleRate
-            }
-        } else {
-            fileChanged = false
+        guard let hash, let hashedTrack = localTracksByHash[hash] else {
+            return nil
         }
-
-        if fileChanged, let existing, existing.analyzedAt != nil {
-            try database.clearAnalysis(trackID: existing.id)
-            await invalidateVectorIndex(existing)
-            track.analyzedAt = nil
-            track.embeddingProfileID = nil
-            track.embeddingPipelineID = nil
-            track.embeddingUpdatedAt = nil
-            if track.bpmSource == .soriaAnalysis {
-                track.bpm = nil
-                track.bpmSource = nil
-            }
-            if track.keySource == .soriaAnalysis {
-                track.musicalKey = nil
-                track.keySource = nil
-            }
-        } else {
-            track.analyzedAt = existing?.analyzedAt
-        }
-
-        track.filePath = normalizedPath
-        track.fileName = importedTrack.fileName
-        track.modifiedTime = modifiedTime
-        track.contentHash = contentHash
-        track.sampleRate = sampleRate
-
-        track.title = firstNonEmpty(
-            importedTrack.title,
-            existing?.title,
-            audioMetadata?.title,
-            URL(fileURLWithPath: importedTrack.fileName).deletingPathExtension().lastPathComponent
-        )
-        track.artist = firstNonEmpty(importedTrack.artist, existing?.artist, audioMetadata?.artist)
-        track.album = firstNonEmpty(importedTrack.album, existing?.album, audioMetadata?.album)
-        track.genre = firstNonEmpty(importedTrack.genre, existing?.genre, audioMetadata?.genre)
-        track.duration = importedTrack.duration ?? existing?.duration ?? audioMetadata?.duration ?? 0
-
-        if importedTrack.source == .serato {
-            track.hasSeratoMetadata = true
-        }
-        if importedTrack.source == .rekordbox {
-            track.hasRekordboxMetadata = true
-        }
-
-        if shouldAdoptMetadataValue(
-            importedTrack.bpm,
-            from: importedTrack.metadataSource,
-            over: track.bpm,
-            currentSource: track.bpmSource
-        ) {
-            track.bpm = importedTrack.bpm
-            track.bpmSource = importedTrack.metadataSource
-        } else if shouldAdoptMetadataValue(
-            audioMetadata?.bpm,
-            from: .audioTags,
-            over: track.bpm,
-            currentSource: track.bpmSource
-        ) {
-            track.bpm = audioMetadata?.bpm
-            track.bpmSource = .audioTags
-        }
-
-        if shouldAdoptMetadataValue(
-            importedTrack.musicalKey,
-            from: importedTrack.metadataSource,
-            over: track.musicalKey,
-            currentSource: track.keySource
-        ) {
-            track.musicalKey = importedTrack.musicalKey
-            track.keySource = importedTrack.metadataSource
-        } else if shouldAdoptMetadataValue(
-            audioMetadata?.musicalKey,
-            from: .audioTags,
-            over: track.musicalKey,
-            currentSource: track.keySource
-        ) {
-            track.musicalKey = audioMetadata?.musicalKey
-            track.keySource = .audioTags
-        }
-
-        try database.upsertTrack(track)
-        try database.replaceExternalMetadata(
-            trackID: track.id,
-            source: importedTrack.source,
-            entries: [importedTrack.metadata]
-        )
+        return VendorEnrichmentTarget(trackID: hashedTrack.id, source: importedTrack.source)
     }
 
-    private func firstNonEmpty(_ values: String?...) -> String {
+    private func enrich(
+        track: Track,
+        with records: [VendorLibraryTrackRecord],
+        source: ExternalDJMetadata.Source
+    ) -> Track {
+        var updatedTrack = track
+        let metadataSource: TrackMetadataSource = source == .serato ? .serato : .rekordbox
+
+        updatedTrack.title = firstNonEmpty(records.map(\.title) + [track.title])
+        updatedTrack.artist = firstNonEmpty(records.map(\.artist) + [track.artist])
+        updatedTrack.album = firstNonEmpty(records.map(\.album) + [track.album])
+        updatedTrack.genre = firstNonEmpty(records.map(\.genre) + [track.genre])
+        if updatedTrack.duration <= 0, let duration = records.compactMap(\.duration).first(where: { $0 > 0 }) {
+            updatedTrack.duration = duration
+        }
+
+        if source == .serato {
+            updatedTrack.hasSeratoMetadata = true
+        }
+        if source == .rekordbox {
+            updatedTrack.hasRekordboxMetadata = true
+        }
+
+        if let importedBPM = records.compactMap(\.bpm).first,
+           shouldAdoptMetadataValue(importedBPM, from: metadataSource, over: updatedTrack.bpm, currentSource: updatedTrack.bpmSource)
+        {
+            updatedTrack.bpm = importedBPM
+            updatedTrack.bpmSource = metadataSource
+        }
+
+        if let importedKey = records.compactMap(\.musicalKey).first,
+           shouldAdoptMetadataValue(importedKey, from: metadataSource, over: updatedTrack.musicalKey, currentSource: updatedTrack.keySource)
+        {
+            updatedTrack.musicalKey = importedKey
+            updatedTrack.keySource = metadataSource
+        }
+
+        return updatedTrack
+    }
+
+    private func firstNonEmpty(_ values: [String?]) -> String {
         values.compactMap { value -> String? in
             guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
                 return nil
@@ -963,6 +951,18 @@ private struct RekordboxAggregate {
         }
         return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
+}
+
+struct VendorEnrichmentSyncSummary {
+    let matchedTrackCount: Int
+    let matchedEntryCount: Int
+    let unmatchedEntryCount: Int
+    let referenceAttachmentCount: Int
+}
+
+private struct VendorEnrichmentTarget: Hashable {
+    let trackID: UUID
+    let source: ExternalDJMetadata.Source
 }
 
 private struct SQLiteCuePointTableSpec {

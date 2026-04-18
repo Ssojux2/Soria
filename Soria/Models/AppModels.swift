@@ -309,6 +309,8 @@ struct PreparationOverviewState: Equatable {
     let message: String
     let progress: Double?
     let primaryAction: PreparationOverviewAction?
+    let primaryActionTitleOverride: String?
+    let isPrimaryActionDisabled: Bool
     let secondaryAction: PreparationOverviewAction?
     let isCancellable: Bool
     let showSuccess: Bool
@@ -332,12 +334,32 @@ struct PreparationOverviewContext: Equatable {
     var preparationBlockedMessage: String?
     var isAnalyzing: Bool = false
     var isCancellingAnalysis: Bool = false
+    var analysisSessionProgress: AnalysisSessionProgress?
     var analysisActivity: AnalysisActivity?
     var preparationNotice: PreparationNotice?
     var analysisErrorMessage: String = ""
     var scanProgress = ScanJobProgress()
     var syncingSourceNames: [String] = []
     var libraryStatusMessage: String = ""
+}
+
+enum LibrarySyncPresentationPhase: String, Equatable {
+    case running
+    case failed
+}
+
+struct LibrarySyncPresentationState: Equatable {
+    var isPresented: Bool = true
+    var phase: LibrarySyncPresentationPhase = .running
+    var title: String = "Refreshing Library"
+    var message: String = "Preparing library update."
+    var progress: Double?
+    var isIndeterminate: Bool = true
+    var sourceNames: [String] = []
+    var startedAt = Date()
+    var result: String?
+    var currentFile: String = ""
+    var stats = ScanJobProgress()
 }
 
 enum TrackWorkflowStatus: String, Codable, Hashable {
@@ -659,8 +681,8 @@ enum RecommendationSeedSource: Equatable {
 }
 
 struct RecommendationInputState: Equatable {
-    static let minimumResultLimit = 10
-    static let maximumResultLimit = 100
+    static let supportedResultLimits = [30, 60, 90, 120]
+    static let defaultResultLimit = supportedResultLimits[0]
 
     let mode: RecommendationInputMode
     let queryText: String
@@ -710,7 +732,14 @@ struct RecommendationInputState: Equatable {
     }
 
     static func clampedResultLimit(_ value: Int) -> Int {
-        min(max(value, minimumResultLimit), maximumResultLimit)
+        supportedResultLimits.min { lhs, rhs in
+            let leftDistance = abs(lhs - value)
+            let rightDistance = abs(rhs - value)
+            if leftDistance == rightDistance {
+                return lhs < rhs
+            }
+            return leftDistance < rightDistance
+        } ?? defaultResultLimit
     }
 }
 
@@ -813,7 +842,7 @@ enum LibrarySourceKind: String, CaseIterable, Codable, Hashable {
         case .rekordbox:
             return "rekordbox"
         case .folderFallback:
-            return "Manual Folder Fallback"
+            return "Music Folders"
         }
     }
 

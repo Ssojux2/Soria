@@ -11,10 +11,21 @@ fi
 
 mkdir -p "${DST_DIR}"
 
+RSYNC_EXCLUDES="
+  --exclude=.pytest_cache
+  --exclude=__pycache__
+  --exclude=tests
+"
+
+if [ "${SORIA_SKIP_BUNDLED_VENV_FOR_UI_TESTS:-0}" = "1" ]; then
+  RSYNC_EXCLUDES="${RSYNC_EXCLUDES}
+  --exclude=.venv
+"
+fi
+
+# shellcheck disable=SC2086
 /usr/bin/rsync -a --delete \
-  --exclude='.pytest_cache' \
-  --exclude='__pycache__' \
-  --exclude='tests' \
+  ${RSYNC_EXCLUDES} \
   "${SRC_DIR}/" "${DST_DIR}/"
 
 if [ -f "${DST_DIR}/.venv/bin/python" ]; then

@@ -118,6 +118,98 @@ extension SoriaTests {
     }
 
     @Test
+    func librarySearchMatchesTrackTitle() {
+        let track = makeTrack(
+            title: "Ready Track",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+
+        #expect(AppViewModel.libraryTrackMatchesSearch(track, queryText: "ready"))
+    }
+
+    @Test
+    func librarySearchMatchesTrackArtist() {
+        let track = makeTrack(
+            title: "Unknown",
+            artist: "Fixture Artist",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+
+        #expect(AppViewModel.libraryTrackMatchesSearch(track, queryText: "fixture"))
+    }
+
+    @Test
+    func librarySearchMatchesTokensAcrossTitleAndArtist() {
+        let track = makeTrack(
+            title: "Ready Track",
+            artist: "Fixture Artist",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+
+        #expect(AppViewModel.libraryTrackMatchesSearch(track, queryText: "fixture ready"))
+    }
+
+    @Test
+    func librarySearchRejectsPartialTokenMatches() {
+        let track = makeTrack(
+            title: "Ready Track",
+            artist: "Fixture Artist",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+
+        #expect(AppViewModel.libraryTrackMatchesSearch(track, queryText: "fixture pending") == false)
+    }
+
+    @Test
+    func librarySearchTokensNormalizeWhitespaceAndCase() {
+        let track = makeTrack(
+            title: "Ready Track",
+            artist: "Fixture Artist",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+
+        #expect(AppViewModel.librarySearchTokens(from: "  FiXture   READY \n") == ["fixture", "ready"])
+        #expect(AppViewModel.libraryTrackMatchesSearch(track, queryText: "  FiXture   READY \n"))
+    }
+
+    @Test
+    @MainActor
+    func librarySearchClearsSelectionWhenSelectedTrackBecomesHidden() {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        let selectedTrack = makeTrack(
+            title: "Ready Track",
+            artist: "Fixture Artist",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+        let visibleTrack = makeTrack(
+            title: "Pending Track",
+            artist: "Fixture Artist",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+
+        viewModel.tracks = [selectedTrack, visibleTrack]
+        viewModel.selectedTrackIDs = [selectedTrack.id]
+        viewModel.librarySearchText = "pending"
+
+        #expect(viewModel.selectedTrackIDs.isEmpty)
+        #expect(viewModel.filteredTracks.map(\.id) == [visibleTrack.id])
+    }
+
+    @Test
     func selectionReadinessSummarizesBlendReferenceState() {
         let readiness = SelectionReadiness(
             signature: "a|b|c|d|e",
@@ -252,10 +344,306 @@ extension SoriaTests {
     }
 
     @Test
-    func recommendationResultLimitClampsToSupportedRange() {
-        #expect(RecommendationInputState.clampedResultLimit(3) == 10)
-        #expect(RecommendationInputState.clampedResultLimit(42) == 42)
-        #expect(RecommendationInputState.clampedResultLimit(120) == 100)
+    @MainActor
+    func libraryRecommendationSearchPreparationClearsTextAndResolvesSelectionOnlyMode() {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        let ready = makeTrack(
+            title: "Ready",
+            analyzedAt: Date(),
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+            embeddingUpdatedAt: Date()
+        )
+        let pending = makeTrack(
+            title: "Pending",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+
+        viewModel.configureRecommendationSearchStateForTesting(
+            tracks: [ready, pending],
+            selectedTrackIDs: [ready.id, pending.id],
+            readyTrackIDs: [ready.id],
+            validationStatus: .validated(Date()),
+            recommendationQueryText: "peak opener"
+        )
+
+        let action = viewModel.prepareRecommendationSearchFromLibrary()
+
+        #expect(action == .autoGenerate)
+        #expect(viewModel.selectedSection == .mixAssistant)
+        #expect(viewModel.recommendationQueryText.isEmpty)
+        #expect(viewModel.recommendationInputState?.mode == .reference)
+        #expect(viewModel.recommendationInputState?.readyReferenceCount == 1)
+    }
+
+    @Test
+    @MainActor
+    func libraryRecommendationSearchAutoGeneratesResultsWhenReadySelectionIsRunnable() async throws {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        let ready = makeTrack(
+            title: "Ready",
+            analyzedAt: Date(),
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+            embeddingUpdatedAt: Date()
+        )
+        let candidate = makeRecommendationCandidate(title: "Generated Candidate")
+
+        viewModel.configureRecommendationSearchStateForTesting(
+            tracks: [ready],
+            selectedTrackIDs: [ready.id],
+            readyTrackIDs: [ready.id],
+            validationStatus: .validated(Date()),
+            recommendationQueryText: "carryover text"
+        )
+        viewModel.setRecommendationGenerationStubForTesting(
+            results: [candidate],
+            delayNanoseconds: 50_000_000,
+            completionStatusMessage: "Generated 1 matches. Curate the list before building the playlist."
+        )
+
+        viewModel.openRecommendationSearchFromLibrary()
+
+        #expect(viewModel.selectedSection == .mixAssistant)
+        #expect(viewModel.recommendationQueryText.isEmpty)
+        #expect(viewModel.isGeneratingRecommendations)
+        #expect(viewModel.recommendationStatusMessage == "Generating matches from current library selection...")
+
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        #expect(viewModel.isGeneratingRecommendations == false)
+        #expect(viewModel.generatedRecommendations.map(\.track.id) == [candidate.track.id])
+        #expect(viewModel.recommendations.map(\.track.id) == [candidate.track.id])
+    }
+
+    @Test
+    @MainActor
+    func pendingOnlyLibraryRecommendationSearchNavigatesWithoutAutoGenerate() {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        let pending = makeTrack(
+            title: "Pending",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+
+        viewModel.configureRecommendationSearchStateForTesting(
+            tracks: [pending],
+            selectedTrackIDs: [pending.id],
+            readyTrackIDs: [],
+            validationStatus: .validated(Date()),
+            recommendationQueryText: "carryover text"
+        )
+
+        let action = viewModel.prepareRecommendationSearchFromLibrary()
+
+        #expect(action == .navigateOnly)
+        #expect(viewModel.selectedSection == .mixAssistant)
+        #expect(viewModel.recommendationQueryText.isEmpty)
+        #expect(viewModel.isGeneratingRecommendations == false)
+        #expect(viewModel.generatedRecommendations.isEmpty)
+        #expect(viewModel.recommendationInputState == nil)
+    }
+
+    @Test
+    @MainActor
+    func libraryRecommendationSearchReusesExistingGeneratedResultsForSelectionOnlyState() {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        let ready = makeTrack(
+            title: "Ready",
+            analyzedAt: Date(),
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+            embeddingUpdatedAt: Date()
+        )
+        let candidate = makeRecommendationCandidate(title: "Reusable Candidate")
+
+        viewModel.configureRecommendationSearchStateForTesting(
+            tracks: [ready],
+            selectedTrackIDs: [ready.id],
+            readyTrackIDs: [ready.id],
+            validationStatus: .validated(Date()),
+            recommendationQueryText: "   ",
+            recommendationStatusMessage: "Generated 1 matches. Curate the list before building the playlist.",
+            generatedRecommendations: [candidate]
+        )
+
+        let action = viewModel.prepareRecommendationSearchFromLibrary()
+
+        #expect(action == .reuseExistingResults)
+        #expect(viewModel.recommendationQueryText.isEmpty)
+        #expect(viewModel.isGeneratingRecommendations == false)
+        #expect(viewModel.generatedRecommendations.map(\.track.id) == [candidate.track.id])
+        #expect(viewModel.recommendations.map(\.track.id) == [candidate.track.id])
+    }
+
+    @Test
+    func recommendationResultLimitClampsToSupportedOptions() {
+        #expect(RecommendationInputState.clampedResultLimit(3) == 30)
+        #expect(RecommendationInputState.clampedResultLimit(42) == 30)
+        #expect(RecommendationInputState.clampedResultLimit(61) == 60)
+        #expect(RecommendationInputState.clampedResultLimit(120) == 120)
+        #expect(RecommendationInputState.clampedResultLimit(999) == 120)
+    }
+
+    @Test
+    @MainActor
+    func playlistPathTargetCountFollowsRecommendationResultLimit() {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+
+        viewModel.recommendationResultLimit = 20
+        #expect(viewModel.playlistPathTargetCount == 30)
+
+        viewModel.recommendationResultLimit = 61
+        #expect(viewModel.playlistPathTargetCount == 60)
+
+        viewModel.recommendationResultLimit = 120
+        #expect(viewModel.playlistPathTargetCount == 120)
+    }
+
+    @Test
+    func playlistPathStatusMessageIncludesRequestedCountWhenPartial() {
+        #expect(
+            AppViewModel.playlistPathStatusMessage(
+                builtCount: 14,
+                requestedCount: 20,
+                seedTitle: "Warmup Seed"
+            ) == "Built 14/20-track path from seed: Warmup Seed"
+        )
+        #expect(
+            AppViewModel.playlistPathStatusMessage(
+                builtCount: 20,
+                requestedCount: 20,
+                seedTitle: "Warmup Seed"
+            ) == "Built 20-track path from seed: Warmup Seed"
+        )
+    }
+
+    @Test
+    @MainActor
+    func generatedRecommendationsSupportCuratedRemovalRestoreAndInvalidation() {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        let first = makeRecommendationCandidate(title: "First Candidate")
+        let second = makeRecommendationCandidate(title: "Second Candidate")
+
+        viewModel.applyGeneratedRecommendationsForTesting([first, second])
+        viewModel.setRecommendationSelectedForCuration(first.track.id, isSelected: true)
+        viewModel.removeSelectedGeneratedRecommendations()
+
+        #expect(viewModel.generatedRecommendations.count == 2)
+        #expect(viewModel.recommendations.map(\.track.id) == [second.track.id])
+        #expect(viewModel.excludedGeneratedTrackIDs.contains(first.track.id))
+
+        viewModel.restoreGeneratedRecommendations()
+
+        #expect(viewModel.recommendations.map(\.track.id) == [first.track.id, second.track.id])
+        #expect(viewModel.excludedGeneratedTrackIDs.isEmpty)
+
+        viewModel.recommendationQueryText = "new direction"
+
+        #expect(viewModel.generatedRecommendations.isEmpty)
+        #expect(viewModel.recommendations.isEmpty)
+        #expect(viewModel.recommendationStatusMessage.contains("Generate again"))
+    }
+
+    @Test
+    @MainActor
+    func generateRecommendationsTogglesBusyStateAndBlocksDuplicateRequests() async throws {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        let ready = makeTrack(
+            title: "Ready",
+            analyzedAt: Date(),
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+            embeddingUpdatedAt: Date()
+        )
+        let candidate = makeRecommendationCandidate(title: "Busy Candidate")
+
+        viewModel.configureRecommendationSearchStateForTesting(
+            tracks: [ready],
+            selectedTrackIDs: [ready.id],
+            readyTrackIDs: [ready.id],
+            validationStatus: .validated(Date())
+        )
+        viewModel.setRecommendationGenerationStubForTesting(
+            results: [candidate],
+            delayNanoseconds: 100_000_000,
+            completionStatusMessage: "Generated 1 matches. Curate the list before building the playlist."
+        )
+
+        viewModel.generateRecommendations()
+
+        #expect(viewModel.isGeneratingRecommendations)
+        #expect(viewModel.recommendationStatusMessage == "Generating matches...")
+
+        viewModel.generateRecommendations()
+
+        #expect(viewModel.recommendationStatusMessage == "Recommendation search is already running.")
+
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        #expect(viewModel.isGeneratingRecommendations == false)
+        #expect(viewModel.generatedRecommendations.map(\.track.id) == [candidate.track.id])
+        #expect(viewModel.recommendations.map(\.track.id) == [candidate.track.id])
+    }
+
+    @Test
+    @MainActor
+    func curatedPlaylistBuilderUsesOnlyProvidedCandidatesAndExcludesSeedTrack() throws {
+        let seed = makeTrack(
+            title: "Seed",
+            analyzedAt: Date(),
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+            embeddingUpdatedAt: Date()
+        )
+        let first = makeTrack(
+            title: "First",
+            analyzedAt: Date(),
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+            embeddingUpdatedAt: Date()
+        )
+        let second = makeTrack(
+            title: "Second",
+            analyzedAt: Date(),
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+            embeddingUpdatedAt: Date()
+        )
+
+        let ordered = try AppViewModel.buildCuratedPlaylistCandidates(
+            seed: seed,
+            curatedCandidates: [
+                makeRecommendationCandidate(track: first, score: 0.85),
+                makeRecommendationCandidate(track: second, score: 0.80)
+            ],
+            embeddingsByTrackID: [
+                seed.id: [1.0, 0.0, 0.0],
+                first.id: [0.95, 0.05, 0.0],
+                second.id: [0.60, 0.40, 0.0]
+            ],
+            summariesByTrackID: [:],
+            libraryRoots: [],
+            constraints: RecommendationConstraints(),
+            weights: RecommendationWeights(),
+            vectorWeights: MixsetVectorWeights(),
+            vectorBreakdownProvider: { _, _ in [:] }
+        )
+
+        #expect(ordered.map(\.track.id) == [first.id, second.id])
+        #expect(ordered.contains(where: { $0.track.id == seed.id }) == false)
+    }
+
+    @Test
+    func playlistBuildProgressHeadlineTracksOrderingStage() {
+        let progress = PlaylistBuildProgress(
+            stage: .orderingTrack,
+            completedCount: 2,
+            totalCount: 5,
+            progress: 0.48,
+            currentSeedTitle: "Seed",
+            latestTrackTitle: "Third",
+            message: "Evaluating remaining curated tracks."
+        )
+
+        #expect(progress.headlineText == "Ordering track 3/5")
+        #expect(abs(progress.clampedProgress - 0.48) < 0.0001)
     }
 
     @Test
@@ -318,6 +706,8 @@ extension SoriaTests {
 
     private func makeTrack(
         id: UUID = UUID(),
+        title: String? = nil,
+        artist: String = "Artist",
         analyzedAt: Date?,
         embeddingProfileID: String?,
         embeddingUpdatedAt: Date?
@@ -326,8 +716,8 @@ extension SoriaTests {
             id: id,
             filePath: "/tmp/\(id.uuidString).mp3",
             fileName: "\(id.uuidString).mp3",
-            title: "Track \(id.uuidString.prefix(4))",
-            artist: "Artist",
+            title: title ?? "Track \(id.uuidString.prefix(4))",
+            artist: artist,
             album: "Album",
             genre: "House",
             duration: 240,
@@ -343,6 +733,46 @@ extension SoriaTests {
             hasRekordboxMetadata: false,
             bpmSource: nil,
             keySource: nil
+        )
+    }
+
+    private func makeRecommendationCandidate(
+        track: Track? = nil,
+        title: String = "Candidate",
+        score: Double = 0.9
+    ) -> RecommendationCandidate {
+        let resolvedTrack = track ?? makeTrack(
+            title: title,
+            analyzedAt: Date(),
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+            embeddingUpdatedAt: Date()
+        )
+
+        return RecommendationCandidate(
+            id: resolvedTrack.id,
+            track: resolvedTrack,
+            score: score,
+            breakdown: ScoreBreakdown(
+                embeddingSimilarity: score,
+                bpmCompatibility: 0.8,
+                harmonicCompatibility: 0.8,
+                energyFlow: 0.8,
+                transitionRegionMatch: 0.8,
+                externalMetadataScore: 0.6
+            ),
+            vectorBreakdown: VectorScoreBreakdown(
+                fusedScore: score,
+                trackScore: score,
+                introScore: score * 0.95,
+                middleScore: score * 0.9,
+                outroScore: score * 0.85,
+                bestMatchedCollection: "tracks"
+            ),
+            analysisFocus: .balanced,
+            mixabilityTags: [],
+            matchReasons: [],
+            matchedMemberships: [],
+            scoreSessionID: nil
         )
     }
 }

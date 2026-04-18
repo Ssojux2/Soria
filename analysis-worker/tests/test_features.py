@@ -46,3 +46,4 @@ def test_analyze_track_returns_three_segments() -> None:
     assert {segment.segment_type for segment in segments} == {"intro", "middle", "outro"}
     assert len(result["waveform_preview"]) == 256
     assert result["brightness"] >= 0.0
+    assert all("playlists=" not in segment.descriptor_text for segment in segments)

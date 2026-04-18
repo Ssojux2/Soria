@@ -58,6 +58,7 @@ struct Track: Identifiable, Codable, Hashable {
     var hasRekordboxMetadata: Bool
     var bpmSource: TrackMetadataSource?
     var keySource: TrackMetadataSource?
+    var lastSeenInLocalScanAt: Date? = nil
 
     func hasCurrentEmbedding(profileID: String, pipelineID: String) -> Bool {
         embeddingProfileID == profileID
@@ -91,7 +92,8 @@ struct Track: Identifiable, Codable, Hashable {
             hasSeratoMetadata: false,
             hasRekordboxMetadata: false,
             bpmSource: nil,
-            keySource: nil
+            keySource: nil,
+            lastSeenInLocalScanAt: nil
         )
     }
 }

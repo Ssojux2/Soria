@@ -9,6 +9,8 @@ final class LibraryDatabase {
     private let decoder = JSONDecoder()
     private let databaseURL: URL
 
+    var fileURL: URL { databaseURL }
+
     init(databaseURL: URL = AppPaths.databaseURL) throws {
         self.databaseURL = databaseURL
         let parentDirectory = databaseURL.deletingLastPathComponent()
@@ -42,6 +44,24 @@ final class LibraryDatabase {
         }
     }
 
+    func fetchScannedTracks() throws -> [Track] {
+        let sql = """
+        SELECT \(trackSelectColumns)
+        FROM tracks
+        WHERE last_seen_in_local_scan_at IS NOT NULL
+        ORDER BY artist COLLATE NOCASE, title COLLATE NOCASE;
+        """
+        return try withStatement(sql) { statement in
+            var tracks: [Track] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let track = track(from: statement) {
+                    tracks.append(track)
+                }
+            }
+            return tracks
+        }
+    }
+
     func fetchTrack(path: String) throws -> Track? {
         let sql = """
         SELECT \(trackSelectColumns)
@@ -56,13 +76,30 @@ final class LibraryDatabase {
         }
     }
 
+    func fetchTrack(matchingContentHash hash: String, requireLocalScan: Bool = false) throws -> Track? {
+        let localPredicate = requireLocalScan ? "AND last_seen_in_local_scan_at IS NOT NULL" : ""
+        let sql = """
+        SELECT \(trackSelectColumns)
+        FROM tracks
+        WHERE content_hash = ?
+          \(localPredicate)
+        ORDER BY last_seen_in_local_scan_at DESC, modified_time DESC
+        LIMIT 1;
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, index: 1, text: hash)
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+            return track(from: statement)
+        }
+    }
+
     func upsertTrack(_ track: Track) throws {
         let sql = """
         INSERT INTO tracks (
             id, file_path, file_name, title, artist, album, genre, duration, sample_rate, bpm, musical_key,
             modified_time, content_hash, analyzed_at, embedding_profile_id, embedding_pipeline_id, embedding_updated_at,
-            has_serato, has_rekordbox, bpm_source, key_source
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            has_serato, has_rekordbox, bpm_source, key_source, last_seen_in_local_scan_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(file_path) DO UPDATE SET
             file_name = excluded.file_name,
             title = excluded.title,
@@ -82,7 +119,8 @@ final class LibraryDatabase {
             has_serato = excluded.has_serato,
             has_rekordbox = excluded.has_rekordbox,
             bpm_source = excluded.bpm_source,
-            key_source = excluded.key_source;
+            key_source = excluded.key_source,
+            last_seen_in_local_scan_at = excluded.last_seen_in_local_scan_at;
         """
         try withStatement(sql) { statement in
             bind(statement, index: 1, text: track.id.uuidString)
@@ -106,6 +144,7 @@ final class LibraryDatabase {
             sqlite3_bind_int(statement, 19, track.hasRekordboxMetadata ? 1 : 0)
             bind(statement, index: 20, text: track.bpmSource?.rawValue)
             bind(statement, index: 21, text: track.keySource?.rawValue)
+            bind(statement, index: 22, text: track.lastSeenInLocalScanAt.map { Self.iso8601.string(from: $0) })
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 throw DatabaseError.writeFailed
             }
@@ -276,7 +315,12 @@ final class LibraryDatabase {
         }
     }
 
-    func fetchReadyTrackIDs(profileID: String, pipelineID: String) throws -> Set<UUID> {
+    func fetchReadyTrackIDs(
+        profileID: String,
+        pipelineID: String,
+        requireLocalScan: Bool = false
+    ) throws -> Set<UUID> {
+        let localPredicate = requireLocalScan ? "AND last_seen_in_local_scan_at IS NOT NULL" : ""
         let sql = """
         SELECT id
         FROM tracks
@@ -293,7 +337,8 @@ final class LibraryDatabase {
               AND embedding_json IS NOT NULL
               AND embedding_json <> ''
               AND embedding_json <> '[]'
-          );
+          )
+          \(localPredicate);
         """
         return try withStatement(sql) { statement in
             bind(statement, index: 1, text: profileID)
@@ -730,7 +775,7 @@ final class LibraryDatabase {
         pipelineID: String
     ) throws -> Set<UUID> {
         if scopeFilter.isEmpty {
-            return try fetchReadyTrackIDs(profileID: profileID, pipelineID: pipelineID)
+            return try fetchReadyTrackIDs(profileID: profileID, pipelineID: pipelineID, requireLocalScan: true)
         }
 
         let predicate = membershipScopePredicate(for: scopeFilter)
@@ -752,6 +797,7 @@ final class LibraryDatabase {
               AND segments.embedding_json <> ''
               AND segments.embedding_json <> '[]'
           )
+          AND tracks.last_seen_in_local_scan_at IS NOT NULL
           AND (\(predicate.sql));
         """
 
@@ -767,6 +813,46 @@ final class LibraryDatabase {
                 output.insert(id)
             }
             return output
+        }
+    }
+
+    func clearLocalScanMarks(underRoots roots: [String], excludingPaths preservedPaths: [String]) throws {
+        let normalizedRoots = Array(
+            Set(
+                roots
+                    .map(TrackPathNormalizer.normalizedAbsolutePath)
+                    .filter { !$0.isEmpty }
+            )
+        ).sorted()
+        guard !normalizedRoots.isEmpty else { return }
+
+        let rootClauses = normalizedRoots.map { _ in "file_path = ? OR file_path LIKE ?" }.joined(separator: " OR ")
+        let exclusionClause = preservedPaths.isEmpty
+            ? ""
+            : "AND file_path NOT IN (\(Array(repeating: "?", count: preservedPaths.count).joined(separator: ", ")))"
+        let sql = """
+        UPDATE tracks
+        SET last_seen_in_local_scan_at = NULL
+        WHERE last_seen_in_local_scan_at IS NOT NULL
+          AND (\(rootClauses))
+          \(exclusionClause);
+        """
+
+        try withStatement(sql) { statement in
+            var bindIndex: Int32 = 1
+            for root in normalizedRoots {
+                bind(statement, index: bindIndex, text: root)
+                bindIndex += 1
+                bind(statement, index: bindIndex, text: "\(root)/%")
+                bindIndex += 1
+            }
+            for path in preservedPaths {
+                bind(statement, index: bindIndex, text: path)
+                bindIndex += 1
+            }
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
         }
     }
 
@@ -945,7 +1031,8 @@ final class LibraryDatabase {
             embedding_pipeline_id TEXT,
             embedding_updated_at TEXT,
             bpm_source TEXT,
-            key_source TEXT
+            key_source TEXT,
+            last_seen_in_local_scan_at TEXT
         );
         """)
         try exec("""
@@ -1080,6 +1167,9 @@ final class LibraryDatabase {
         if try !columnExists(table: "tracks", column: "key_source") {
             try exec("ALTER TABLE tracks ADD COLUMN key_source TEXT;")
         }
+        if try !columnExists(table: "tracks", column: "last_seen_in_local_scan_at") {
+            try exec("ALTER TABLE tracks ADD COLUMN last_seen_in_local_scan_at TEXT;")
+        }
         if try !columnExists(table: "external_metadata", column: "vendor_track_id") {
             try exec("ALTER TABLE external_metadata ADD COLUMN vendor_track_id TEXT;")
         }
@@ -1100,6 +1190,7 @@ final class LibraryDatabase {
         try exec("CREATE INDEX IF NOT EXISTS idx_segments_track ON segments(track_id);")
         try exec("CREATE INDEX IF NOT EXISTS idx_external_metadata_track ON external_metadata(track_id);")
         try exec("CREATE INDEX IF NOT EXISTS idx_tracks_path ON tracks(file_path);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_tracks_local_scan ON tracks(last_seen_in_local_scan_at);")
         try exec("CREATE INDEX IF NOT EXISTS idx_library_sources_kind ON library_sources(kind);")
         try exec("CREATE INDEX IF NOT EXISTS idx_track_memberships_source_path ON track_memberships(source, membership_path);")
         try exec("CREATE INDEX IF NOT EXISTS idx_track_memberships_track ON track_memberships(track_id);")
@@ -1129,6 +1220,7 @@ final class LibraryDatabase {
         let modifiedTime = Self.iso8601.date(from: modifiedTimeText) ?? .distantPast
         let analyzedAt = sqliteString(statement, index: 13).flatMap { Self.iso8601.date(from: $0) }
         let embeddingUpdatedAt = sqliteString(statement, index: 16).flatMap { Self.iso8601.date(from: $0) }
+        let lastSeenInLocalScanAt = sqliteString(statement, index: 21).flatMap { Self.iso8601.date(from: $0) }
         return Track(
             id: id,
             filePath: filePath,
@@ -1150,7 +1242,8 @@ final class LibraryDatabase {
             hasSeratoMetadata: sqlite3_column_int(statement, 17) == 1,
             hasRekordboxMetadata: sqlite3_column_int(statement, 18) == 1,
             bpmSource: sqliteString(statement, index: 19).flatMap(TrackMetadataSource.init(rawValue:)),
-            keySource: sqliteString(statement, index: 20).flatMap(TrackMetadataSource.init(rawValue:))
+            keySource: sqliteString(statement, index: 20).flatMap(TrackMetadataSource.init(rawValue:)),
+            lastSeenInLocalScanAt: lastSeenInLocalScanAt
         )
     }
 
@@ -1570,7 +1663,7 @@ final class LibraryDatabase {
     private let trackSelectColumns = """
     id, file_path, file_name, title, artist, album, genre, duration, sample_rate, bpm, musical_key,
     modified_time, content_hash, analyzed_at, embedding_profile_id, embedding_pipeline_id, embedding_updated_at,
-    has_serato, has_rekordbox, bpm_source, key_source
+    has_serato, has_rekordbox, bpm_source, key_source, last_seen_in_local_scan_at
     """
 }
 

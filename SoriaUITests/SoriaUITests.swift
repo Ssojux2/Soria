@@ -11,7 +11,11 @@ final class SoriaUITests: XCTestCase {
     private enum LibraryState: String {
         case empty
         case prepared
+        case readySelection = "ready_selection"
         case analyzing
+        case generated
+        case generating
+        case buildingPlaylist = "building_playlist"
 
         var launchArgument: String {
             "UITEST_LIBRARY_STATE=\(rawValue)"
@@ -26,32 +30,83 @@ final class SoriaUITests: XCTestCase {
     func testExample() throws {
         let app = launchApp(libraryState: .prepared)
 
-        XCTAssertTrue(element(in: app, identifier: "library-preparation-card").waitForExistence(timeout: 10))
+        XCTAssertTrue(element(in: app, identifier: "library-action-bar").waitForExistence(timeout: 10))
         XCTAssertTrue(element(in: app, identifier: "library-table").waitForExistence(timeout: 10))
+        XCTAssertFalse(element(in: app, identifier: "library-preparation-card").exists)
     }
 
     @MainActor
     func testInfoPaneStaysAboveLibraryAndShowsSelectedTabContent() throws {
         let app = launchApp(libraryState: .prepared, startInMixAssistant: true)
 
-        let mixAssistantView = element(in: app, identifier: "mix-assistant-info-view")
-        let libraryView = element(in: app, identifier: "library-view")
+        let mixAssistantPane = element(in: app, identifier: "right-pane-mix-assistant")
 
-        XCTAssertTrue(mixAssistantView.waitForExistence(timeout: 10))
-        XCTAssertTrue(libraryView.waitForExistence(timeout: 10))
-        XCTAssertLessThan(mixAssistantView.frame.minY, libraryView.frame.minY)
+        XCTAssertTrue(mixAssistantPane.waitForExistence(timeout: 10))
+        XCTAssertTrue(element(in: app, identifier: "advanced-score-controls").waitForExistence(timeout: 10))
+        XCTAssertFalse(element(in: app, identifier: "right-pane-library").exists)
     }
 
     @MainActor
     func testLibraryPreparationOverviewRemovesRecommendationShortcuts() throws {
         let app = launchApp(libraryState: .prepared)
+        let pendingTrackCell = app.staticTexts["Pending Track"].firstMatch
+        XCTAssertTrue(pendingTrackCell.waitForExistence(timeout: 10))
+        forceClick(pendingTrackCell)
 
-        XCTAssertTrue(element(in: app, identifier: "library-preparation-card").waitForExistence(timeout: 10))
+        let analyzeSelectionButton = element(in: app, identifier: "library-analyze-selection-button")
+        let recommendationSearchButton = element(in: app, identifier: "library-recommendation-search-button")
+
+        XCTAssertTrue(element(in: app, identifier: "library-action-bar").waitForExistence(timeout: 10))
         XCTAssertTrue(element(in: app, identifier: "scope-filter-open-library").waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["Sync Libraries"].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.buttons["Find Similar Tracks"].exists)
-        XCTAssertFalse(app.buttons["Start Mixset From This Track"].exists)
-        XCTAssertFalse(app.staticTexts["Select one or more tracks"].exists)
+        XCTAssertTrue(analyzeSelectionButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(recommendationSearchButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForEnabled(analyzeSelectionButton))
+        XCTAssertTrue(waitForEnabled(recommendationSearchButton))
+        XCTAssertFalse(element(in: app, identifier: "library-preparation-card").exists)
+    }
+
+    @MainActor
+    func testEmptyLibraryShowsSetupPrompt() throws {
+        let app = launchApp(libraryState: .empty)
+
+        XCTAssertTrue(element(in: app, identifier: "library-setup-card").waitForExistence(timeout: 10))
+        XCTAssertTrue(element(in: app, identifier: "library-setup-button").waitForExistence(timeout: 10))
+        XCTAssertTrue(element(in: app, identifier: "library-empty-state").waitForExistence(timeout: 10))
+    }
+
+    @MainActor
+    func testStartupPromptsForGoogleAPIKeyWhenMissing() throws {
+        let app = launchApp(libraryState: .prepared, forceInitialSetup: true)
+
+        let initialSetupSheet = element(in: app, identifier: "initial-setup-sheet")
+        let keyField = element(in: app, identifier: "initial-setup-google-api-key-field")
+        let primaryButton = app.buttons["Validate and Start Setup"].firstMatch
+
+        XCTAssertTrue(initialSetupSheet.waitForExistence(timeout: 10))
+        XCTAssertTrue(keyField.waitForExistence(timeout: 10))
+        XCTAssertTrue(primaryButton.waitForExistence(timeout: 10))
+        XCTAssertFalse(primaryButton.isEnabled)
+
+        keyField.click()
+        keyField.typeText("test-google-key")
+
+        XCTAssertTrue(primaryButton.isEnabled)
+    }
+
+    @MainActor
+    func testSyncSheetShowsCloseButtonFromSettings() throws {
+        let app = launchApp(libraryState: .prepared)
+
+        element(in: app, identifier: "sidebar-settings").click()
+
+        XCTAssertTrue(element(in: app, identifier: "settings-library-sources").waitForExistence(timeout: 10))
+
+        let syncButton = app.buttons["Refresh Vendor Metadata"].firstMatch
+        XCTAssertTrue(syncButton.waitForExistence(timeout: 10))
+        syncButton.click()
+
+        let closeButton = element(in: app, identifier: "library-sync-close-button")
+        XCTAssertTrue(closeButton.waitForExistence(timeout: 10))
     }
 
     @MainActor
@@ -85,18 +140,20 @@ final class SoriaUITests: XCTestCase {
 
         let inspector = element(in: app, identifier: "scope-filter-inspector-library")
         XCTAssertTrue(inspector.waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["Hide Filters"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Hide References"].waitForExistence(timeout: 10))
 
         toggleButton.click()
 
         XCTAssertFalse(inspector.waitForExistence(timeout: 2))
-        XCTAssertTrue(app.buttons["Open Filters"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Open References"].waitForExistence(timeout: 10))
     }
 
     @MainActor
     func testDJScopeInspectorOpensFromMixAssistant() throws {
         let app = launchApp(libraryState: .prepared, startInMixAssistant: true)
 
+        XCTAssertTrue(element(in: app, identifier: "right-pane-mix-assistant").waitForExistence(timeout: 10))
+        XCTAssertFalse(element(in: app, identifier: "right-pane-library").exists)
         XCTAssertTrue(element(in: app, identifier: "advanced-score-controls").waitForExistence(timeout: 10))
         XCTAssertFalse(element(in: app, identifier: "score-weight-embedding").exists)
         XCTAssertFalse(app.buttons["Find Similar Tracks"].exists)
@@ -114,6 +171,130 @@ final class SoriaUITests: XCTestCase {
     }
 
     @MainActor
+    func testRecommendationSearchFromLibraryAutoGeneratesWhenReadySelectionExists() throws {
+        let app = launchApp(libraryState: .readySelection)
+
+        let recommendationButton = element(in: app, identifier: "library-recommendation-search-button")
+        XCTAssertTrue(recommendationButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForEnabled(recommendationButton))
+        recommendationButton.click()
+
+        let curationSummary = element(in: app, identifier: "recommendation-curation-summary")
+        let queryField = element(in: app, identifier: "recommendation-query-field")
+
+        XCTAssertTrue(element(in: app, identifier: "right-pane-mix-assistant").waitForExistence(timeout: 10))
+        XCTAssertFalse(element(in: app, identifier: "right-pane-library").exists)
+        XCTAssertTrue(curationSummary.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForLabel(of: curationSummary, toContain: "Showing 2"))
+        XCTAssertTrue(queryField.waitForExistence(timeout: 10))
+        XCTAssertNotEqual(queryField.value as? String, "Warmup journey")
+    }
+
+    @MainActor
+    func testPendingOnlyRecommendationSearchStillNavigatesWithoutAutoGenerate() throws {
+        let app = launchApp(libraryState: .prepared)
+
+        let pendingTrackCell = app.staticTexts["Pending Track"].firstMatch
+        XCTAssertTrue(pendingTrackCell.waitForExistence(timeout: 10))
+        forceClick(pendingTrackCell)
+
+        let recommendationButton = element(in: app, identifier: "library-recommendation-search-button")
+        XCTAssertTrue(recommendationButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForEnabled(recommendationButton))
+        recommendationButton.click()
+
+        let curationSummary = element(in: app, identifier: "recommendation-curation-summary")
+
+        XCTAssertTrue(element(in: app, identifier: "right-pane-mix-assistant").waitForExistence(timeout: 10))
+        XCTAssertFalse(element(in: app, identifier: "right-pane-library").exists)
+        XCTAssertTrue(curationSummary.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForLabel(of: curationSummary, toContain: "Generate matches"))
+    }
+
+    @MainActor
+    func testRecommendationSearchFromLibraryClearsPreviousQueryBeforeAutoRun() throws {
+        let app = launchApp(libraryState: .generated)
+
+        let recommendationButton = element(in: app, identifier: "library-recommendation-search-button")
+        XCTAssertTrue(recommendationButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForEnabled(recommendationButton))
+        recommendationButton.click()
+
+        let queryField = element(in: app, identifier: "recommendation-query-field")
+        let curationSummary = element(in: app, identifier: "recommendation-curation-summary")
+
+        XCTAssertTrue(element(in: app, identifier: "right-pane-mix-assistant").waitForExistence(timeout: 10))
+        XCTAssertTrue(queryField.waitForExistence(timeout: 10))
+        XCTAssertNotEqual(queryField.value as? String, "Warmup journey")
+        XCTAssertTrue(waitForLabel(of: curationSummary, toContain: "Showing 2"))
+    }
+
+    @MainActor
+    func testGeneratedRecommendationsCanBeRemovedAndRestored() throws {
+        let app = launchApp(libraryState: .generated, startInMixAssistant: true)
+
+        let pendingToggle = element(in: app, identifier: "recommendation-curation-toggle-pending-track")
+        let removeButton = element(in: app, identifier: "recommendation-remove-selected-button")
+        let restoreButton = element(in: app, identifier: "recommendation-restore-all-button")
+
+        XCTAssertTrue(pendingToggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(removeButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(restoreButton.waitForExistence(timeout: 10))
+
+        pendingToggle.click()
+        removeButton.click()
+
+        XCTAssertFalse(pendingToggle.waitForExistence(timeout: 2))
+        XCTAssertTrue(waitForLabel(of: element(in: app, identifier: "recommendation-curation-summary"), toContain: "hidden"))
+
+        restoreButton.click()
+
+        XCTAssertTrue(pendingToggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForLabel(of: element(in: app, identifier: "recommendation-curation-summary"), toContain: "Showing 3"))
+    }
+
+    @MainActor
+    func testBuildingPlaylistShowsProgressAndDisablesActions() throws {
+        let app = launchApp(libraryState: .buildingPlaylist, startInMixAssistant: true)
+
+        let progressCard = element(in: app, identifier: "playlist-build-progress-card")
+        let progressHeadline = element(in: app, identifier: "playlist-build-progress-headline")
+        let generateButton = element(in: app, identifier: "recommendation-generate-button")
+        let buildButton = element(in: app, identifier: "recommendation-build-playlist-button")
+
+        XCTAssertTrue(progressCard.waitForExistence(timeout: 10))
+        XCTAssertTrue(progressHeadline.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForLabel(of: progressHeadline, toContain: "Ordering track"))
+        XCTAssertTrue(generateButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(buildButton.waitForExistence(timeout: 10))
+        XCTAssertFalse(generateButton.isEnabled)
+        XCTAssertFalse(buildButton.isEnabled)
+    }
+
+    @MainActor
+    func testGeneratingRecommendationsShowsBusyStateAndDisablesControls() throws {
+        let app = launchApp(libraryState: .generating, startInMixAssistant: true)
+
+        let generateButton = element(in: app, identifier: "recommendation-generate-button")
+        let buildButton = element(in: app, identifier: "recommendation-build-playlist-button")
+        let queryField = element(in: app, identifier: "recommendation-query-field")
+        let resultLimitPicker = element(in: app, identifier: "recommendation-result-limit-picker")
+        let statusMessage = element(in: app, identifier: "recommendation-status-message")
+
+        XCTAssertTrue(generateButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(buildButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(queryField.waitForExistence(timeout: 10))
+        XCTAssertTrue(resultLimitPicker.waitForExistence(timeout: 10))
+        XCTAssertTrue(statusMessage.waitForExistence(timeout: 10))
+        XCTAssertEqual(resolvedText(of: generateButton), "Generating...")
+        XCTAssertTrue(waitForLabel(of: statusMessage, toContain: "Generating matches from current library selection"))
+        XCTAssertFalse(generateButton.isEnabled)
+        XCTAssertFalse(buildButton.isEnabled)
+        XCTAssertFalse(queryField.isEnabled)
+        XCTAssertFalse(resultLimitPicker.isEnabled)
+    }
+
+    @MainActor
     func testCancelingAnalysisReturnsToActionableState() throws {
         let app = launchApp(libraryState: .analyzing)
 
@@ -122,7 +303,7 @@ final class SoriaUITests: XCTestCase {
         cancelButton.click()
 
         XCTAssertTrue(element(in: app, identifier: "library-preparation-notice").waitForExistence(timeout: 10))
-        XCTAssertTrue(element(in: app, identifier: "library-prepare-selection-button").waitForExistence(timeout: 10))
+        XCTAssertTrue(element(in: app, identifier: "library-analyze-selection-button").waitForExistence(timeout: 10))
         XCTAssertFalse(cancelButton.exists)
     }
 
@@ -132,7 +313,7 @@ final class SoriaUITests: XCTestCase {
 
         let readyTrackCell = app.staticTexts["Ready Track"].firstMatch
         XCTAssertTrue(readyTrackCell.waitForExistence(timeout: 10))
-        readyTrackCell.click()
+        forceClick(readyTrackCell)
 
         let openFiltersButton = element(in: app, identifier: "scope-filter-open-library")
         XCTAssertTrue(openFiltersButton.waitForExistence(timeout: 10))
@@ -147,8 +328,34 @@ final class SoriaUITests: XCTestCase {
         XCTAssertTrue(playlistFacet.waitForExistence(timeout: 10))
         playlistFacet.click()
 
-        XCTAssertTrue(element(in: app, identifier: "library-preparation-card").waitForExistence(timeout: 10))
+        XCTAssertTrue(element(in: app, identifier: "library-action-bar").waitForExistence(timeout: 10))
+        XCTAssertTrue(element(in: app, identifier: "library-selection-headline").waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["No tracks selected"].waitForExistence(timeout: 10))
+    }
+
+    @MainActor
+    func testLibrarySearchFiltersTracksAcrossTitleAndArtistTokens() throws {
+        let app = launchApp(libraryState: .prepared)
+
+        let searchField = librarySearchField(in: app)
+        XCTAssertTrue(searchField.waitForExistence(timeout: 10))
+        searchField.click()
+        searchField.typeText("ready")
+
+        XCTAssertTrue(waitForNonExistence(of: element(in: app, identifier: "library-search-empty-state")))
+    }
+
+    @MainActor
+    func testLibrarySearchShowsEmptyStateWhenNoTracksMatch() throws {
+        let app = launchApp(libraryState: .prepared)
+
+        let searchField = librarySearchField(in: app)
+        XCTAssertTrue(searchField.waitForExistence(timeout: 10))
+        searchField.click()
+        searchField.typeText("zzz-no-match")
+
+        XCTAssertTrue(element(in: app, identifier: "library-search-empty-state").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForNonExistence(of: app.staticTexts["Ready Track"].firstMatch))
     }
 
     @MainActor
@@ -166,7 +373,7 @@ final class SoriaUITests: XCTestCase {
         element(in: app, identifier: "sidebar-settings").click()
 
         XCTAssertTrue(element(in: app, identifier: "settings-library-sources").waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["Sync Libraries"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Refresh Vendor Metadata"].waitForExistence(timeout: 10))
     }
 
     @MainActor
@@ -181,6 +388,21 @@ final class SoriaUITests: XCTestCase {
     }
 
     @MainActor
+    func testSyncLibrariesFromSettingsShowsSyncSheet() throws {
+        let app = launchApp(libraryState: .prepared)
+
+        element(in: app, identifier: "sidebar-settings").click()
+
+        XCTAssertTrue(element(in: app, identifier: "settings-library-sources").waitForExistence(timeout: 10))
+
+        let syncButton = app.buttons["Refresh Vendor Metadata"].firstMatch
+        XCTAssertTrue(syncButton.waitForExistence(timeout: 10))
+        syncButton.click()
+
+        XCTAssertTrue(element(in: app, identifier: "library-sync-sheet").waitForExistence(timeout: 10))
+    }
+
+    @MainActor
     func testLaunchPerformance() throws {
         measure(metrics: [XCTApplicationLaunchMetric()]) {
             let app = configuredApp(libraryState: .prepared)
@@ -191,9 +413,14 @@ final class SoriaUITests: XCTestCase {
     @MainActor
     private func launchApp(
         libraryState: LibraryState = .prepared,
-        startInMixAssistant: Bool = false
+        startInMixAssistant: Bool = false,
+        forceInitialSetup: Bool = false
     ) -> XCUIApplication {
-        let app = configuredApp(libraryState: libraryState, startInMixAssistant: startInMixAssistant)
+        let app = configuredApp(
+            libraryState: libraryState,
+            startInMixAssistant: startInMixAssistant,
+            forceInitialSetup: forceInitialSetup
+        )
         app.launch()
         return app
     }
@@ -201,7 +428,8 @@ final class SoriaUITests: XCTestCase {
     @MainActor
     private func configuredApp(
         libraryState: LibraryState,
-        startInMixAssistant: Bool = false
+        startInMixAssistant: Bool = false,
+        forceInitialSetup: Bool = false
     ) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments += [
@@ -215,11 +443,115 @@ final class SoriaUITests: XCTestCase {
             app.launchArguments.append("UITEST_START_IN_MIX_ASSISTANT")
         }
 
+        if forceInitialSetup {
+            app.launchArguments.append("UITEST_FORCE_INITIAL_SETUP")
+        }
+
         return app
     }
 
     @MainActor
     private func element(in app: XCUIApplication, identifier: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    @MainActor
+    private func librarySearchField(in app: XCUIApplication) -> XCUIElement {
+        let identified = element(in: app, identifier: "library-search-field")
+        if identified.exists {
+            return identified
+        }
+
+        let labeledField = app.textFields["Library Search"].firstMatch
+        if labeledField.exists {
+            return labeledField
+        }
+
+        return app.textFields["Search title or artist"].firstMatch
+    }
+
+    @MainActor
+    private func marker(in app: XCUIApplication, identifier: String) -> XCUIElement {
+        let matches = app.staticTexts.matching(identifier: identifier)
+        return matches.allElementsBoundByIndex.last ?? matches.firstMatch
+    }
+
+    @MainActor
+    private func waitForLabel(of element: XCUIElement, toEqual value: String, timeout: TimeInterval = 10) -> Bool {
+        waitForText(of: element, timeout: timeout) { $0 == value }
+    }
+
+    @MainActor
+    private func waitForLabel(of element: XCUIElement, toContain value: String, timeout: TimeInterval = 10) -> Bool {
+        waitForText(of: element, timeout: timeout) { $0.contains(value) }
+    }
+
+    @MainActor
+    private func waitForEnabled(_ element: XCUIElement, timeout: TimeInterval = 10) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        repeat {
+            if element.exists && element.isEnabled {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+
+        return element.exists && element.isEnabled
+    }
+
+    @MainActor
+    private func waitForNonExistence(of element: XCUIElement, timeout: TimeInterval = 10) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        repeat {
+            if !element.exists {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+
+        return !element.exists
+    }
+
+    @MainActor
+    private func waitForText(
+        of element: XCUIElement,
+        timeout: TimeInterval = 10,
+        matches predicate: (String) -> Bool
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        repeat {
+            let resolved = resolvedText(of: element)
+            if predicate(resolved) {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+
+        return predicate(resolvedText(of: element))
+    }
+
+    @MainActor
+    private func resolvedText(of element: XCUIElement) -> String {
+        let label = element.label.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !label.isEmpty {
+            return label
+        }
+
+        if let value = element.value as? String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+
+        return ""
+    }
+
+    @MainActor
+    private func forceClick(_ element: XCUIElement) {
+        element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
     }
 }

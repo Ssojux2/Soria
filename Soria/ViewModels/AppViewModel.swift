@@ -9,17 +9,48 @@ import UniformTypeIdentifiers
 final class AppViewModel: ObservableObject {
     private static let uiTestMixAssistantArgument = "UITEST_START_IN_MIX_ASSISTANT"
     private static let uiTestLibraryStatePrefix = "UITEST_LIBRARY_STATE="
+    private static let uiTestForceInitialSetupArgument = "UITEST_FORCE_INITIAL_SETUP"
 
     private enum UITestLibraryState: String {
         case empty
         case prepared
+        case readySelection = "ready_selection"
         case analyzing
+        case generated
+        case generating
+        case buildingPlaylist = "building_playlist"
     }
 
     enum AnalysisSessionResult: Equatable {
         case succeeded
         case canceled
         case failed(String?)
+    }
+
+    enum LibraryRecommendationSearchEntryAction: Equatable {
+        case navigateOnly
+        case reuseExistingResults
+        case autoGenerate
+    }
+
+    enum RecommendationGenerationTrigger {
+        case manual
+        case librarySelection
+
+        var inProgressMessage: String {
+            switch self {
+            case .manual:
+                return "Generating matches..."
+            case .librarySelection:
+                return "Generating matches from current library selection..."
+            }
+        }
+    }
+
+    private struct RecommendationGenerationStub {
+        let results: [RecommendationCandidate]
+        let delayNanoseconds: UInt64
+        let completionStatusMessage: String?
     }
 
     @Published var selectedSection: SidebarSection = .library {
@@ -44,7 +75,14 @@ final class AppViewModel: ObservableObject {
             reconcileLibrarySelectionToVisibleTracks()
         }
     }
-    @Published var recommendationScopeFilter = LibraryScopeFilter()
+    @Published var recommendationScopeFilter = LibraryScopeFilter() {
+        didSet {
+            guard recommendationScopeFilter != oldValue else { return }
+            invalidateGeneratedRecommendationResults(
+                message: "Mix scope changed. Generate again to rebuild the curated list."
+            )
+        }
+    }
     @Published var selectedTrackSegments: [TrackSegment] = []
     @Published var selectedTrackAnalysis: TrackAnalysisSummary?
     @Published var selectedTrackExternalMetadata: [ExternalDJMetadata] = []
@@ -57,14 +95,41 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var rekordboxMembershipFacets: [MembershipFacet] = []
     @Published var isAnalyzing = false
     @Published var recommendations: [RecommendationCandidate] = []
+    @Published private(set) var generatedRecommendations: [RecommendationCandidate] = []
+    @Published private(set) var excludedGeneratedTrackIDs: Set<UUID> = []
+    @Published var curationSelectionTrackIDs: Set<UUID> = []
+    @Published private(set) var playlistBuildProgress: PlaylistBuildProgress?
+    @Published private(set) var isBuildingPlaylist = false
+    @Published private(set) var isGeneratingRecommendations = false
     @Published var recommendationStatusMessage: String = ""
-    @Published var recommendationQueryText: String = ""
-    @Published var recommendationResultLimit: Int = 20 {
+    @Published var recommendationQueryText: String = "" {
+        didSet {
+            guard recommendationQueryText != oldValue else { return }
+            if isSuppressingRecommendationResultInvalidation {
+                return
+            }
+            invalidateGeneratedRecommendationResults(
+                message: "Recommendation text changed. Generate again to rebuild the curated list."
+            )
+        }
+    }
+    @Published var librarySearchText: String = "" {
+        didSet {
+            guard librarySearchText != oldValue else { return }
+            reconcileLibrarySelectionToVisibleTracks()
+        }
+    }
+    @Published var recommendationResultLimit: Int = RecommendationInputState.defaultResultLimit {
         didSet {
             let clamped = RecommendationInputState.clampedResultLimit(recommendationResultLimit)
             if recommendationResultLimit != clamped {
                 recommendationResultLimit = clamped
+                return
             }
+            guard recommendationResultLimit != oldValue else { return }
+            invalidateGeneratedRecommendationResults(
+                message: "Result count changed. Generate again to rebuild the curated list."
+            )
         }
     }
     @Published var libraryStatusMessage: String = ""
@@ -72,16 +137,33 @@ final class AppViewModel: ObservableObject {
     @Published var exportWarnings: [String] = []
     @Published var exportDestinationDescription: String = ""
     @Published var weights = RecommendationWeights() {
-        didSet { persistRecommendationScoringSettings() }
+        didSet {
+            guard weights != oldValue else { return }
+            persistRecommendationScoringSettings()
+            invalidateGeneratedRecommendationResults(
+                message: "Scoring weights changed. Generate again to rebuild the curated list."
+            )
+        }
     }
     @Published var vectorWeights = MixsetVectorWeights() {
-        didSet { persistRecommendationScoringSettings() }
+        didSet {
+            guard vectorWeights != oldValue else { return }
+            persistRecommendationScoringSettings()
+            invalidateGeneratedRecommendationResults(
+                message: "Embedding weights changed. Generate again to rebuild the curated list."
+            )
+        }
     }
     @Published var constraints = RecommendationConstraints() {
-        didSet { persistRecommendationScoringSettings() }
+        didSet {
+            guard constraints != oldValue else { return }
+            persistRecommendationScoringSettings()
+            invalidateGeneratedRecommendationResults(
+                message: "Mix constraints changed. Generate again to rebuild the curated list."
+            )
+        }
     }
     @Published var playlistTracks: [Track] = []
-    @Published var playlistTargetCount: Int = 8
     @Published var selectedExportTarget: ExportTarget = .rekordboxPlaylistM3U8
     @Published var analysisQueueProgressText: String = ""
     @Published var analysisStateByTrackID: [UUID: TrackAnalysisState] = [:]
@@ -93,11 +175,13 @@ final class AppViewModel: ObservableObject {
     }
     @Published var pythonExecutablePath: String
     @Published var workerScriptPath: String
+    @Published var analysisConcurrencyProfile: AnalysisConcurrencyProfile
     @Published var embeddingProfile: EmbeddingProfile {
         didSet {
             refreshValidationStatus()
-            recommendations = []
-            recommendationStatusMessage = ""
+            invalidateGeneratedRecommendationResults(
+                message: "Analysis setup changed. Generate again to rebuild the curated list."
+            )
             scheduleWorkerHealthRefresh()
         }
     }
@@ -119,6 +203,8 @@ final class AppViewModel: ObservableObject {
     @Published var activeScopeInspectorTarget: ScopeFilterTarget?
     @Published private(set) var workerProfileStatuses: [String: WorkerProfileStatus] = [:]
     @Published private(set) var detectedVendorTargets = DetectedVendorTargets()
+    @Published private(set) var librarySyncPresentationState: LibrarySyncPresentationState?
+    @Published private(set) var analysisSessionProgress: AnalysisSessionProgress?
 
     private let database: LibraryDatabase
     private let recommendationEngine = RecommendationEngine()
@@ -127,13 +213,18 @@ final class AppViewModel: ObservableObject {
     private let externalVisualizationResolver = ExternalVisualizationResolver()
     private var pendingAnalyzeAllTrackIDs: [UUID] = []
     private var analysisTask: Task<Void, Never>?
-    private var analysisWatchdogTask: Task<Void, Never>?
+    private var analysisWatchdogTasks: [UUID: Task<Void, Never>] = [:]
+    private var librarySyncDismissTask: Task<Void, Never>?
     private var workerHealthTask: Task<Void, Never>?
     private var validationTask: Task<Void, Never>?
     private var readyTrackIDs: Set<UUID> = []
     private var pendingAnalysisTrackIDs: [UUID] = []
+    private var analysisActivitiesByTrackID: [UUID: AnalysisActivity] = [:]
+    private var analysisProgressFractionByTrackID: [UUID: Double] = [:]
     private var membershipSnapshotsByTrackID: [UUID: TrackMembershipSnapshot] = [:]
     private var scopeTrackCache: [LibraryScopeFilter: Set<UUID>] = [:]
+    private var isSuppressingRecommendationResultInvalidation = false
+    private var recommendationGenerationStub: RecommendationGenerationStub?
     private let workerTimeoutSec = PythonWorkerClient.defaultWorkerTimeoutSec
     private let analysisWatchdogDelaySec =
         max(Double(ProcessInfo.processInfo.environment["SORIA_ANALYSIS_WATCHDOG_SEC"] ?? "") ?? 12, 5)
@@ -160,6 +251,7 @@ final class AppViewModel: ObservableObject {
         let processArguments = processInfo.arguments
         let processEnvironment = processInfo.environment
         let uiTestLibraryState = Self.uiTestLibraryState(from: processArguments)
+        let forceInitialSetupPrompt = processArguments.contains(Self.uiTestForceInitialSetupArgument)
 
         if processArguments.contains(Self.uiTestMixAssistantArgument) {
             selectedSection = .mixAssistant
@@ -171,6 +263,7 @@ final class AppViewModel: ObservableObject {
         )
         let loadedPythonPath = AppSettingsStore.loadPythonExecutablePath()
         let loadedWorkerPath = AppSettingsStore.loadWorkerScriptPath()
+        let loadedAnalysisConcurrencyProfile = AppSettingsStore.loadAnalysisConcurrencyProfile()
         let loadedProfile = AppSettingsStore.loadEmbeddingProfile()
         let loadedWeights = AppSettingsStore.loadRecommendationWeights()
         let loadedVectorWeights = AppSettingsStore.loadMixsetVectorWeights()
@@ -179,6 +272,7 @@ final class AppViewModel: ObservableObject {
         self.googleAIAPIKey = loadedAPIKey
         self.pythonExecutablePath = loadedPythonPath
         self.workerScriptPath = loadedWorkerPath
+        self.analysisConcurrencyProfile = loadedAnalysisConcurrencyProfile
         self.embeddingProfile = loadedProfile
         self.validationStatus = AppSettingsStore.currentValidationStatus(apiKey: loadedAPIKey, profile: loadedProfile)
         self.weights = loadedWeights
@@ -201,6 +295,10 @@ final class AppViewModel: ObservableObject {
 
         if let uiTestLibraryState {
             applyUITestLibraryState(uiTestLibraryState)
+            if forceInitialSetupPrompt {
+                refreshValidationStatus()
+                isShowingInitialSetupSheet = true
+            }
             AppLogger.shared.info("Loaded UI test library state: \(uiTestLibraryState.rawValue)")
             return
         }
@@ -272,11 +370,15 @@ final class AppViewModel: ObservableObject {
     }
 
     var filteredTracks: [Track] {
-        let scopedIDs = scopedTrackIDs(for: libraryScopeFilter)
-        return tracks.filter { track in
-            (libraryScopeFilter.isEmpty || scopedIDs.contains(track.id))
-                && libraryTrackFilter.matches(trackWorkflowStatus(for: track))
-        }
+        libraryTracksMatchingCurrentFilters(trackFilter: libraryTrackFilter)
+    }
+
+    var trimmedLibrarySearchText: String {
+        librarySearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var trimmedRecommendationQueryText: String {
+        recommendationQueryText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var selectedTrackSummaryLabel: String {
@@ -286,6 +388,39 @@ final class AppViewModel: ObservableObject {
     var selectedRecommendation: RecommendationCandidate? {
         guard let selectedRecommendationID else { return nil }
         return recommendations.first(where: { $0.id == selectedRecommendationID })
+    }
+
+    var excludedGeneratedRecommendationCount: Int {
+        excludedGeneratedTrackIDs.count
+    }
+
+    var canRemoveSelectedGeneratedRecommendations: Bool {
+        !recommendationInteractionDisabled && !curationSelectionTrackIDs.isEmpty
+    }
+
+    var canRestoreGeneratedRecommendations: Bool {
+        !recommendationInteractionDisabled && !excludedGeneratedTrackIDs.isEmpty
+    }
+
+    var hasGeneratedRecommendationResults: Bool {
+        !generatedRecommendations.isEmpty
+    }
+
+    var hasVisibleGeneratedRecommendations: Bool {
+        !recommendations.isEmpty
+    }
+
+    var curatedRecommendationsSummaryText: String {
+        guard hasGeneratedRecommendationResults else {
+            return "Generate matches to curate the build pool."
+        }
+
+        let visibleCount = recommendations.count
+        let totalCount = generatedRecommendations.count
+        if excludedGeneratedTrackIDs.isEmpty {
+            return "Showing \(visibleCount) generated matches."
+        }
+        return "Showing \(visibleCount) of \(totalCount) generated matches (\(excludedGeneratedTrackIDs.count) hidden)."
     }
 
     var nativeLibrarySources: [LibrarySourceRecord] {
@@ -318,7 +453,23 @@ final class AppViewModel: ObservableObject {
     }
 
     var hasSyncableLibrarySource: Bool {
-        librarySources.contains { $0.enabled && $0.resolvedPath != nil }
+        librarySources.contains { $0.kind == .folderFallback && $0.enabled && $0.resolvedPath != nil }
+    }
+
+    var hasGoogleAIAPIKeyConfigured: Bool {
+        !googleAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var hasConfiguredPreparationCredentials: Bool {
+        !embeddingProfile.requiresAPIKey || hasGoogleAIAPIKeyConfigured
+    }
+
+    var initialSetupRequiresLibrarySelection: Bool {
+        tracks.isEmpty && !LibraryRootsStore.isInitialSetupCompleted()
+    }
+
+    var initialSetupNeedsGoogleAIAPIKey: Bool {
+        embeddingProfile.requiresAPIKey && !hasGoogleAIAPIKeyConfigured
     }
 
     var hasSourceSetupIssue: Bool {
@@ -329,8 +480,11 @@ final class AppViewModel: ObservableObject {
         if let dependencyMessage = selectedEmbeddingProfileDependencyMessage {
             return dependencyMessage
         }
-        if !hasValidatedEmbeddingProfile {
-            return "Validate the active analysis setup in Settings before preparing tracks."
+        if validationStatus == .validating {
+            return "Validating the active analysis setup..."
+        }
+        if !hasConfiguredPreparationCredentials {
+            return "Enter a Google AI API Key in Settings before preparing tracks."
         }
         return nil
     }
@@ -373,6 +527,7 @@ final class AppViewModel: ObservableObject {
             preparationBlockedMessage: preparationBlockedMessage,
             isAnalyzing: isAnalyzing,
             isCancellingAnalysis: isCancellingAnalysis,
+            analysisSessionProgress: analysisSessionProgress,
             analysisActivity: analysisActivity,
             preparationNotice: preparationNotice,
             analysisErrorMessage: friendlyPreparationError ?? "",
@@ -437,9 +592,24 @@ final class AppViewModel: ObservableObject {
         )
     }
 
+    var playlistPathTargetCount: Int {
+        RecommendationInputState.clampedResultLimit(recommendationResultLimit)
+    }
+
     var canRunRecommendationActions: Bool {
-        guard hasValidatedEmbeddingProfile, isSelectedEmbeddingProfileSupported else { return false }
+        guard
+            hasValidatedEmbeddingProfile,
+            isSelectedEmbeddingProfileSupported,
+            !isBuildingPlaylist,
+            !isGeneratingRecommendations
+        else {
+            return false
+        }
         return recommendationInputState != nil
+    }
+
+    var canBuildGeneratedPlaylistPath: Bool {
+        canRunRecommendationActions && hasVisibleGeneratedRecommendations
     }
 
     var normalizedRecommendationWeights: RecommendationWeights {
@@ -484,14 +654,72 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    var canAnalyzeSelectionFromLibrary: Bool {
+        selectionReadiness.pendingCount > 0
+            && !isAnalyzing
+            && !isCancellingAnalysis
+    }
+
+    var canOpenRecommendationSearchFromLibrary: Bool {
+        selectionReadiness.hasSelection
+    }
+
+    var recommendationInteractionDisabled: Bool {
+        isBuildingPlaylist || isGeneratingRecommendations
+    }
+
+    var recommendationGenerateButtonTitle: String {
+        if isBuildingPlaylist {
+            return "Building..."
+        }
+        if isGeneratingRecommendations {
+            return "Generating..."
+        }
+        return "Generate"
+    }
+
+    var shouldShowLibraryAnalysisProgress: Bool {
+        isAnalyzing || isCancellingAnalysis
+    }
+
+    var shouldShowLibrarySetupPrompt: Bool {
+        tracks.isEmpty
+    }
+
+    var librarySelectionStatusText: String {
+        if !selectionReadiness.hasSelection {
+            return "Select tracks in the library to analyze them or move them into recommendation search."
+        }
+        if let blockedMessage = preparationBlockedMessage, selectionReadiness.hasPendingTracks {
+            return blockedMessage
+        }
+        if selectionReadiness.pendingCount == 0 {
+            return "Selected tracks are ready. Move into recommendation search whenever you are ready."
+        }
+        return selectionReadiness.bannerMessage
+    }
+
+    var librarySetupPromptTitle: String {
+        libraryRoots.isEmpty ? "Library Setup Needed" : "Scan Music Folders"
+    }
+
+    var librarySetupPromptMessage: String {
+        if libraryRoots.isEmpty {
+            return "Choose at least one Music Folder so Soria can load tracks into the library."
+        }
+        return "Scan your Music Folders to load tracks into the library before starting analysis."
+    }
+
+    var librarySetupPromptActionTitle: String {
+        libraryRoots.isEmpty ? "Library Setup" : "Scan Music Folders"
+    }
+
     var canAnalyzePendingSelection: Bool {
-        guard hasValidatedEmbeddingProfile, isSelectedEmbeddingProfileSupported else { return false }
-        return selectionReadiness.pendingCount > 0 && !isAnalyzing && !isCancellingAnalysis
+        selectionReadiness.pendingCount > 0 && !isAnalyzing && !isCancellingAnalysis
     }
 
     var canAnalyzeVisibleTracks: Bool {
-        guard hasValidatedEmbeddingProfile, isSelectedEmbeddingProfileSupported else { return false }
-        return filteredTracks.contains { trackWorkflowStatus(for: $0) != .ready } && !isAnalyzing && !isCancellingAnalysis
+        filteredTracks.contains { trackWorkflowStatus(for: $0) != .ready } && !isAnalyzing && !isCancellingAnalysis
     }
 
     var canRunAnalysis: Bool {
@@ -534,7 +762,18 @@ final class AppViewModel: ObservableObject {
     }
 
     func libraryTrackCount(for filter: LibraryTrackFilter) -> Int {
-        tracks.filter { filter.matches(trackWorkflowStatus(for: $0)) }.count
+        libraryTracksMatchingCurrentFilters(trackFilter: filter).count
+    }
+
+    static func librarySearchTokens(from queryText: String) -> [String] {
+        queryText
+            .lowercased()
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+    }
+
+    static func libraryTrackMatchesSearch(_ track: Track, queryText: String) -> Bool {
+        libraryTrackMatchesSearch(track, searchTokens: librarySearchTokens(from: queryText))
     }
 
     func analysisState(for track: Track) -> TrackAnalysisState {
@@ -587,9 +826,11 @@ final class AppViewModel: ObservableObject {
                 totalCount: totalCount
             )
         }
+        analysisActivitiesByTrackID[track.id] = activity
         analysisActivity = activity
         isAnalysisActivityPanelExpanded = true
-        updateAnalysisQueueTextFromActivity()
+        analysisProgressFractionByTrackID[track.id] = activity.stageFraction ?? 0
+        refreshAnalysisSessionProgress(latestTrackTitle: track.title, latestMessage: activity.currentMessage)
     }
 
     private func recordAnalysisProgress(
@@ -600,8 +841,9 @@ final class AppViewModel: ObservableObject {
         queueIndex: Int,
         totalCount: Int
     ) {
-        if analysisActivity?.currentTrackPath != trackPath || analysisActivity?.queueIndex != queueIndex {
-            analysisActivity = AnalysisActivity.started(
+        var activity = analysisActivitiesByTrackID[trackID]
+        if activity == nil {
+            activity = AnalysisActivity.started(
                 trackTitle: trackTitle,
                 trackPath: trackPath,
                 queueIndex: queueIndex,
@@ -611,18 +853,23 @@ final class AppViewModel: ObservableObject {
             isAnalysisActivityPanelExpanded = true
         }
 
-        analysisActivity?.recordProgress(
+        activity?.recordProgress(
             event,
             trackTitle: trackTitle,
             fallbackTrackPath: trackPath,
             queueIndex: queueIndex,
             totalCount: totalCount
         )
+        if let activity {
+            analysisActivitiesByTrackID[trackID] = activity
+            analysisActivity = activity
+        }
         AppLogger.shared.info(
             "Analysis progress | stage=\(event.stage.rawValue) | queue=\(queueIndex)/\(totalCount) | trackPath=\(trackPath) | message=\(event.message)"
         )
+        analysisProgressFractionByTrackID[trackID] = max(0, min(1, event.fraction ?? analysisProgressFractionByTrackID[trackID] ?? 0))
         updateAnalysisState(trackID: trackID, state: .running, message: event.stage.displayName, updatedAt: event.timestamp)
-        updateAnalysisQueueTextFromActivity()
+        refreshAnalysisSessionProgress(latestTrackTitle: trackTitle, latestMessage: event.message)
         scheduleAnalysisProgressWatchdog(
             trackID: trackID,
             trackTitle: trackTitle,
@@ -639,8 +886,15 @@ final class AppViewModel: ObservableObject {
         totalCount: Int,
         errorMessage: String? = nil
     ) {
-        if analysisActivity?.currentTrackPath != track.filePath || analysisActivity?.queueIndex != queueIndex {
-            startAnalysisActivity(for: track, queueIndex: queueIndex, totalCount: totalCount, stage: .queued)
+        var activity = analysisActivitiesByTrackID[track.id]
+        if activity == nil {
+            activity = AnalysisActivity.started(
+                trackTitle: track.title,
+                trackPath: track.filePath,
+                queueIndex: queueIndex,
+                totalCount: totalCount,
+                timeoutSec: workerTimeoutSec
+            )
         }
 
         let message: String
@@ -654,15 +908,20 @@ final class AppViewModel: ObservableObject {
         default:
             message = state.displayName
         }
-        analysisActivity?.markFinished(
-            state: state,
-            errorMessage: errorMessage,
-            message: message
-        )
-        updateAnalysisQueueTextFromActivity()
+        activity?.markFinished(state: state, errorMessage: errorMessage, message: message)
+        if let activity {
+            analysisActivitiesByTrackID[track.id] = activity
+            analysisActivity = activity
+        }
+        analysisProgressFractionByTrackID[track.id] = 1
+        refreshAnalysisSessionProgress(latestTrackTitle: track.title, latestMessage: message)
     }
 
-    private func updateAnalysisQueueTextFromActivity() {
+    private func refreshAnalysisQueueText() {
+        if let sessionProgress = analysisSessionProgress {
+            analysisQueueProgressText = sessionProgress.statusLine
+            return
+        }
         guard let activity = analysisActivity else { return }
         let queueText = "\(activity.queueIndex) / \(activity.totalCount)"
         if activity.isFinished {
@@ -673,7 +932,11 @@ final class AppViewModel: ObservableObject {
     }
 
     private func prepareAnalysisSession(for tracks: [Track]) {
+        cancelAllAnalysisProgressWatchdogs()
+        analysisActivitiesByTrackID = [:]
+        analysisProgressFractionByTrackID = [:]
         guard let firstTrack = tracks.first else {
+            analysisSessionProgress = nil
             analysisActivity = nil
             analysisQueueProgressText = "Preparing analysis queue..."
             return
@@ -686,8 +949,51 @@ final class AppViewModel: ObservableObject {
             totalCount: tracks.count,
             timeoutSec: workerTimeoutSec
         )
+        if let activity = analysisActivity {
+            analysisActivitiesByTrackID[firstTrack.id] = activity
+        }
         isAnalysisActivityPanelExpanded = true
-        updateAnalysisQueueTextFromActivity()
+        analysisSessionProgress = .queued(totalCount: tracks.count, latestTrackTitle: firstTrack.title)
+        refreshAnalysisQueueText()
+    }
+
+    private func refreshAnalysisSessionProgress(
+        latestTrackTitle: String? = nil,
+        latestMessage: String? = nil
+    ) {
+        guard !pendingAnalysisTrackIDs.isEmpty else {
+            analysisSessionProgress = nil
+            refreshAnalysisQueueText()
+            return
+        }
+
+        let totalCount = pendingAnalysisTrackIDs.count
+        let states = pendingAnalysisTrackIDs.map { analysisStateByTrackID[$0]?.state ?? .idle }
+        let queuedCount = states.filter { $0 == .queued }.count
+        let runningCount = states.filter { $0 == .running }.count
+        let completedCount = states.filter { $0 == .succeeded }.count
+        let failedCount = states.filter { $0 == .failed }.count
+        let canceledCount = states.filter { $0 == .canceled }.count
+        let completedProgress = Double(completedCount + failedCount + canceledCount)
+        let runningProgress = pendingAnalysisTrackIDs.reduce(0.0) { partialResult, trackID in
+            let state = analysisStateByTrackID[trackID]?.state ?? .idle
+            guard state == .running else { return partialResult }
+            return partialResult + max(0, min(1, analysisProgressFractionByTrackID[trackID] ?? 0))
+        }
+
+        let previousProgress = analysisSessionProgress
+        analysisSessionProgress = AnalysisSessionProgress(
+            totalCount: totalCount,
+            runningCount: runningCount,
+            queuedCount: queuedCount,
+            completedCount: completedCount,
+            failedCount: failedCount,
+            canceledCount: canceledCount,
+            overallProgress: min(1, (completedProgress + runningProgress) / Double(max(totalCount, 1))),
+            latestTrackTitle: latestTrackTitle ?? previousProgress?.latestTrackTitle ?? analysisActivity?.currentTrackTitle ?? "",
+            latestMessage: latestMessage ?? previousProgress?.latestMessage ?? analysisActivity?.currentMessage ?? ""
+        )
+        refreshAnalysisQueueText()
     }
 
     private func scheduleAnalysisProgressWatchdog(
@@ -697,9 +1003,9 @@ final class AppViewModel: ObservableObject {
         queueIndex: Int,
         totalCount: Int
     ) {
-        analysisWatchdogTask?.cancel()
+        analysisWatchdogTasks[trackID]?.cancel()
         let thresholdSec = analysisWatchdogDelaySec
-        analysisWatchdogTask = Task { [weak self] in
+        analysisWatchdogTasks[trackID] = Task { [weak self] in
             let delayNs = UInt64(max(thresholdSec, 1) * 1_000_000_000)
             try? await Task.sleep(nanoseconds: delayNs)
             guard !Task.isCancelled else { return }
@@ -709,7 +1015,7 @@ final class AppViewModel: ObservableObject {
                 guard
                     self.isAnalyzing,
                     !self.isCancellingAnalysis,
-                    let activity = self.analysisActivity,
+                    let activity = self.analysisActivitiesByTrackID[trackID],
                     activity.currentTrackPath == trackPath,
                     activity.queueIndex == queueIndex
                 else {
@@ -738,9 +1044,15 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func cancelAnalysisProgressWatchdog() {
-        analysisWatchdogTask?.cancel()
-        analysisWatchdogTask = nil
+    private func cancelAnalysisProgressWatchdog(trackID: UUID) {
+        analysisWatchdogTasks.removeValue(forKey: trackID)?.cancel()
+    }
+
+    private func cancelAllAnalysisProgressWatchdogs() {
+        for task in analysisWatchdogTasks.values {
+            task.cancel()
+        }
+        analysisWatchdogTasks.removeAll()
     }
 
     nonisolated static func makeAnalysisWatchdogEvent(
@@ -810,10 +1122,11 @@ final class AppViewModel: ObservableObject {
         selectedTrackExternalMetadata = []
         selectedTrackWaveformPreview = []
         selectedRecommendationID = nil
-        recommendations = []
-        recommendationStatusMessage = ""
-        recommendationQueryText = ""
-        recommendationResultLimit = 20
+        resetGeneratedRecommendationResults(clearStatusMessage: true)
+        recommendationStatusMessage = fixture.recommendationStatusMessage
+        recommendationQueryText = fixture.recommendationQueryText
+        librarySearchText = ""
+        recommendationResultLimit = RecommendationInputState.defaultResultLimit
         weights = .defaults
         vectorWeights = .defaults
         constraints = .defaults
@@ -824,23 +1137,33 @@ final class AppViewModel: ObservableObject {
         playlistTracks = []
         analysisQueueProgressText = ""
         analysisStateByTrackID = fixture.analysisStateByTrackID
+        analysisSessionProgress = fixture.analysisSessionProgress
         analysisActivity = fixture.analysisActivity
+        analysisActivitiesByTrackID = fixture.analysisActivity.map { [fixture.pendingAnalysisTrackIDs.first ?? UUID(): $0] } ?? [:]
+        analysisProgressFractionByTrackID = fixture.pendingAnalysisTrackIDs.reduce(into: [:]) { partialResult, trackID in
+            partialResult[trackID] = fixture.analysisActivity?.stageFraction ?? 0
+        }
         scanProgress = ScanJobProgress()
         librarySources = fixture.librarySources
         libraryStatusMessage = fixture.libraryStatusMessage
         seratoMembershipFacets = fixture.seratoMembershipFacets
         rekordboxMembershipFacets = fixture.rekordboxMembershipFacets
         readyTrackIDs = fixture.readyTrackIDs
+        recommendationGenerationStub = fixture.recommendationGenerationStub
         membershipSnapshotsByTrackID = [:]
         scopeTrackCache.removeAll()
         pendingAnalyzeAllTrackIDs = []
         pendingAnalysisTrackIDs = fixture.pendingAnalysisTrackIDs
         isAnalyzing = fixture.isAnalyzing
+        isGeneratingRecommendations = fixture.isGeneratingRecommendations
         isCancellingAnalysis = false
         analysisErrorMessage = ""
         preparationNotice = nil
         isScopeInspectorPresented = false
         activeScopeInspectorTarget = nil
+        librarySyncDismissTask?.cancel()
+        librarySyncDismissTask = nil
+        librarySyncPresentationState = nil
         validationStatus = fixture.validationStatus
         workerProfileStatuses = [:]
         settingsStatusMessage = ""
@@ -848,8 +1171,13 @@ final class AppViewModel: ObservableObject {
         isShowingInitialSetupSheet = false
         isRunningInitialSetup = false
         initialSetupStatusMessage = ""
-        if analysisActivity != nil {
-            updateAnalysisQueueTextFromActivity()
+        if !fixture.generatedRecommendations.isEmpty {
+            replaceGeneratedRecommendations(fixture.generatedRecommendations)
+            playlistBuildProgress = fixture.playlistBuildProgress
+            isBuildingPlaylist = fixture.isBuildingPlaylist
+        }
+        if analysisSessionProgress != nil || analysisActivity != nil {
+            refreshAnalysisQueueText()
         }
     }
 
@@ -862,10 +1190,18 @@ final class AppViewModel: ObservableObject {
         libraryStatusMessage: String,
         selectedTrackIDs: Set<UUID>,
         analysisStateByTrackID: [UUID: TrackAnalysisState],
+        analysisSessionProgress: AnalysisSessionProgress?,
         analysisActivity: AnalysisActivity?,
         pendingAnalysisTrackIDs: [UUID],
         isAnalyzing: Bool,
+        isGeneratingRecommendations: Bool,
         validationStatus: ValidationStatus,
+        recommendationQueryText: String,
+        recommendationStatusMessage: String,
+        generatedRecommendations: [RecommendationCandidate],
+        playlistBuildProgress: PlaylistBuildProgress?,
+        isBuildingPlaylist: Bool,
+        recommendationGenerationStub: RecommendationGenerationStub?,
         seratoMembershipFacets: [MembershipFacet],
         rekordboxMembershipFacets: [MembershipFacet]
     ) {
@@ -909,16 +1245,26 @@ final class AppViewModel: ObservableObject {
                 libraryStatusMessage: "",
                 selectedTrackIDs: [],
                 analysisStateByTrackID: [:],
+                analysisSessionProgress: nil,
                 analysisActivity: nil,
                 pendingAnalysisTrackIDs: [],
                 isAnalyzing: false,
+                isGeneratingRecommendations: false,
                 validationStatus: .unvalidated,
+                recommendationQueryText: "",
+                recommendationStatusMessage: "",
+                generatedRecommendations: [],
+                playlistBuildProgress: nil,
+                isBuildingPlaylist: false,
+                recommendationGenerationStub: nil,
                 seratoMembershipFacets: facets.serato,
                 rekordboxMembershipFacets: facets.rekordbox
             )
-        case .prepared, .analyzing:
+        case .prepared, .readySelection, .analyzing, .generated, .generating, .buildingPlaylist:
             let readyTrackID = UUID()
             let pendingTrackID = UUID()
+            let curatedTrackID = UUID()
+            let backupTrackID = UUID()
 
             let readyTrack = Track(
                 id: readyTrackID,
@@ -958,15 +1304,122 @@ final class AppViewModel: ObservableObject {
                 musicalKey: "9A",
                 modifiedTime: now,
                 contentHash: "pending-track-hash",
-                analyzedAt: nil,
-                embeddingProfileID: nil,
-                embeddingPipelineID: nil,
-                embeddingUpdatedAt: nil,
+                analyzedAt: state == .generated || state == .buildingPlaylist ? now : nil,
+                embeddingProfileID: state == .generated || state == .buildingPlaylist
+                    ? EmbeddingProfile.googleGeminiEmbedding2Preview.id
+                    : nil,
+                embeddingPipelineID: state == .generated || state == .buildingPlaylist
+                    ? EmbeddingPipeline.audioSegmentsV1.id
+                    : nil,
+                embeddingUpdatedAt: state == .generated || state == .buildingPlaylist ? now : nil,
                 hasSeratoMetadata: true,
                 hasRekordboxMetadata: false,
                 bpmSource: .audioTags,
                 keySource: .audioTags
             )
+
+            let curatedTrack = Track(
+                id: curatedTrackID,
+                filePath: "/UITests/Library/curated-track.wav",
+                fileName: "curated-track.wav",
+                title: "Curated Track",
+                artist: "Fixture Artist",
+                album: "Fixture Album",
+                genre: "House",
+                duration: 248,
+                sampleRate: 44100,
+                bpm: 125.0,
+                musicalKey: "9A",
+                modifiedTime: now,
+                contentHash: "curated-track-hash",
+                analyzedAt: now,
+                embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+                embeddingPipelineID: EmbeddingPipeline.audioSegmentsV1.id,
+                embeddingUpdatedAt: now,
+                hasSeratoMetadata: true,
+                hasRekordboxMetadata: true,
+                bpmSource: .serato,
+                keySource: .rekordbox
+            )
+
+            let backupTrack = Track(
+                id: backupTrackID,
+                filePath: "/UITests/Library/backup-track.wav",
+                fileName: "backup-track.wav",
+                title: "Backup Track",
+                artist: "Fixture Artist",
+                album: "Fixture Album",
+                genre: "House",
+                duration: 252,
+                sampleRate: 44100,
+                bpm: 126.0,
+                musicalKey: "10A",
+                modifiedTime: now,
+                contentHash: "backup-track-hash",
+                analyzedAt: now,
+                embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+                embeddingPipelineID: EmbeddingPipeline.audioSegmentsV1.id,
+                embeddingUpdatedAt: now,
+                hasSeratoMetadata: true,
+                hasRekordboxMetadata: true,
+                bpmSource: .serato,
+                keySource: .rekordbox
+            )
+
+            let generatedFixtureCandidates = [
+                RecommendationCandidate(
+                    id: curatedTrackID,
+                    track: curatedTrack,
+                    score: 0.88,
+                    breakdown: ScoreBreakdown(
+                        embeddingSimilarity: 0.86,
+                        bpmCompatibility: 0.82,
+                        harmonicCompatibility: 0.80,
+                        energyFlow: 0.77,
+                        transitionRegionMatch: 0.75,
+                        externalMetadataScore: 0.66
+                    ),
+                    vectorBreakdown: VectorScoreBreakdown(
+                        fusedScore: 0.86,
+                        trackScore: 0.83,
+                        introScore: 0.82,
+                        middleScore: 0.79,
+                        outroScore: 0.80,
+                        bestMatchedCollection: "middle"
+                    ),
+                    analysisFocus: .balanced,
+                    mixabilityTags: ["clean_outro"],
+                    matchReasons: ["Blend-friendly intro/outro"],
+                    matchedMemberships: ["Festival / Day 1 / Mainstage"],
+                    scoreSessionID: nil
+                ),
+                RecommendationCandidate(
+                    id: backupTrackID,
+                    track: backupTrack,
+                    score: 0.84,
+                    breakdown: ScoreBreakdown(
+                        embeddingSimilarity: 0.81,
+                        bpmCompatibility: 0.80,
+                        harmonicCompatibility: 0.76,
+                        energyFlow: 0.74,
+                        transitionRegionMatch: 0.73,
+                        externalMetadataScore: 0.64
+                    ),
+                    vectorBreakdown: VectorScoreBreakdown(
+                        fusedScore: 0.82,
+                        trackScore: 0.80,
+                        introScore: 0.76,
+                        middleScore: 0.77,
+                        outroScore: 0.74,
+                        bestMatchedCollection: "outro"
+                    ),
+                    analysisFocus: .balanced,
+                    mixabilityTags: ["rolling"],
+                    matchReasons: ["House family"],
+                    matchedMemberships: ["Club / Friday / Peak"],
+                    scoreSessionID: nil
+                )
+            ]
 
             let analysisActivity: AnalysisActivity? = {
                 guard state == .analyzing else { return nil }
@@ -980,12 +1433,63 @@ final class AppViewModel: ObservableObject {
                 )
             }()
 
+            let fixtureGeneratedRecommendations: [RecommendationCandidate] = if state == .generated || state == .buildingPlaylist {
+                [
+                    RecommendationCandidate(
+                        id: pendingTrackID,
+                        track: pendingTrack,
+                        score: 0.91,
+                        breakdown: ScoreBreakdown(
+                            embeddingSimilarity: 0.91,
+                            bpmCompatibility: 0.84,
+                            harmonicCompatibility: 0.78,
+                            energyFlow: 0.81,
+                            transitionRegionMatch: 0.80,
+                            externalMetadataScore: 0.62
+                        ),
+                        vectorBreakdown: VectorScoreBreakdown(
+                            fusedScore: 0.89,
+                            trackScore: 0.87,
+                            introScore: 0.84,
+                            middleScore: 0.85,
+                            outroScore: 0.82,
+                            bestMatchedCollection: "tracks"
+                        ),
+                        analysisFocus: .balanced,
+                        mixabilityTags: ["long_intro"],
+                        matchReasons: ["High embedding match"],
+                        matchedMemberships: ["Disco / Edits"],
+                        scoreSessionID: nil
+                    ),
+                    generatedFixtureCandidates[0],
+                    generatedFixtureCandidates[1]
+                ]
+            } else {
+                []
+            }
+
+            let fixtureReadyTrackIDs: Set<UUID>
+            switch state {
+            case .prepared, .analyzing:
+                fixtureReadyTrackIDs = [readyTrackID]
+            case .readySelection, .generating:
+                fixtureReadyTrackIDs = [readyTrackID, curatedTrackID, backupTrackID]
+            case .generated, .buildingPlaylist:
+                fixtureReadyTrackIDs = [readyTrackID, pendingTrackID, curatedTrackID, backupTrackID]
+            case .empty:
+                fixtureReadyTrackIDs = []
+            }
+
             return (
-                tracks: [readyTrack, pendingTrack],
-                readyTrackIDs: Set([readyTrackID]),
+                tracks: [readyTrack, pendingTrack, curatedTrack, backupTrack],
+                readyTrackIDs: fixtureReadyTrackIDs,
                 librarySources: [seratoSource, rekordboxSource, fallbackSource],
                 libraryStatusMessage: "",
-                selectedTrackIDs: state == .analyzing ? Set([pendingTrackID]) : [],
+                selectedTrackIDs: state == .analyzing
+                    ? Set([pendingTrackID])
+                    : (state == .readySelection || state == .generated || state == .generating || state == .buildingPlaylist
+                        ? Set([readyTrackID])
+                        : []),
                 analysisStateByTrackID: state == .analyzing
                     ? [
                         pendingTrackID: TrackAnalysisState(
@@ -995,10 +1499,50 @@ final class AppViewModel: ObservableObject {
                         )
                     ]
                     : [:],
+                analysisSessionProgress: state == .analyzing
+                    ? AnalysisSessionProgress(
+                        totalCount: 1,
+                        runningCount: 1,
+                        queuedCount: 0,
+                        completedCount: 0,
+                        failedCount: 0,
+                        canceledCount: 0,
+                        overallProgress: 0.02,
+                        latestTrackTitle: pendingTrack.title,
+                        latestMessage: AnalysisStage.launching.displayName
+                    )
+                    : nil,
                 analysisActivity: analysisActivity,
                 pendingAnalysisTrackIDs: state == .analyzing ? [pendingTrackID] : [],
                 isAnalyzing: state == .analyzing,
-                validationStatus: state == .analyzing ? .validated(now) : .unvalidated,
+                isGeneratingRecommendations: state == .generating,
+                validationStatus: state == .prepared ? .unvalidated : .validated(now),
+                recommendationQueryText: state == .generated || state == .buildingPlaylist ? "Warmup journey" : "",
+                recommendationStatusMessage: state == .generated
+                    ? "Generated 3 matches. Curate the list before building the playlist."
+                    : (state == .generating
+                        ? RecommendationGenerationTrigger.librarySelection.inProgressMessage
+                        : (state == .buildingPlaylist ? "Built 3-track path from seed: Ready Track" : "")),
+                generatedRecommendations: fixtureGeneratedRecommendations,
+                playlistBuildProgress: state == .buildingPlaylist
+                    ? PlaylistBuildProgress(
+                        stage: .orderingTrack,
+                        completedCount: 1,
+                        totalCount: 3,
+                        progress: 0.45,
+                        currentSeedTitle: readyTrack.title,
+                        latestTrackTitle: curatedTrack.title,
+                        message: "Evaluating 2 remaining curated matches from \(readyTrack.title)."
+                    )
+                    : nil,
+                isBuildingPlaylist: state == .buildingPlaylist,
+                recommendationGenerationStub: state == .readySelection || state == .generated
+                    ? RecommendationGenerationStub(
+                        results: generatedFixtureCandidates,
+                        delayNanoseconds: 50_000_000,
+                        completionStatusMessage: "Generated 2 matches. Curate the list before building the playlist."
+                    )
+                    : nil,
                 seratoMembershipFacets: facets.serato,
                 rekordboxMembershipFacets: facets.rekordbox
             )
@@ -1062,23 +1606,40 @@ final class AppViewModel: ObservableObject {
 
     static func makePreparationOverview(from context: PreparationOverviewContext) -> PreparationOverviewState {
         let syncAction: PreparationOverviewAction? = .syncLibrary
+        let preferredPreparationAction: PreparationOverviewAction? = if context.selectionReadiness.hasPendingTracks {
+            .prepareSelection
+        } else if context.filteredNeedsPreparationCount > 0 {
+            .prepareVisible
+        } else {
+            nil
+        }
+        let isPreferredPreparationActionEnabled: Bool = switch preferredPreparationAction {
+        case .prepareSelection:
+            context.canPrepareSelection
+        case .prepareVisible:
+            context.canPrepareVisible
+        case .syncLibrary, .none:
+            false
+        }
 
         if context.isAnalyzing || context.isCancellingAnalysis {
-            let progress = context.analysisActivity?.overallProgress
-            let trackSummary: String
-            if let activity = context.analysisActivity {
-                trackSummary = activity.totalCount > 1
-                    ? "\(activity.queueIndex) of \(activity.totalCount) • \(activity.currentTrackTitle)"
-                    : activity.currentTrackTitle
-            } else {
-                trackSummary = "Preparing tracks for the active analysis setup."
-            }
+            let progress = context.analysisSessionProgress?.overallProgress ?? context.analysisActivity?.overallProgress
+            let trackSummary =
+                context.analysisSessionProgress?.statusLine
+                ?? context.analysisActivity.map { activity in
+                    activity.totalCount > 1
+                        ? "\(activity.queueIndex) of \(activity.totalCount) • \(activity.currentTrackTitle)"
+                        : activity.currentTrackTitle
+                }
+                ?? "Preparing tracks for the active analysis setup."
             return PreparationOverviewState(
                 phase: .analyzing,
                 title: context.isCancellingAnalysis ? "Stopping Preparation" : "Preparing Tracks",
                 message: trackSummary,
                 progress: progress,
                 primaryAction: nil,
+                primaryActionTitleOverride: nil,
+                isPrimaryActionDisabled: false,
                 secondaryAction: nil,
                 isCancellable: true,
                 showSuccess: false
@@ -1086,9 +1647,11 @@ final class AppViewModel: ObservableObject {
         }
 
         if context.scanProgress.isRunning || !context.syncingSourceNames.isEmpty {
-            let sourceSummary = context.syncingSourceNames.isEmpty
-                ? "Updating indexed library files."
-                : "Updating \(context.syncingSourceNames.joined(separator: ", "))."
+            let sourceSummary = if context.syncingSourceNames.isEmpty {
+                "Updating scanned local tracks."
+            } else {
+                "Updating \(context.syncingSourceNames.joined(separator: ", "))."
+            }
             let progress = context.scanProgress.totalFiles > 0
                 ? Double(context.scanProgress.scannedFiles) / Double(max(context.scanProgress.totalFiles, 1))
                 : nil
@@ -1097,10 +1660,12 @@ final class AppViewModel: ObservableObject {
                 : "\(sourceSummary) Current: \(context.scanProgress.currentFile)"
             return PreparationOverviewState(
                 phase: .syncing,
-                title: "Syncing Library",
+                title: "Refreshing Library",
                 message: detail,
                 progress: progress,
-                primaryAction: nil,
+                primaryAction: syncAction,
+                primaryActionTitleOverride: "Refreshing Library",
+                isPrimaryActionDisabled: true,
                 secondaryAction: nil,
                 isCancellable: false,
                 showSuccess: false
@@ -1113,8 +1678,10 @@ final class AppViewModel: ObservableObject {
                 title: "Preparation Needs Attention",
                 message: notice.message,
                 progress: nil,
-                primaryAction: context.canPrepareSelection ? .prepareSelection : (context.canPrepareVisible ? .prepareVisible : syncAction),
-                secondaryAction: context.canPrepareSelection || context.canPrepareVisible ? syncAction : nil,
+                primaryAction: preferredPreparationAction ?? syncAction,
+                primaryActionTitleOverride: nil,
+                isPrimaryActionDisabled: preferredPreparationAction != nil && !isPreferredPreparationActionEnabled,
+                secondaryAction: preferredPreparationAction == nil ? nil : syncAction,
                 isCancellable: false,
                 showSuccess: false
             )
@@ -1126,8 +1693,10 @@ final class AppViewModel: ObservableObject {
                 title: "Preparation Needs Attention",
                 message: context.analysisErrorMessage,
                 progress: nil,
-                primaryAction: context.canPrepareSelection ? .prepareSelection : (context.canPrepareVisible ? .prepareVisible : syncAction),
-                secondaryAction: context.canPrepareSelection || context.canPrepareVisible ? syncAction : nil,
+                primaryAction: preferredPreparationAction ?? syncAction,
+                primaryActionTitleOverride: nil,
+                isPrimaryActionDisabled: preferredPreparationAction != nil && !isPreferredPreparationActionEnabled,
+                secondaryAction: preferredPreparationAction == nil ? nil : syncAction,
                 isCancellable: false,
                 showSuccess: false
             )
@@ -1140,6 +1709,8 @@ final class AppViewModel: ObservableObject {
                 message: "Connect or enable a library in Settings to start preparing tracks.",
                 progress: nil,
                 primaryAction: nil,
+                primaryActionTitleOverride: nil,
+                isPrimaryActionDisabled: false,
                 secondaryAction: nil,
                 isCancellable: false,
                 showSuccess: false
@@ -1153,8 +1724,10 @@ final class AppViewModel: ObservableObject {
                 title: "Tracks Need Preparation",
                 message: message,
                 progress: nil,
-                primaryAction: context.canPrepareSelection ? .prepareSelection : syncAction,
-                secondaryAction: context.canPrepareSelection ? syncAction : nil,
+                primaryAction: .prepareSelection,
+                primaryActionTitleOverride: nil,
+                isPrimaryActionDisabled: !context.canPrepareSelection,
+                secondaryAction: syncAction,
                 isCancellable: false,
                 showSuccess: false
             )
@@ -1167,6 +1740,8 @@ final class AppViewModel: ObservableObject {
                 message: "Everything in the current selection is ready to use.",
                 progress: 1,
                 primaryAction: syncAction,
+                primaryActionTitleOverride: nil,
+                isPrimaryActionDisabled: false,
                 secondaryAction: nil,
                 isCancellable: false,
                 showSuccess: true
@@ -1182,8 +1757,10 @@ final class AppViewModel: ObservableObject {
                 title: "Prepare Visible Tracks",
                 message: message,
                 progress: nil,
-                primaryAction: context.canPrepareVisible ? .prepareVisible : syncAction,
-                secondaryAction: context.canPrepareVisible ? syncAction : nil,
+                primaryAction: .prepareVisible,
+                primaryActionTitleOverride: nil,
+                isPrimaryActionDisabled: !context.canPrepareVisible,
+                secondaryAction: syncAction,
                 isCancellable: false,
                 showSuccess: false
             )
@@ -1196,6 +1773,8 @@ final class AppViewModel: ObservableObject {
                 message: "Visible tracks are ready to use.",
                 progress: 1,
                 primaryAction: syncAction,
+                primaryActionTitleOverride: nil,
+                isPrimaryActionDisabled: false,
                 secondaryAction: nil,
                 isCancellable: false,
                 showSuccess: true
@@ -1209,6 +1788,8 @@ final class AppViewModel: ObservableObject {
             message: emptyMessage,
             progress: nil,
             primaryAction: syncAction,
+            primaryActionTitleOverride: nil,
+            isPrimaryActionDisabled: false,
             secondaryAction: nil,
             isCancellable: false,
             showSuccess: false
@@ -1241,13 +1822,13 @@ final class AppViewModel: ObservableObject {
         AppLogger.shared.info(parts.joined(separator: " | "))
     }
 
-    private func decoratedAnalysisError(_ error: Error) -> String {
+    private func decoratedAnalysisError(_ rawMessage: String, trackID: UUID) -> String {
         var segments: [String] = []
-        let baseMessage = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseMessage = rawMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         if !baseMessage.isEmpty {
             segments.append(baseMessage)
         }
-        if let activity = analysisActivity {
+        if let activity = analysisActivitiesByTrackID[trackID] ?? analysisActivity {
             let lastStage = activity.stage.displayName
             if !lastStage.isEmpty {
                 segments.append("Last stage: \(lastStage)")
@@ -1310,30 +1891,102 @@ final class AppViewModel: ObservableObject {
     }
 
     func completeInitialSetup() {
-        let hasNativeSelection = librarySources.contains {
-            $0.kind != .folderFallback && $0.enabled && $0.resolvedPath != nil
-        }
         let hasFallbackFolder = !initialSetupLibraryRoot.isEmpty
+        let shouldRunLibrarySetup = hasFallbackFolder || !libraryRoots.isEmpty
 
-        guard hasNativeSelection || hasFallbackFolder else {
-            initialSetupStatusMessage = "Enable Serato or rekordbox, or choose a fallback folder first."
+        guard !initialSetupNeedsGoogleAIAPIKey else {
+            initialSetupStatusMessage = "Enter your Google AI API Key to continue."
+            validationStatus = .failed("Enter a Google AI API Key first.")
             return
         }
 
-        if hasFallbackFolder {
-            addLibraryRoots([initialSetupLibraryRoot])
+        guard !initialSetupRequiresLibrarySelection || shouldRunLibrarySetup else {
+            initialSetupStatusMessage = "Choose a Music Folder first."
+            return
         }
-        selectedSection = .library
-        initialSetupStatusMessage = "Detecting DJ libraries..."
+
         isRunningInitialSetup = true
+        initialSetupStatusMessage = validationStatus.isValidated
+            ? "Finishing setup..."
+            : "Validating \(embeddingProfile.displayName)..."
 
         Task {
+            let validated = await validateInitialSetupEmbeddingProfileIfNeeded()
+            guard validated else {
+                isRunningInitialSetup = false
+                if initialSetupStatusMessage.isEmpty {
+                    initialSetupStatusMessage = settingsStatusMessage.isEmpty
+                        ? validationStatus.summaryText
+                        : settingsStatusMessage
+                }
+                return
+            }
+
+            guard shouldRunLibrarySetup else {
+                initialSetupStatusMessage = "Setup complete."
+                isRunningInitialSetup = false
+                isShowingInitialSetupSheet = false
+                return
+            }
+
+            if hasFallbackFolder {
+                addLibraryRoots([initialSetupLibraryRoot])
+            }
+            selectedSection = .library
+            initialSetupStatusMessage = "Scanning Music Folders..."
             await detectLibrarySources()
 
             do {
-                let nativeSummary = try await syncLibrariesInternal()
-                let fallbackSummary = await runFallbackScanInternal()
+                let roots = libraryRoots.map { URL(fileURLWithPath: $0, isDirectory: true) }
+                if !roots.isEmpty {
+                    markFallbackSourceSyncing(rootPath: roots.first?.path)
+                }
+                let fallbackSummary = await Self.runFallbackScanInternal(
+                    scanner: scanner,
+                    roots: roots
+                ) { progress in
+                    Task { @MainActor [weak self, progress] in
+                        self?.scanProgress = progress
+                    }
+                }
+                if !roots.isEmpty {
+                    var folderFallbackSource = librarySources.first(where: { $0.kind == .folderFallback }) ?? .default(for: .folderFallback)
+                    folderFallbackSource.enabled = true
+                    folderFallbackSource.resolvedPath = roots.first?.path
+                    folderFallbackSource.lastSyncAt = Date()
+                    folderFallbackSource.status = .available
+                    folderFallbackSource.lastError = nil
+                    persistLibrarySource(folderFallbackSource)
+                }
                 await refreshTracks()
+
+                let enabledNativeSources = librarySources.filter {
+                    $0.kind != .folderFallback && $0.enabled && $0.resolvedPath != nil
+                }
+                let canRefreshVendorMetadata = !tracks.isEmpty
+                if !enabledNativeSources.isEmpty {
+                    markLibrarySourcesSyncing(enabledNativeSources)
+                }
+                let nativeSummary = canRefreshVendorMetadata
+                    ? try await Self.syncLibrariesInternal(
+                        service: librarySyncService,
+                        sources: enabledNativeSources
+                    ) { progress in
+                        Task { @MainActor [weak self, progress] in
+                            self?.scanProgress = progress
+                        }
+                    }
+                    : "Vendor metadata refresh skipped because no scanned local tracks are available yet."
+                if !enabledNativeSources.isEmpty {
+                    let now = Date()
+                    for source in enabledNativeSources {
+                        var updatedSource = source
+                        updatedSource.lastSyncAt = now
+                        updatedSource.status = .available
+                        updatedSource.lastError = nil
+                        persistLibrarySource(updatedSource)
+                    }
+                }
                 LibraryRootsStore.markInitialSetupCompleted()
                 initialSetupStatusMessage = [
                     "Initial library setup finished.",
@@ -1377,39 +2030,114 @@ final class AppViewModel: ObservableObject {
     }
 
     func syncLibraries() {
+        refreshVendorMetadata()
+    }
+
+    func refreshVendorMetadata() {
         preparationNotice = nil
-        Task {
-            let sourceNames = librarySources
-                .filter { $0.kind != .folderFallback && $0.enabled && $0.resolvedPath != nil }
-                .map(\.kind.displayName)
-                .joined(separator: ",")
-            AppLogger.shared.info("Library sync started | sources=\(sourceNames)")
-            do {
-                let summary = try await syncLibrariesInternal()
-                libraryStatusMessage = summary ?? "No DJ library sources were synced."
-                AppLogger.shared.info("Library sync completed | summary=\(libraryStatusMessage)")
-                await refreshTracks()
-            } catch {
-                libraryStatusMessage = "Library sync failed: \(error.localizedDescription)"
-                AppLogger.shared.error("Library sync failed: \(error.localizedDescription)")
+        revealLibraryPreparationPane()
+        guard librarySyncPresentationState?.phase != .running else { return }
+
+        guard !tracks.isEmpty else {
+            publishNoSyncSourceNotice(
+                "Scan Music Folders before refreshing vendor metadata."
+            )
+            return
+        }
+
+        let enabledNativeSources = librarySources.filter {
+            $0.kind != .folderFallback && $0.enabled && $0.resolvedPath != nil
+        }
+        guard !enabledNativeSources.isEmpty else {
+            publishNoSyncSourceNotice(
+                "Enable Serato or rekordbox metadata sources in Settings before refreshing vendor metadata."
+            )
+            return
+        }
+
+        let sourceNames = enabledNativeSources.map(\.kind.displayName)
+        AppLogger.shared.info("Vendor metadata refresh started | sources=\(sourceNames.joined(separator: ","))")
+        presentLibrarySyncSheet(
+            title: "Refreshing Vendor Metadata",
+            actionVerb: "Refreshing vendor metadata for",
+            sourceNames: sourceNames
+        )
+        markLibrarySourcesSyncing(enabledNativeSources)
+        let progressHandler: @Sendable (ScanJobProgress) -> Void = { [weak self, sourceNames] progress in
+            Task { @MainActor [weak self, progress, sourceNames] in
+                self?.updateLibrarySyncProgress(
+                    progress,
+                    title: "Refreshing Vendor Metadata",
+                    actionVerb: "Refreshing vendor metadata for",
+                    sourceNames: sourceNames
+                )
+            }
+        }
+
+        let service = librarySyncService
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, enabledNativeSources, service] in
+            Task {
+                do {
+                    let summary = try await Self.syncLibrariesInternal(
+                        service: service,
+                        sources: enabledNativeSources,
+                        onProgress: progressHandler
+                    )
+                    await self?.completeNativeLibrarySync(
+                        summary: summary ?? "No vendor metadata sources were refreshed.",
+                        sources: enabledNativeSources
+                    )
+                } catch {
+                    await self?.failNativeLibrarySync(error, sources: enabledNativeSources)
+                }
             }
         }
     }
 
     func runFallbackScan() {
+        scanMusicFolders()
+    }
+
+    func scanMusicFolders() {
         preparationNotice = nil
-        Task {
-            AppLogger.shared.info(
-                "Fallback scan started | rootCount=\(libraryRoots.count) | roots=\(libraryRoots.joined(separator: ","))"
+        revealLibraryPreparationPane()
+        guard librarySyncPresentationState?.phase != .running else { return }
+
+        let roots = libraryRoots.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        guard !roots.isEmpty else {
+            publishNoSyncSourceNotice(
+                "Choose a Music Folder in Settings before scanning."
             )
-            let summary = await runFallbackScanInternal()
-            if let summary {
-                libraryStatusMessage = summary
-                AppLogger.shared.info(
-                    "Fallback scan completed | summary=\(summary) | scanned=\(scanProgress.scannedFiles) | indexed=\(scanProgress.indexedFiles) | skipped=\(scanProgress.skippedFiles) | duplicates=\(scanProgress.duplicateFiles)"
+            return
+        }
+
+        let sourceNames = [LibrarySourceKind.folderFallback.displayName]
+        AppLogger.shared.info(
+            "Fallback scan started | rootCount=\(roots.count) | roots=\(roots.map(\.path).joined(separator: ","))"
+        )
+        presentLibrarySyncSheet(
+            title: "Scanning Music Folders",
+            actionVerb: "Scanning",
+            sourceNames: sourceNames
+        )
+        markFallbackSourceSyncing(rootPath: roots.first?.path)
+        let progressHandler: @Sendable (ScanJobProgress) -> Void = { [weak self, sourceNames] progress in
+            Task { @MainActor [weak self, progress, sourceNames] in
+                self?.updateLibrarySyncProgress(
+                    progress,
+                    title: "Scanning Music Folders",
+                    actionVerb: "Scanning",
+                    sourceNames: sourceNames
                 )
             }
-            await refreshTracks()
+        }
+
+        let scanner = self.scanner
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, roots, scanner] in
+            Task {
+                let summary = await Self.runFallbackScanInternal(scanner: scanner, roots: roots, onProgress: progressHandler)
+                await self?.completeFallbackScan(summary: summary ?? "Scanned Music Folders.")
+            }
         }
     }
 
@@ -1420,7 +2148,7 @@ final class AppViewModel: ObservableObject {
         case .prepareVisible:
             return "Prepare Visible"
         case .syncLibrary:
-            return "Sync Libraries"
+            return "Scan Music Folders"
         }
     }
 
@@ -1436,24 +2164,27 @@ final class AppViewModel: ObservableObject {
     }
 
     private func syncLibraryFromOverview() {
+        let hasEnabledFallbackSource = librarySources.contains {
+            $0.kind == .folderFallback && $0.enabled && $0.resolvedPath != nil
+        }
+
+        if hasEnabledFallbackSource {
+            scanMusicFolders()
+            return
+        }
+
         let hasEnabledNativeSource = librarySources.contains {
             $0.kind != .folderFallback && $0.enabled && $0.resolvedPath != nil
         }
 
         if hasEnabledNativeSource {
-            syncLibraries()
+            refreshVendorMetadata()
             return
         }
 
-        let hasEnabledFallbackSource = librarySources.contains {
-            $0.kind == .folderFallback && $0.enabled && $0.resolvedPath != nil
-        }
-        if hasEnabledFallbackSource {
-            runFallbackScan()
-            return
-        }
-
-        AppLogger.shared.info("Library sync skipped | reason=no_enabled_sources")
+        publishNoSyncSourceNotice(
+            "Choose a Music Folder, or enable Serato/rekordbox metadata sources in Settings."
+        )
     }
 
     func choosePythonExecutable() {
@@ -1498,7 +2229,7 @@ final class AppViewModel: ObservableObject {
             {
                 AppSettingsStore.clearValidationMetadata()
                 validationStatus = .unvalidated
-                recommendations = []
+                invalidateGeneratedRecommendationResults()
             }
             settingsStatusMessage = "Analysis settings saved."
             scheduleWorkerHealthRefresh()
@@ -1521,6 +2252,35 @@ final class AppViewModel: ObservableObject {
         selectedSection = .mixAssistant
     }
 
+    @discardableResult
+    func prepareRecommendationSearchFromLibrary() -> LibraryRecommendationSearchEntryAction {
+        guard canOpenRecommendationSearchFromLibrary else { return .navigateOnly }
+
+        let action = recommendationSearchEntryActionFromLibrary()
+        openMixAssistant(mode: .buildMixset)
+        clearRecommendationQueryTextForLibraryEntry(preservingGeneratedResults: action == .reuseExistingResults)
+        return action
+    }
+
+    func openRecommendationSearchFromLibrary() {
+        guard canOpenRecommendationSearchFromLibrary else { return }
+
+        switch prepareRecommendationSearchFromLibrary() {
+        case .navigateOnly, .reuseExistingResults:
+            return
+        case .autoGenerate:
+            generateRecommendations(trigger: .librarySelection)
+        }
+    }
+
+    func handleLibrarySetupPromptAction() {
+        if libraryRoots.isEmpty {
+            openInitialSetup()
+        } else {
+            runScan()
+        }
+    }
+
     func resetMixsetScoringControls() {
         weights = .defaults
         vectorWeights = .defaults
@@ -1533,6 +2293,10 @@ final class AppViewModel: ObservableObject {
     }
 
     func analyzePendingSelection() {
+        guard preparationBlockedMessage == nil else {
+            analysisErrorMessage = preparationBlockedMessage ?? "The current analysis setup is unavailable."
+            return
+        }
         let targets = selectedTracks.filter { trackWorkflowStatus(for: $0) != .ready }
         guard !targets.isEmpty else {
             analysisQueueProgressText = "Everything in the current selection is already ready."
@@ -1547,8 +2311,292 @@ final class AppViewModel: ObservableObject {
         selectedSection = .library
     }
 
+    func selectTrackFromLibrary(_ trackID: UUID) {
+        updateSelectedTrackIDs([trackID], deferSideEffects: true)
+    }
+
+    func setRecommendationSelectedForCuration(_ trackID: UUID, isSelected: Bool) {
+        if isSelected {
+            curationSelectionTrackIDs.insert(trackID)
+        } else {
+            curationSelectionTrackIDs.remove(trackID)
+        }
+    }
+
+    func isRecommendationSelectedForCuration(_ trackID: UUID) -> Bool {
+        curationSelectionTrackIDs.contains(trackID)
+    }
+
+    func removeSelectedGeneratedRecommendations() {
+        guard !curationSelectionTrackIDs.isEmpty else { return }
+        excludedGeneratedTrackIDs.formUnion(curationSelectionTrackIDs)
+        let removedCount = curationSelectionTrackIDs.count
+        curationSelectionTrackIDs.removeAll()
+        refreshVisibleRecommendations()
+        recommendationStatusMessage = "Hidden \(removedCount) generated matches from the current build pool."
+    }
+
+    func restoreGeneratedRecommendations() {
+        guard !excludedGeneratedTrackIDs.isEmpty else { return }
+        let restoredCount = excludedGeneratedTrackIDs.count
+        excludedGeneratedTrackIDs.removeAll()
+        curationSelectionTrackIDs.removeAll()
+        refreshVisibleRecommendations()
+        recommendationStatusMessage = "Restored \(restoredCount) hidden generated matches."
+    }
+
+    func applyGeneratedRecommendationsForTesting(_ candidates: [RecommendationCandidate]) {
+        replaceGeneratedRecommendations(candidates)
+    }
+
+    func configureRecommendationSearchStateForTesting(
+        tracks: [Track],
+        selectedTrackIDs: Set<UUID>,
+        readyTrackIDs: Set<UUID>,
+        validationStatus: ValidationStatus,
+        recommendationQueryText: String = "",
+        recommendationStatusMessage: String = "",
+        generatedRecommendations: [RecommendationCandidate] = []
+    ) {
+        self.tracks = tracks
+        self.selectedTrackIDs = selectedTrackIDs
+        self.readyTrackIDs = readyTrackIDs
+        self.validationStatus = validationStatus
+        workerProfileStatuses = [:]
+        selectedSection = .library
+        mixAssistantMode = .buildMixset
+        recommendationGenerationStub = nil
+        isGeneratingRecommendations = false
+        isBuildingPlaylist = false
+        playlistBuildProgress = nil
+        excludedGeneratedTrackIDs.removeAll()
+        curationSelectionTrackIDs.removeAll()
+        selectedRecommendationID = nil
+        recommendations = []
+        self.generatedRecommendations = []
+        self.recommendationStatusMessage = ""
+        self.recommendationQueryText = recommendationQueryText
+        if !generatedRecommendations.isEmpty {
+            replaceGeneratedRecommendations(generatedRecommendations)
+        }
+        self.recommendationStatusMessage = recommendationStatusMessage
+    }
+
+    func setRecommendationGenerationStubForTesting(
+        results: [RecommendationCandidate],
+        delayNanoseconds: UInt64 = 0,
+        completionStatusMessage: String? = nil
+    ) {
+        recommendationGenerationStub = RecommendationGenerationStub(
+            results: results,
+            delayNanoseconds: delayNanoseconds,
+            completionStatusMessage: completionStatusMessage
+        )
+    }
+
+    func clearRecommendationGenerationStubForTesting() {
+        recommendationGenerationStub = nil
+    }
+
     func dismissPreparationNotice() {
         preparationNotice = nil
+    }
+
+    var isLibrarySyncSheetPresented: Bool {
+        librarySyncPresentationState?.isPresented == true
+    }
+
+    func dismissLibrarySyncSheetIfPossible() {
+        guard let state = librarySyncPresentationState, state.phase != .running else { return }
+        librarySyncDismissTask?.cancel()
+        librarySyncDismissTask = nil
+        librarySyncPresentationState = nil
+    }
+
+    private func revealLibraryPreparationPane() {
+        selectedSection = .library
+    }
+
+    private func publishNoSyncSourceNotice(_ message: String) {
+        dismissLibrarySyncSheetIfPossible()
+        scanProgress = ScanJobProgress()
+        libraryStatusMessage = message
+        preparationNotice = PreparationNotice(kind: .failed, message: message)
+        AppLogger.shared.info("Library sync skipped | reason=no_enabled_sources")
+    }
+
+    func presentLibrarySyncSheet(title: String, actionVerb: String, sourceNames: [String]) {
+        var progress = ScanJobProgress()
+        progress.isRunning = true
+        scanProgress = progress
+        librarySyncPresentationState = LibrarySyncPresentationState(
+            isPresented: true,
+            phase: .running,
+            title: title,
+            message: runningLibrarySyncMessage(actionVerb: actionVerb, sourceNames: sourceNames, currentFile: ""),
+            progress: nil,
+            isIndeterminate: true,
+            sourceNames: sourceNames,
+            startedAt: Date(),
+            result: nil,
+            currentFile: "",
+            stats: progress
+        )
+    }
+
+    private func updateLibrarySyncProgress(
+        _ progress: ScanJobProgress,
+        title: String,
+        actionVerb: String,
+        sourceNames: [String]
+    ) {
+        scanProgress = progress
+        guard var state = librarySyncPresentationState else { return }
+        state.phase = .running
+        state.title = title
+        state.sourceNames = sourceNames
+        state.currentFile = progress.currentFile
+        state.stats = progress
+        state.progress = progress.totalFiles > 0
+            ? Double(progress.scannedFiles) / Double(max(progress.totalFiles, 1))
+            : nil
+        state.isIndeterminate = progress.totalFiles == 0
+        state.message = runningLibrarySyncMessage(
+            actionVerb: actionVerb,
+            sourceNames: sourceNames,
+            currentFile: progress.currentFile
+        )
+        librarySyncPresentationState = state
+    }
+
+    private func completeNativeLibrarySync(summary: String, sources: [LibrarySourceRecord]) async {
+        let now = Date()
+        for source in sources {
+            var updatedSource = source
+            updatedSource.lastSyncAt = now
+            updatedSource.status = .available
+            updatedSource.lastError = nil
+            persistLibrarySource(updatedSource)
+        }
+        AppLogger.shared.info("Library sync completed | summary=\(summary)")
+        finishSuccessfulLibrarySync(summary: summary)
+        await refreshTracks()
+        revealPostSyncPreparationState()
+    }
+
+    private func failNativeLibrarySync(_ error: Error, sources: [LibrarySourceRecord]) async {
+        for source in sources {
+            var failedSource = source
+            failedSource.status = .error
+            failedSource.lastError = error.localizedDescription
+            persistLibrarySource(failedSource)
+        }
+
+        var progress = scanProgress
+        progress.isRunning = false
+        progress.currentFile = ""
+        scanProgress = progress
+
+        let message = "Library sync failed: \(error.localizedDescription)"
+        libraryStatusMessage = message
+        preparationNotice = PreparationNotice(
+            kind: .failed,
+            message: "Library sync could not finish. Check Settings or the logs for details."
+        )
+        AppLogger.shared.error(message)
+        presentFailedLibrarySyncSheet(message: message)
+    }
+
+    private func completeFallbackScan(summary: String) async {
+        var folderFallbackSource = librarySources.first(where: { $0.kind == .folderFallback }) ?? .default(for: .folderFallback)
+        folderFallbackSource.enabled = true
+        folderFallbackSource.resolvedPath = libraryRoots.first
+        folderFallbackSource.lastSyncAt = Date()
+        folderFallbackSource.status = .available
+        folderFallbackSource.lastError = nil
+        persistLibrarySource(folderFallbackSource)
+        AppLogger.shared.info(
+            "Fallback scan completed | summary=\(summary) | scanned=\(scanProgress.scannedFiles) | indexed=\(scanProgress.indexedFiles) | skipped=\(scanProgress.skippedFiles) | duplicates=\(scanProgress.duplicateFiles)"
+        )
+        finishSuccessfulLibrarySync(summary: summary)
+        await refreshTracks()
+        revealPostSyncPreparationState()
+    }
+
+    private func presentFailedLibrarySyncSheet(message: String) {
+        guard var state = librarySyncPresentationState else {
+            librarySyncPresentationState = LibrarySyncPresentationState(
+                isPresented: true,
+                phase: .failed,
+                title: "Sync Failed",
+                message: message,
+                progress: nil,
+                isIndeterminate: false,
+                sourceNames: [],
+                startedAt: Date(),
+                result: nil,
+                currentFile: "",
+                stats: scanProgress
+            )
+            return
+        }
+
+        state.phase = .failed
+        state.title = "Sync Failed"
+        state.message = message
+        state.result = nil
+        state.progress = nil
+        state.isIndeterminate = false
+        state.stats = scanProgress
+        librarySyncPresentationState = state
+    }
+
+    func finishSuccessfulLibrarySync(summary: String) {
+        var progress = scanProgress
+        progress.isRunning = false
+        progress.currentFile = ""
+        scanProgress = progress
+        libraryStatusMessage = summary
+        preparationNotice = nil
+        librarySyncDismissTask?.cancel()
+        librarySyncDismissTask = nil
+        librarySyncPresentationState = nil
+    }
+
+    private func revealPostSyncPreparationState() {
+        revealLibraryPreparationPane()
+        guard tracks.contains(where: { trackWorkflowStatus(for: $0) != .ready }) else { return }
+        libraryTrackFilter = .needsPreparation
+    }
+
+    private func markLibrarySourcesSyncing(_ sources: [LibrarySourceRecord]) {
+        for source in sources {
+            var syncingSource = source
+            syncingSource.status = .syncing
+            syncingSource.lastError = nil
+            persistLibrarySource(syncingSource)
+        }
+    }
+
+    private func markFallbackSourceSyncing(rootPath: String?) {
+        var folderFallbackSource = librarySources.first(where: { $0.kind == .folderFallback }) ?? .default(for: .folderFallback)
+        folderFallbackSource.enabled = true
+        folderFallbackSource.resolvedPath = rootPath
+        folderFallbackSource.status = .syncing
+        folderFallbackSource.lastError = nil
+        persistLibrarySource(folderFallbackSource)
+    }
+
+    private func runningLibrarySyncMessage(
+        actionVerb: String,
+        sourceNames: [String],
+        currentFile: String
+    ) -> String {
+        let summary = sourceNames.isEmpty ? "library sources" : sourceNames.joined(separator: ", ")
+        guard !currentFile.isEmpty else {
+            return "\(actionVerb) \(summary)."
+        }
+        return "\(actionVerb) \(summary). Current: \(currentFile)"
     }
 
     func openScopeInspector(for target: ScopeFilterTarget) {
@@ -1596,13 +2644,13 @@ final class AppViewModel: ObservableObject {
         if filter.isEmpty {
             switch target {
             case .library:
-                return "All library files"
+                return "All scanned local tracks"
             case .search, .recommendation:
-                return "All ready tracks from synced DJ libraries"
+                return "All ready local tracks"
             }
         }
 
-        let filterLabel = filter.selectedFacetCount == 1 ? "filter" : "filters"
+        let filterLabel = filter.selectedFacetCount == 1 ? "reference" : "references"
         return "\(filter.selectedFacetCount) \(filterLabel) • \(statistics.total) tracks in scope"
     }
 
@@ -1674,6 +2722,10 @@ final class AppViewModel: ObservableObject {
     }
 
     func analyzeVisibleUnpreparedTracks() {
+        guard preparationBlockedMessage == nil else {
+            analysisErrorMessage = preparationBlockedMessage ?? "The current analysis setup is unavailable."
+            return
+        }
         let targets = filteredTracks.filter { trackWorkflowStatus(for: $0) != .ready }
         guard !targets.isEmpty else {
             analysisQueueProgressText = "Everything visible in the current library scope is already ready."
@@ -1684,6 +2736,16 @@ final class AppViewModel: ObservableObject {
     }
 
     func analyzeScopedTracks(for target: ScopeFilterTarget) {
+        guard preparationBlockedMessage == nil else {
+            let message = preparationBlockedMessage ?? "The current analysis setup is unavailable."
+            switch target {
+            case .library:
+                analysisErrorMessage = message
+            case .search, .recommendation:
+                recommendationStatusMessage = message
+            }
+            return
+        }
         let scopeFilter = scopeFilter(for: target)
         let scopedTracks = tracksMatchingScope(scopeFilter).filter { trackWorkflowStatus(for: $0) != .ready }
         guard !scopedTracks.isEmpty else {
@@ -1699,14 +2761,23 @@ final class AppViewModel: ObservableObject {
         startAnalysis(for: scopedTracks)
     }
 
+    private func requestAnalysisTargets() -> [Track] {
+        analysisScope.resolveTracks(
+            from: tracks,
+            selectedTrackIDs: selectedTrackIDs,
+            readyTrackIDs: readyTrackIDs,
+            activeProfileID: embeddingProfile.id
+        )
+    }
+
     func requestAnalysis() {
         preparationNotice = nil
         guard isSelectedEmbeddingProfileSupported else {
             analysisErrorMessage = selectedEmbeddingProfileDependencyMessage ?? "The current analysis setup is unavailable."
             return
         }
-        guard hasValidatedEmbeddingProfile else {
-            analysisErrorMessage = "Validate the current analysis setup in Settings before analyzing tracks."
+        guard preparationBlockedMessage == nil else {
+            analysisErrorMessage = preparationBlockedMessage ?? "The current analysis setup is unavailable."
             return
         }
         if isAnalyzing {
@@ -1714,12 +2785,7 @@ final class AppViewModel: ObservableObject {
             return
         }
 
-        let targets = analysisScope.resolveTracks(
-            from: tracks,
-            selectedTrackIDs: selectedTrackIDs,
-            readyTrackIDs: readyTrackIDs,
-            activeProfileID: embeddingProfile.id
-        )
+        let targets = requestAnalysisTargets()
         guard !targets.isEmpty else {
             analysisQueueProgressText = "No tracks match the selected analysis scope."
             return
@@ -1755,7 +2821,8 @@ final class AppViewModel: ObservableObject {
         for trackID in pendingAnalysisTrackIDs {
             updateAnalysisState(trackID: trackID, state: .queued, message: "Queued")
         }
-        prepareAnalysisSession(for: targets)
+        analysisSessionProgress = .queued(totalCount: targets.count, latestTrackTitle: targets.first?.title ?? "")
+        refreshAnalysisQueueText()
         analysisTask?.cancel()
         analysisTask = Task {
             await analyzeTracks(targets, mode: .batch)
@@ -1774,7 +2841,7 @@ final class AppViewModel: ObservableObject {
         analysisErrorMessage = ""
         isCancellingAnalysis = true
         analysisTask?.cancel()
-        cancelAnalysisProgressWatchdog()
+        cancelAllAnalysisProgressWatchdogs()
 
         if analysisTask == nil {
             finalizeAnalysisSession(result: .canceled)
@@ -1784,11 +2851,10 @@ final class AppViewModel: ObservableObject {
     func finalizeAnalysisSession(result: AnalysisSessionResult) {
         let pendingTrackIDs = pendingAnalysisTrackIDs
 
-        cancelAnalysisProgressWatchdog()
+        cancelAllAnalysisProgressWatchdogs()
         isAnalyzing = false
         isCancellingAnalysis = false
         analysisTask = nil
-        pendingAnalysisTrackIDs = []
 
         switch result {
         case .succeeded:
@@ -1801,13 +2867,13 @@ final class AppViewModel: ObservableObject {
                 let currentState = analysisStateByTrackID[trackID]?.state
                 if currentState == .queued || currentState == .running {
                     updateAnalysisState(trackID: trackID, state: .canceled, message: "Canceled")
+                    analysisProgressFractionByTrackID[trackID] = 1
                 }
             }
             if let activity = analysisActivity, !activity.isFinished {
                 var updatedActivity = activity
                 updatedActivity.markFinished(state: AnalysisTaskState.canceled, message: "Canceled by user")
                 analysisActivity = updatedActivity
-                updateAnalysisQueueTextFromActivity()
             }
         case let .failed(message):
             let failureMessage = Self.friendlyPreparationMessage(from: message) ?? "Preparation needs attention."
@@ -1821,12 +2887,33 @@ final class AppViewModel: ObservableObject {
                     message: "Failed \(activity.currentTrackTitle)"
                 )
                 analysisActivity = updatedActivity
-                updateAnalysisQueueTextFromActivity()
             }
+        }
+
+        refreshAnalysisSessionProgress(
+            latestTrackTitle: analysisActivity?.currentTrackTitle,
+            latestMessage: analysisActivity?.currentMessage
+        )
+        pendingAnalysisTrackIDs = []
+        analysisSessionProgress = nil
+        analysisActivitiesByTrackID.removeAll()
+        analysisProgressFractionByTrackID.removeAll()
+        if analysisActivity == nil {
+            analysisQueueProgressText = ""
+        } else {
+            refreshAnalysisQueueText()
         }
     }
 
-    func generateRecommendations(limit: Int? = nil) {
+    func generateRecommendations(limit: Int? = nil, trigger: RecommendationGenerationTrigger = .manual) {
+        guard !isBuildingPlaylist else {
+            recommendationStatusMessage = "Wait for the current playlist build to finish."
+            return
+        }
+        guard !isGeneratingRecommendations else {
+            recommendationStatusMessage = "Recommendation search is already running."
+            return
+        }
         guard isSelectedEmbeddingProfileSupported else {
             recommendationStatusMessage = selectedEmbeddingProfileDependencyMessage ?? "The current analysis setup is unavailable."
             return
@@ -1841,8 +2928,28 @@ final class AppViewModel: ObservableObject {
             return
         }
 
+        isGeneratingRecommendations = true
+        recommendationStatusMessage = trigger.inProgressMessage
+
         Task {
+            defer {
+                isGeneratingRecommendations = false
+            }
+
             do {
+                if let stub = recommendationGenerationStub {
+                    if stub.delayNanoseconds > 0 {
+                        try await Task.sleep(nanoseconds: stub.delayNanoseconds)
+                    }
+                    replaceGeneratedRecommendations(stub.results)
+                    recommendationStatusMessage = stub.completionStatusMessage
+                        ?? recommendationGenerationCompletionMessage(
+                            resultCount: stub.results.count,
+                            inputState: input.state
+                        )
+                    return
+                }
+
                 let embeddingsByTrackID = try loadTrackEmbeddings()
                 let summariesByTrackID = try loadAnalysisSummaries(trackIDs: Array(readyTrackIDs))
                 let excludedReferenceTrackIDs = Set(input.readyReferenceTracks.map(\.id))
@@ -1860,6 +2967,7 @@ final class AppViewModel: ObservableObject {
                     summariesByTrackID: summariesByTrackID,
                     vectorSimilarityByPath: seedContext.similarityMap,
                     vectorBreakdownByPath: seedContext.vectorBreakdownByPath,
+                    libraryRoots: libraryRoots,
                     constraints: constraints,
                     weights: weights,
                     vectorWeights: vectorWeights,
@@ -1876,7 +2984,7 @@ final class AppViewModel: ObservableObject {
                     candidateCountAfterScope: seedContext.candidateCountAfterScope,
                     resultLimit: effectiveLimit
                 )
-                recommendations = recs.map { candidate in
+                let generated = recs.map { candidate in
                     let matchedMemberships = membershipSnapshotsByTrackID[candidate.track.id]?
                         .matchedPaths(scopeFilter: recommendationScopeFilter) ?? []
                     return RecommendationCandidate(
@@ -1892,15 +3000,15 @@ final class AppViewModel: ObservableObject {
                         scoreSessionID: sessionID
                     )
                 }
-                selectedRecommendationID = recs.first?.id
-                if recs.isEmpty {
-                    recommendationStatusMessage = "No recommendations found for the current inputs."
-                } else if input.state.requiresSemanticSeed {
-                    recommendationStatusMessage = "Generated \(recs.count) matches from semantic seed: \(seedContext.seed.title)."
-                } else {
-                    recommendationStatusMessage = "Generated \(recs.count) matches."
-                }
+
+                replaceGeneratedRecommendations(generated)
+                recommendationStatusMessage = recommendationGenerationCompletionMessage(
+                    resultCount: generated.count,
+                    inputState: input.state,
+                    semanticSeedTitle: input.state.requiresSemanticSeed ? seedContext.seed.title : nil
+                )
             } catch {
+                resetGeneratedRecommendationResults()
                 recommendationStatusMessage = "Recommendation failed: \(error.localizedDescription)"
                 AppLogger.shared.error("Recommendation failed: \(error.localizedDescription)")
             }
@@ -1908,6 +3016,14 @@ final class AppViewModel: ObservableObject {
     }
 
     func buildPlaylistPath() {
+        guard !isBuildingPlaylist else {
+            recommendationStatusMessage = "A playlist build is already running."
+            return
+        }
+        guard !isGeneratingRecommendations else {
+            recommendationStatusMessage = "Wait for the current recommendation search to finish."
+            return
+        }
         guard isSelectedEmbeddingProfileSupported else {
             recommendationStatusMessage = selectedEmbeddingProfileDependencyMessage ?? "The current analysis setup is unavailable."
             return
@@ -1920,100 +3036,124 @@ final class AppViewModel: ObservableObject {
             recommendationStatusMessage = recommendationInputValidationMessage()
             return
         }
+        guard hasGeneratedRecommendationResults else {
+            recommendationStatusMessage = "Generate matches first to create a curated build pool."
+            return
+        }
+
+        let curatedPool = recommendations
+        guard !curatedPool.isEmpty else {
+            recommendationStatusMessage = "All generated matches are hidden. Restore tracks or generate again."
+            return
+        }
+
+        isBuildingPlaylist = true
+        updatePlaylistBuildProgress(
+            stage: .resolvingSeed,
+            completedCount: 0,
+            totalCount: curatedPool.count,
+            progress: 0.02,
+            currentSeedTitle: input.readyReferenceTracks.first?.title ?? "",
+            message: "Resolving the current mix seed."
+        )
 
         Task {
             do {
-                let effectiveConstraints = effectiveRecommendationConstraints
-                let embeddingsByTrackID = try loadTrackEmbeddings()
-                let summariesByTrackID = try loadAnalysisSummaries(trackIDs: Array(readyTrackIDs))
-                let excludedReferenceTrackIDs = Set(input.readyReferenceTracks.map(\.id))
-                let targetCount = max(2, playlistTargetCount)
+                let relevantTrackIDs = Set(curatedPool.map(\.track.id)).union(input.readyReferenceTracks.map(\.id))
+                let embeddingsByTrackID = try loadTrackEmbeddings(trackIDs: relevantTrackIDs)
+                let summariesByTrackID = try loadAnalysisSummaries(trackIDs: Array(relevantTrackIDs))
                 let seedContext = try await resolveRecommendationSeedContext(
                     input: input,
                     embeddingsByTrackID: embeddingsByTrackID,
                     summariesByTrackID: summariesByTrackID,
-                    limit: max(targetCount * 2, 25),
+                    limit: max(curatedPool.count, 25),
                     excludedPaths: []
                 )
-                var pathTracks: [Track] = [seedContext.seed]
-                var pathCandidates: [RecommendationCandidate] = [
-                    RecommendationCandidate(
-                        id: seedContext.seed.id,
-                        track: seedContext.seed,
-                        score: 1.0,
-                        breakdown: ScoreBreakdown(
-                            embeddingSimilarity: 1,
-                            bpmCompatibility: 1,
-                            harmonicCompatibility: 1,
-                            energyFlow: 1,
-                            transitionRegionMatch: 1,
-                            externalMetadataScore: 1
-                        ),
-                        vectorBreakdown: VectorScoreBreakdown(
-                            fusedScore: 1,
-                            trackScore: 1,
-                            introScore: 1,
-                            middleScore: 1,
-                            outroScore: 1,
-                            bestMatchedCollection: "tracks"
-                        ),
-                        analysisFocus: summariesByTrackID[seedContext.seed.id]?.analysisFocus,
-                        mixabilityTags: summariesByTrackID[seedContext.seed.id]?.mixabilityTags ?? [],
-                        matchReasons: ["Seed track"],
-                        matchedMemberships: membershipSnapshotsByTrackID[seedContext.seed.id]?
-                            .matchedPaths(scopeFilter: recommendationScopeFilter) ?? [],
-                        scoreSessionID: nil
-                    )
-                ]
-                var current = seedContext.seed
+                updatePlaylistBuildProgress(
+                    stage: .preparingCuratedPool,
+                    completedCount: 0,
+                    totalCount: curatedPool.count,
+                    progress: 0.10,
+                    currentSeedTitle: seedContext.seed.title,
+                    message: "Preparing \(curatedPool.count) curated matches for playlist ordering."
+                )
 
-                while pathTracks.count < targetCount {
-                    let similarityState = try await similarityState(
-                        seed: current,
-                        filters: WorkerSimilarityFilters(
-                            bpmMin: effectiveConstraints.targetBPMMin,
-                            bpmMax: effectiveConstraints.targetBPMMax,
-                            durationMaxSec: effectiveConstraints.maxDurationMinutes.map { $0 * 60 },
-                            musicalKey: effectiveConstraints.keyStrictness > 0.85 ? current.musicalKey : nil,
-                            genre: effectiveConstraints.genreContinuity > 0.85 ? current.genre : nil
-                        ),
-                        limit: max(15, targetCount * 2),
-                        excludedPaths: Set(pathTracks.map(\.filePath)),
-                        scopeFilter: recommendationScopeFilter
-                    )
-                    let nextCandidate = recommendationEngine.recommendNextTracks(
-                        seed: current,
-                        candidates: tracks.filter { readyTrackIDs.contains($0.id) },
-                        embeddingsByTrackID: embeddingsByTrackID,
-                        summariesByTrackID: summariesByTrackID,
-                        vectorSimilarityByPath: similarityState.similarityMap,
-                        vectorBreakdownByPath: similarityState.vectorBreakdownByPath,
-                        constraints: constraints,
-                        weights: weights,
-                        vectorWeights: vectorWeights,
-                        limit: 1,
-                        excludeTrackIDs: Set(pathTracks.map(\.id)).union(excludedReferenceTrackIDs)
-                    ).first
+                let orderedCandidates = try Self.buildCuratedPlaylistCandidates(
+                    seed: seedContext.seed,
+                    curatedCandidates: curatedPool,
+                    embeddingsByTrackID: embeddingsByTrackID,
+                    summariesByTrackID: summariesByTrackID,
+                    libraryRoots: libraryRoots,
+                    constraints: constraints,
+                    weights: weights,
+                    vectorWeights: vectorWeights
+                ) { [weak self] currentSeed, remainingTracks in
+                    guard let self else { return [:] }
 
-                    guard let nextCandidate else { break }
-                    pathTracks.append(nextCandidate.track)
-                    pathCandidates.append(nextCandidate)
-                    current = nextCandidate.track
+                    let completedCount = curatedPool.count - remainingTracks.count
+                    let normalizedProgress = 0.12 + (0.76 * Double(completedCount) / Double(max(curatedPool.count, 1)))
+                    self.updatePlaylistBuildProgress(
+                        stage: .orderingTrack,
+                        completedCount: completedCount,
+                        totalCount: curatedPool.count,
+                        progress: normalizedProgress,
+                        currentSeedTitle: currentSeed.title,
+                        latestTrackTitle: remainingTracks.first?.title,
+                        message: "Evaluating \(remainingTracks.count) remaining curated matches from \(currentSeed.title)."
+                    )
+                    return try self.curatedVectorBreakdowns(seed: currentSeed, candidates: remainingTracks)
                 }
 
-                playlistTracks = pathTracks
+                let orderedTracks = orderedCandidates.map(\.track)
+                updatePlaylistBuildProgress(
+                    stage: .finalizingQueue,
+                    completedCount: orderedTracks.count,
+                    totalCount: curatedPool.count,
+                    progress: 0.94,
+                    currentSeedTitle: seedContext.seed.title,
+                    latestTrackTitle: orderedTracks.last?.title,
+                    message: "Finalizing the playlist queue from curated matches."
+                )
+
+                playlistTracks = orderedTracks
                 _ = try persistRecommendationSession(
                     kind: .playlistPath,
                     queryText: input.state.trimmedQueryText,
                     seedTrackID: seedContext.seed.id,
                     referenceTrackIDs: input.readyReferenceTracks.map(\.id),
-                    candidates: pathCandidates,
+                    candidates: orderedCandidates,
                     candidateCountBeforeScope: seedContext.candidateCountBeforeScope,
                     candidateCountAfterScope: seedContext.candidateCountAfterScope,
-                    resultLimit: targetCount
+                    resultLimit: curatedPool.count
                 )
-                recommendationStatusMessage = "Built \(pathTracks.count)-track path from seed: \(seedContext.seed.title)"
+                isBuildingPlaylist = false
+                updatePlaylistBuildProgress(
+                    stage: .completed,
+                    completedCount: orderedTracks.count,
+                    totalCount: curatedPool.count,
+                    progress: 1,
+                    currentSeedTitle: seedContext.seed.title,
+                    latestTrackTitle: orderedTracks.last?.title,
+                    message: "Added \(orderedTracks.count) curated tracks to the playlist queue."
+                )
+                recommendationStatusMessage = Self.playlistPathStatusMessage(
+                    builtCount: orderedTracks.count,
+                    requestedCount: curatedPool.count,
+                    seedTitle: seedContext.seed.title
+                )
             } catch {
+                let failedTrackTitle = playlistBuildProgress?.latestTrackTitle
+                let failedSeedTitle = playlistBuildProgress?.currentSeedTitle ?? ""
+                isBuildingPlaylist = false
+                updatePlaylistBuildProgress(
+                    stage: .failed,
+                    completedCount: playlistBuildProgress?.completedCount ?? 0,
+                    totalCount: curatedPool.count,
+                    progress: playlistBuildProgress?.clampedProgress ?? 0,
+                    currentSeedTitle: failedSeedTitle,
+                    latestTrackTitle: failedTrackTitle,
+                    message: error.localizedDescription
+                )
                 recommendationStatusMessage = "Playlist path build failed: \(error.localizedDescription)"
                 AppLogger.shared.error("Playlist path build failed: \(error.localizedDescription)")
             }
@@ -2170,10 +3310,11 @@ final class AppViewModel: ObservableObject {
 
     func refreshTracks() async {
         do {
-            tracks = try database.fetchAllTracks()
+            tracks = try database.fetchScannedTracks()
             readyTrackIDs = try database.fetchReadyTrackIDs(
                 profileID: embeddingProfile.id,
-                pipelineID: embeddingProfile.pipelineID
+                pipelineID: embeddingProfile.pipelineID,
+                requireLocalScan: true
             )
             membershipSnapshotsByTrackID = try database.fetchTrackMembershipSnapshots(trackIDs: tracks.map(\.id))
             scopeTrackCache.removeAll()
@@ -2207,335 +3348,211 @@ final class AppViewModel: ObservableObject {
         isAnalyzing = true
         analysisErrorMessage = ""
         preparationNotice = nil
-        if analysisActivity == nil {
-            prepareAnalysisSession(for: tracksToAnalyze)
-        }
+        prepareAnalysisSession(for: tracksToAnalyze)
         isCancellingAnalysis = false
         let batchStartedAt = Date()
+        let workerConfig = currentAnalysisWorkerConfig()
         var sessionResult: AnalysisSessionResult = .succeeded
         defer {
             finalizeAnalysisSession(result: sessionResult)
         }
 
-        for (index, track) in tracksToAnalyze.enumerated() {
-            let queueIndex = index + 1
-            let trackStartedAt = Date()
-            if Task.isCancelled {
-                sessionResult = .canceled
-                analysisQueueProgressText = "Canceled: \(index) / \(tracksToAnalyze.count)"
-                for pendingTrack in tracksToAnalyze[index...] {
-                    updateAnalysisState(trackID: pendingTrack.id, state: .canceled, message: "Canceled")
-                }
-                break
-            }
+        let workItems: [AnalysisWorkItem]
+        do {
+            workItems = try makeAnalysisWorkItems(from: tracksToAnalyze)
+        } catch {
+            sessionResult = .failed(Self.friendlyPreparationMessage(from: error.localizedDescription) ?? error.localizedDescription)
+            return
+        }
 
-            do {
-                startAnalysisActivity(for: track, queueIndex: queueIndex, totalCount: tracksToAnalyze.count, stage: .launching)
-                updateAnalysisState(trackID: track.id, state: .running, message: AnalysisStage.launching.displayName)
+        let maxConcurrentJobs = analysisConcurrencyProfile.resolvedMaxConcurrentJobs(
+            processorCount: ProcessInfo.processInfo.processorCount,
+            backendKind: workerConfig.embeddingProfile.backendKind
+        )
+
+        let commitActor: AnalysisCommitActor
+        do {
+            commitActor = try AnalysisCommitActor(databaseURL: database.fileURL, workerConfig: workerConfig)
+        } catch {
+            sessionResult = .failed(Self.friendlyPreparationMessage(from: error.localizedDescription) ?? error.localizedDescription)
+            return
+        }
+
+        await withTaskGroup(of: AnalysisWorkerOutcome.self) { group in
+            var nextIndex = 0
+
+            @MainActor
+            func launch(_ workItem: AnalysisWorkItem) {
+                startAnalysisActivity(
+                    for: workItem.track,
+                    queueIndex: workItem.queueIndex,
+                    totalCount: workItem.totalCount,
+                    stage: .launching
+                )
+                updateAnalysisState(
+                    trackID: workItem.track.id,
+                    state: .running,
+                    message: AnalysisStage.launching.displayName
+                )
                 scheduleAnalysisProgressWatchdog(
-                    trackID: track.id,
-                    trackTitle: track.title,
-                    trackPath: track.filePath,
-                    queueIndex: queueIndex,
-                    totalCount: tracksToAnalyze.count
+                    trackID: workItem.track.id,
+                    trackTitle: workItem.track.title,
+                    trackPath: workItem.track.filePath,
+                    queueIndex: workItem.queueIndex,
+                    totalCount: workItem.totalCount
                 )
                 logAnalysisEvent(
                     "track_started",
-                    track: track,
-                    queueIndex: queueIndex,
-                    totalCount: tracksToAnalyze.count,
+                    track: workItem.track,
+                    queueIndex: workItem.queueIndex,
+                    totalCount: workItem.totalCount,
                     extra: ["mode": "\(mode)"]
                 )
-                let externalMetadata = try database.fetchExternalMetadata(trackID: track.id)
-                let existingSegments = try database.fetchSegments(trackID: track.id)
-                let existingSummary = try database.fetchAnalysisSummary(trackID: track.id)
-                let canReembed = track.analyzedAt != nil
-                    && !readyTrackIDs.contains(track.id)
-                    && !existingSegments.isEmpty
-                    && existingSummary != nil
-                    && existingSummary?.analysisFocus == analysisFocus
-                let trackID = track.id
-                let trackTitle = track.title
-                let trackPath = track.filePath
-                let progressHandler: PythonWorkerClient.WorkerProgressHandler = { [weak self] event in
-                    Task { @MainActor [weak self] in
-                        self?.recordAnalysisProgress(
-                            event,
-                            trackID: trackID,
-                            trackTitle: trackTitle,
-                            trackPath: trackPath,
-                            queueIndex: queueIndex,
-                            totalCount: tracksToAnalyze.count
-                        )
-                    }
-                }
 
-                if canReembed {
-                    let workerStartedAt = Date()
-                    let result = try await worker.embedAudioSegments(
-                        track: track,
-                        segments: existingSegments,
-                        externalMetadata: externalMetadata,
+                let progressHandler = makeAnalysisProgressHandler(for: workItem)
+                group.addTask {
+                    await Self.executeAnalysisWorkItem(
+                        workItem,
+                        workerConfig: workerConfig,
                         progress: progressHandler
                     )
-                    logAnalysisEvent(
-                        "worker_embed_audio_segments_completed",
-                        track: track,
-                        queueIndex: queueIndex,
-                        totalCount: tracksToAnalyze.count,
-                        elapsedMs: max(Int(Date().timeIntervalSince(workerStartedAt) * 1000), 0),
-                        extra: [
-                            "embeddingProfileID": result.embeddingProfileID,
-                            "embeddingPipelineID": result.embeddingPipelineID,
-                            "segmentCount": "\(result.segments.count)"
-                        ]
-                    )
-                    guard let refreshedSegments = mergedReembeddedSegments(
-                        trackID: track.id,
-                        existingSegments: existingSegments,
-                        workerSegments: result.segments
-                    ) else {
-                        throw WorkerError.executionFailed("Stored descriptor segments no longer match the re-embedded payload.")
-                    }
-                    guard let trackEmbedding = result.trackEmbedding, !trackEmbedding.isEmpty else {
-                        throw WorkerError.executionFailed("Worker returned an empty track embedding for re-embedding.")
-                    }
-
-                    let replaceStartedAt = Date()
-                    try database.replaceTrackEmbeddings(
-                        trackID: track.id,
-                        segments: refreshedSegments,
-                        trackEmbedding: trackEmbedding
-                    )
-                    logAnalysisEvent(
-                        "database_replace_track_embeddings_completed",
-                        track: track,
-                        queueIndex: queueIndex,
-                        totalCount: tracksToAnalyze.count,
-                        elapsedMs: max(Int(Date().timeIntervalSince(replaceStartedAt) * 1000), 0),
-                        extra: ["segmentCount": "\(refreshedSegments.count)"]
-                    )
-                    let vectorUpsertStartedAt = Date()
-                    try await worker.upsertTrackVectors(track: track, segments: refreshedSegments, trackEmbedding: trackEmbedding)
-                    logAnalysisEvent(
-                        "worker_upsert_track_vectors_completed",
-                        track: track,
-                        queueIndex: queueIndex,
-                        totalCount: tracksToAnalyze.count,
-                        elapsedMs: max(Int(Date().timeIntervalSince(vectorUpsertStartedAt) * 1000), 0)
-                    )
-                    let markIndexedStartedAt = Date()
-                    try database.markTrackEmbeddingIndexed(
-                        trackID: track.id,
-                        embeddingProfileID: result.embeddingProfileID,
-                        embeddingPipelineID: result.embeddingPipelineID
-                    )
-                    logAnalysisEvent(
-                        "database_mark_track_embedding_indexed_completed",
-                        track: track,
-                        queueIndex: queueIndex,
-                        totalCount: tracksToAnalyze.count,
-                        elapsedMs: max(Int(Date().timeIntervalSince(markIndexedStartedAt) * 1000), 0),
-                        extra: [
-                            "embeddingProfileID": result.embeddingProfileID,
-                            "embeddingPipelineID": result.embeddingPipelineID
-                        ]
-                    )
-                    updateAnalysisState(trackID: track.id, state: .succeeded, message: "Done")
-                    cancelAnalysisProgressWatchdog()
-                    finishAnalysisActivity(
-                        state: .succeeded,
-                        for: track,
-                        queueIndex: queueIndex,
-                        totalCount: tracksToAnalyze.count
-                    )
-                } else {
-                    let workerStartedAt = Date()
-                    let result = try await worker.analyze(
-                        filePath: track.filePath,
-                        track: track,
-                        analysisFocus: analysisFocus,
-                        externalMetadata: externalMetadata,
-                        progress: progressHandler
-                    )
-                    logAnalysisEvent(
-                        "worker_analyze_completed",
-                        track: track,
-                        queueIndex: queueIndex,
-                        totalCount: tracksToAnalyze.count,
-                        elapsedMs: max(Int(Date().timeIntervalSince(workerStartedAt) * 1000), 0),
-                        extra: [
-                            "embeddingProfileID": result.embeddingProfileID,
-                            "embeddingPipelineID": result.embeddingPipelineID,
-                            "segmentCount": "\(result.segments.count)"
-                        ]
-                    )
-                    let segments = result.segments.compactMap { item -> TrackSegment? in
-                        guard let type = TrackSegment.SegmentType(rawValue: item.segmentType) else { return nil }
-                        return TrackSegment(
-                            id: UUID(),
-                            trackID: track.id,
-                            type: type,
-                            startSec: item.startSec,
-                            endSec: item.endSec,
-                            energyScore: item.energyScore,
-                            descriptorText: item.descriptorText,
-                            vector: item.embedding
-                        )
-                    }
-                    guard let trackEmbedding = result.trackEmbedding, !trackEmbedding.isEmpty else {
-                        throw WorkerError.executionFailed("Worker returned an empty track embedding during analysis.")
-                    }
-
-                    let summary = TrackAnalysisSummary(
-                        trackID: track.id,
-                        segments: segments,
-                        trackEmbedding: trackEmbedding,
-                        estimatedBPM: result.estimatedBPM,
-                        estimatedKey: result.estimatedKey,
-                        brightness: result.brightness,
-                        onsetDensity: result.onsetDensity,
-                        rhythmicDensity: result.rhythmicDensity,
-                        lowMidHighBalance: result.lowMidHighBalance,
-                        waveformPreview: result.waveformPreview,
-                        analysisFocus: result.analysisFocus,
-                        introLengthSec: result.introLengthSec,
-                        outroLengthSec: result.outroLengthSec,
-                        energyArc: result.energyArc,
-                        mixabilityTags: result.mixabilityTags,
-                        confidence: result.confidence
-                    )
-                    let replaceStartedAt = Date()
-                    try database.replaceSegments(
-                        trackID: track.id,
-                        segments: segments,
-                        analysisSummary: summary
-                    )
-                    logAnalysisEvent(
-                        "database_replace_segments_completed",
-                        track: track,
-                        queueIndex: queueIndex,
-                        totalCount: tracksToAnalyze.count,
-                        elapsedMs: max(Int(Date().timeIntervalSince(replaceStartedAt) * 1000), 0),
-                        extra: ["segmentCount": "\(segments.count)"]
-                    )
-
-                    if var updatedTrack = tracks.first(where: { $0.id == track.id }) {
-                        if shouldAdoptMetadataValue(
-                            result.estimatedBPM,
-                            from: .soriaAnalysis,
-                            over: updatedTrack.bpm,
-                            currentSource: updatedTrack.bpmSource
-                        ) {
-                            updatedTrack.bpm = result.estimatedBPM
-                            updatedTrack.bpmSource = .soriaAnalysis
-                        }
-                        if shouldAdoptMetadataValue(
-                            result.estimatedKey,
-                            from: .soriaAnalysis,
-                            over: updatedTrack.musicalKey,
-                            currentSource: updatedTrack.keySource
-                        ) {
-                            updatedTrack.musicalKey = result.estimatedKey
-                            updatedTrack.keySource = .soriaAnalysis
-                        }
-                        updatedTrack.analyzedAt = Date()
-                        updatedTrack.embeddingProfileID = nil
-                        updatedTrack.embeddingPipelineID = nil
-                        updatedTrack.embeddingUpdatedAt = nil
-                        let upsertTrackStartedAt = Date()
-                        try database.upsertTrack(updatedTrack)
-                        logAnalysisEvent(
-                            "database_upsert_track_completed",
-                            track: track,
-                            queueIndex: queueIndex,
-                            totalCount: tracksToAnalyze.count,
-                            elapsedMs: max(Int(Date().timeIntervalSince(upsertTrackStartedAt) * 1000), 0)
-                        )
-                        let vectorUpsertStartedAt = Date()
-                        try await worker.upsertTrackVectors(track: updatedTrack, segments: segments, trackEmbedding: trackEmbedding)
-                        logAnalysisEvent(
-                            "worker_upsert_track_vectors_completed",
-                            track: track,
-                            queueIndex: queueIndex,
-                            totalCount: tracksToAnalyze.count,
-                            elapsedMs: max(Int(Date().timeIntervalSince(vectorUpsertStartedAt) * 1000), 0)
-                        )
-                        let markIndexedStartedAt = Date()
-                        try database.markTrackEmbeddingIndexed(
-                            trackID: track.id,
-                            embeddingProfileID: result.embeddingProfileID,
-                            embeddingPipelineID: result.embeddingPipelineID
-                        )
-                        logAnalysisEvent(
-                            "database_mark_track_embedding_indexed_completed",
-                            track: track,
-                            queueIndex: queueIndex,
-                            totalCount: tracksToAnalyze.count,
-                            elapsedMs: max(Int(Date().timeIntervalSince(markIndexedStartedAt) * 1000), 0),
-                            extra: [
-                                "embeddingProfileID": result.embeddingProfileID,
-                                "embeddingPipelineID": result.embeddingPipelineID
-                            ]
-                        )
-                    }
-                    updateAnalysisState(trackID: track.id, state: .succeeded, message: "Done")
-                    cancelAnalysisProgressWatchdog()
-                    finishAnalysisActivity(
-                        state: .succeeded,
-                        for: track,
-                        queueIndex: queueIndex,
-                        totalCount: tracksToAnalyze.count
-                    )
                 }
-            } catch {
-                if Task.isCancelled || (error as? WorkerError).map({ if case .cancelled = $0 { return true } else { return false } }) == true {
-                    sessionResult = .canceled
-                    updateAnalysisState(trackID: track.id, state: .canceled, message: "Canceled")
-                    cancelAnalysisProgressWatchdog()
-                    finishAnalysisActivity(
-                        state: .canceled,
-                        for: track,
-                        queueIndex: queueIndex,
-                        totalCount: tracksToAnalyze.count
-                    )
-                    logAnalysisEvent(
-                        "track_finished",
-                        track: track,
-                        queueIndex: queueIndex,
-                        totalCount: tracksToAnalyze.count,
-                        elapsedMs: max(Int(Date().timeIntervalSince(trackStartedAt) * 1000), 0),
-                        extra: ["result": "canceled"]
-                    )
-                    continue
-                }
-                let decoratedError = decoratedAnalysisError(error)
-                if sessionResult != .canceled {
-                    sessionResult = .failed(decoratedError)
-                }
-                updateAnalysisState(
-                    trackID: track.id,
-                    state: .failed,
-                    message: analysisActivity?.stage.displayName ?? "Failed"
-                )
-                finishAnalysisActivity(
-                    state: .failed,
-                    for: track,
-                    queueIndex: queueIndex,
-                    totalCount: tracksToAnalyze.count,
-                    errorMessage: decoratedError
-                )
-                cancelAnalysisProgressWatchdog()
-                AppLogger.shared.error("Analyze failed for \(track.filePath): \(decoratedError)")
             }
 
-            logAnalysisEvent(
-                "track_finished",
-                track: track,
-                queueIndex: queueIndex,
-                totalCount: tracksToAnalyze.count,
-                elapsedMs: max(Int(Date().timeIntervalSince(trackStartedAt) * 1000), 0)
-            )
+            while nextIndex < min(maxConcurrentJobs, workItems.count) {
+                launch(workItems[nextIndex])
+                nextIndex += 1
+            }
+
+            while let outcome = await group.next() {
+                switch outcome {
+                case let .succeeded(output):
+                    logWorkerCompletion(for: output)
+                    markEmbeddingProfileValidatedIfNeeded()
+                    do {
+                        try await commitActor.commit(output)
+                        updateAnalysisState(trackID: output.workItem.track.id, state: .succeeded, message: "Done")
+                        cancelAnalysisProgressWatchdog(trackID: output.workItem.track.id)
+                        finishAnalysisActivity(
+                            state: .succeeded,
+                            for: output.workItem.track,
+                            queueIndex: output.workItem.queueIndex,
+                            totalCount: output.workItem.totalCount
+                        )
+                        logAnalysisEvent(
+                            "track_finished",
+                            track: output.workItem.track,
+                            queueIndex: output.workItem.queueIndex,
+                            totalCount: output.workItem.totalCount,
+                            elapsedMs: output.elapsedMs
+                        )
+                    } catch {
+                        let decoratedError = decoratedAnalysisError(error.localizedDescription, trackID: output.workItem.track.id)
+                        if Task.isCancelled || Self.isWorkerCancellation(error) {
+                            sessionResult = .canceled
+                            updateAnalysisState(trackID: output.workItem.track.id, state: .canceled, message: "Canceled")
+                            cancelAnalysisProgressWatchdog(trackID: output.workItem.track.id)
+                            finishAnalysisActivity(
+                                state: .canceled,
+                                for: output.workItem.track,
+                                queueIndex: output.workItem.queueIndex,
+                                totalCount: output.workItem.totalCount
+                            )
+                            logAnalysisEvent(
+                                "track_finished",
+                                track: output.workItem.track,
+                                queueIndex: output.workItem.queueIndex,
+                                totalCount: output.workItem.totalCount,
+                                elapsedMs: output.elapsedMs,
+                                extra: ["result": "canceled"]
+                            )
+                        } else {
+                            if sessionResult != .canceled {
+                                sessionResult = .failed(decoratedError)
+                            }
+                            updateAnalysisState(
+                                trackID: output.workItem.track.id,
+                                state: .failed,
+                                message: analysisActivitiesByTrackID[output.workItem.track.id]?.stage.displayName ?? "Failed"
+                            )
+                            finishAnalysisActivity(
+                                state: .failed,
+                                for: output.workItem.track,
+                                queueIndex: output.workItem.queueIndex,
+                                totalCount: output.workItem.totalCount,
+                                errorMessage: decoratedError
+                            )
+                            cancelAnalysisProgressWatchdog(trackID: output.workItem.track.id)
+                            AppLogger.shared.error("Analyze failed for \(output.workItem.track.filePath): \(decoratedError)")
+                            logAnalysisEvent(
+                                "track_finished",
+                                track: output.workItem.track,
+                                queueIndex: output.workItem.queueIndex,
+                                totalCount: output.workItem.totalCount,
+                                elapsedMs: output.elapsedMs,
+                                extra: ["result": "failed"]
+                            )
+                        }
+                    }
+                case let .failed(failure):
+                    if failure.wasCancelled {
+                        sessionResult = .canceled
+                        updateAnalysisState(trackID: failure.workItem.track.id, state: .canceled, message: "Canceled")
+                        cancelAnalysisProgressWatchdog(trackID: failure.workItem.track.id)
+                        finishAnalysisActivity(
+                            state: .canceled,
+                            for: failure.workItem.track,
+                            queueIndex: failure.workItem.queueIndex,
+                            totalCount: failure.workItem.totalCount
+                        )
+                        logAnalysisEvent(
+                            "track_finished",
+                            track: failure.workItem.track,
+                            queueIndex: failure.workItem.queueIndex,
+                            totalCount: failure.workItem.totalCount,
+                            elapsedMs: failure.elapsedMs,
+                            extra: ["result": "canceled"]
+                        )
+                    } else {
+                        let decoratedError = decoratedAnalysisError(failure.errorMessage, trackID: failure.workItem.track.id)
+                        if sessionResult != .canceled {
+                            sessionResult = .failed(decoratedError)
+                        }
+                        updateAnalysisState(
+                            trackID: failure.workItem.track.id,
+                            state: .failed,
+                            message: analysisActivitiesByTrackID[failure.workItem.track.id]?.stage.displayName ?? "Failed"
+                        )
+                        finishAnalysisActivity(
+                            state: .failed,
+                            for: failure.workItem.track,
+                            queueIndex: failure.workItem.queueIndex,
+                            totalCount: failure.workItem.totalCount,
+                            errorMessage: decoratedError
+                        )
+                        cancelAnalysisProgressWatchdog(trackID: failure.workItem.track.id)
+                        AppLogger.shared.error("Analyze failed for \(failure.workItem.track.filePath): \(decoratedError)")
+                        logAnalysisEvent(
+                            "track_finished",
+                            track: failure.workItem.track,
+                            queueIndex: failure.workItem.queueIndex,
+                            totalCount: failure.workItem.totalCount,
+                            elapsedMs: failure.elapsedMs,
+                            extra: ["result": "failed"]
+                        )
+                    }
+                }
+
+                guard !Task.isCancelled else { continue }
+                if nextIndex < workItems.count {
+                    launch(workItems[nextIndex])
+                    nextIndex += 1
+                }
+            }
+        }
+
+        if Task.isCancelled, sessionResult == .succeeded {
+            sessionResult = .canceled
         }
 
         let refreshStartedAt = Date()
@@ -2543,6 +3560,145 @@ final class AppViewModel: ObservableObject {
         AppLogger.shared.info(
             "Analysis refresh_tracks_completed | trackCount=\(tracksToAnalyze.count) | elapsedMs=\(max(Int(Date().timeIntervalSince(refreshStartedAt) * 1000), 0)) | batchElapsedMs=\(max(Int(Date().timeIntervalSince(batchStartedAt) * 1000), 0))"
         )
+    }
+
+    private func currentAnalysisWorkerConfig() -> PythonWorkerClient.WorkerConfig {
+        PythonWorkerClient.WorkerConfig(
+            pythonExecutable: pythonExecutablePath,
+            workerScriptPath: workerScriptPath,
+            googleAIAPIKey: googleAIAPIKey,
+            embeddingProfile: embeddingProfile
+        )
+    }
+
+    private func makeAnalysisWorkItems(from tracksToAnalyze: [Track]) throws -> [AnalysisWorkItem] {
+        try tracksToAnalyze.enumerated().map { index, track in
+            let existingSegments = try database.fetchSegments(trackID: track.id)
+            let existingSummary = try database.fetchAnalysisSummary(trackID: track.id)
+            let canReembed = track.analyzedAt != nil
+                && !readyTrackIDs.contains(track.id)
+                && !existingSegments.isEmpty
+                && existingSummary != nil
+                && existingSummary?.analysisFocus == analysisFocus
+
+            return AnalysisWorkItem(
+                track: track,
+                queueIndex: index + 1,
+                totalCount: tracksToAnalyze.count,
+                externalMetadata: try database.fetchExternalMetadata(trackID: track.id),
+                existingSegments: existingSegments,
+                shouldReembed: canReembed,
+                analysisFocus: analysisFocus
+            )
+        }
+    }
+
+    private func makeAnalysisProgressHandler(
+        for workItem: AnalysisWorkItem
+    ) -> PythonWorkerClient.WorkerProgressHandler {
+        let trackID = workItem.track.id
+        let trackTitle = workItem.track.title
+        let trackPath = workItem.track.filePath
+        let queueIndex = workItem.queueIndex
+        let totalCount = workItem.totalCount
+        return { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.recordAnalysisProgress(
+                    event,
+                    trackID: trackID,
+                    trackTitle: trackTitle,
+                    trackPath: trackPath,
+                    queueIndex: queueIndex,
+                    totalCount: totalCount
+                )
+            }
+        }
+    }
+
+    private func logWorkerCompletion(for output: AnalysisTaskOutput) {
+        let extra: [String: String]
+        let event: String
+        switch output.payload {
+        case let .analyzed(result):
+            event = "worker_analyze_completed"
+            extra = [
+                "embeddingProfileID": result.embeddingProfileID,
+                "embeddingPipelineID": result.embeddingPipelineID,
+                "segmentCount": "\(result.segments.count)"
+            ]
+        case let .reembedded(result):
+            event = "worker_embed_audio_segments_completed"
+            extra = [
+                "embeddingProfileID": result.embeddingProfileID,
+                "embeddingPipelineID": result.embeddingPipelineID,
+                "segmentCount": "\(result.segments.count)"
+            ]
+        }
+
+        logAnalysisEvent(
+            event,
+            track: output.workItem.track,
+            queueIndex: output.workItem.queueIndex,
+            totalCount: output.workItem.totalCount,
+            elapsedMs: output.elapsedMs,
+            extra: extra
+        )
+    }
+
+    private static func executeAnalysisWorkItem(
+        _ workItem: AnalysisWorkItem,
+        workerConfig: PythonWorkerClient.WorkerConfig,
+        progress: @escaping PythonWorkerClient.WorkerProgressHandler
+    ) async -> AnalysisWorkerOutcome {
+        let worker = PythonWorkerClient(configProvider: { workerConfig })
+        let startedAt = Date()
+
+        do {
+            let payload: AnalysisTaskOutput.Payload
+            if workItem.shouldReembed {
+                let result = try await worker.embedAudioSegments(
+                    track: workItem.track,
+                    segments: workItem.existingSegments,
+                    externalMetadata: workItem.externalMetadata,
+                    progress: progress
+                )
+                payload = .reembedded(result)
+            } else {
+                let result = try await worker.analyze(
+                    filePath: workItem.track.filePath,
+                    track: workItem.track,
+                    analysisFocus: workItem.analysisFocus,
+                    externalMetadata: workItem.externalMetadata,
+                    progress: progress
+                )
+                payload = .analyzed(result)
+            }
+
+            return .succeeded(
+                AnalysisTaskOutput(
+                    workItem: workItem,
+                    payload: payload,
+                    elapsedMs: max(Int(Date().timeIntervalSince(startedAt) * 1000), 0)
+                )
+            )
+        } catch {
+            return .failed(
+                AnalysisFailedTask(
+                    workItem: workItem,
+                    errorMessage: error.localizedDescription,
+                    wasCancelled: Task.isCancelled || isWorkerCancellation(error),
+                    elapsedMs: max(Int(Date().timeIntervalSince(startedAt) * 1000), 0)
+                )
+            )
+        }
+    }
+
+    private static func isWorkerCancellation(_ error: Error) -> Bool {
+        guard let workerError = error as? WorkerError else { return false }
+        if case .cancelled = workerError {
+            return true
+        }
+        return false
     }
 
     private func loadSelectedTrackDetails() async {
@@ -2623,10 +3779,190 @@ final class AppViewModel: ObservableObject {
     }
 
     private func handleSelectedTrackIDsChange() {
-        recommendations = []
-        recommendationStatusMessage = ""
-        selectedRecommendationID = nil
+        invalidateGeneratedRecommendationResults(
+            message: "Reference selection changed. Generate again to rebuild the curated list."
+        )
         Task { await loadSelectedTrackDetails() }
+    }
+
+    private func recommendationSearchEntryActionFromLibrary() -> LibraryRecommendationSearchEntryAction {
+        guard !readySelectedReferenceTracks.isEmpty else { return .navigateOnly }
+        guard
+            hasValidatedEmbeddingProfile,
+            isSelectedEmbeddingProfileSupported,
+            !isBuildingPlaylist,
+            !isGeneratingRecommendations
+        else {
+            return .navigateOnly
+        }
+        if trimmedRecommendationQueryText.isEmpty, hasGeneratedRecommendationResults {
+            return .reuseExistingResults
+        }
+        return .autoGenerate
+    }
+
+    private func clearRecommendationQueryTextForLibraryEntry(preservingGeneratedResults: Bool) {
+        guard !recommendationQueryText.isEmpty else { return }
+
+        let shouldPreserveGeneratedResults = preservingGeneratedResults && trimmedRecommendationQueryText.isEmpty
+        if shouldPreserveGeneratedResults {
+            isSuppressingRecommendationResultInvalidation = true
+        }
+        recommendationQueryText = ""
+        if shouldPreserveGeneratedResults {
+            isSuppressingRecommendationResultInvalidation = false
+        }
+    }
+
+    private func replaceGeneratedRecommendations(_ candidates: [RecommendationCandidate]) {
+        generatedRecommendations = candidates
+        excludedGeneratedTrackIDs.removeAll()
+        curationSelectionTrackIDs.removeAll()
+        playlistBuildProgress = nil
+        isBuildingPlaylist = false
+        refreshVisibleRecommendations()
+    }
+
+    private func resetGeneratedRecommendationResults(clearStatusMessage: Bool = false) {
+        recommendations = []
+        generatedRecommendations = []
+        excludedGeneratedTrackIDs.removeAll()
+        curationSelectionTrackIDs.removeAll()
+        selectedRecommendationID = nil
+        playlistBuildProgress = nil
+        isBuildingPlaylist = false
+        if clearStatusMessage {
+            recommendationStatusMessage = ""
+        }
+    }
+
+    private func invalidateGeneratedRecommendationResults(message: String? = nil) {
+        guard !isBuildingPlaylist else {
+            if let message {
+                recommendationStatusMessage = message
+            }
+            return
+        }
+
+        let hadCuratedState =
+            !generatedRecommendations.isEmpty
+            || !excludedGeneratedTrackIDs.isEmpty
+            || !curationSelectionTrackIDs.isEmpty
+            || playlistBuildProgress != nil
+            || isBuildingPlaylist
+
+        resetGeneratedRecommendationResults(clearStatusMessage: message == nil)
+
+        if let message, hadCuratedState {
+            recommendationStatusMessage = message
+        } else if message == nil {
+            recommendationStatusMessage = ""
+        }
+    }
+
+    private func recommendationGenerationCompletionMessage(
+        resultCount: Int,
+        inputState: RecommendationInputState,
+        semanticSeedTitle: String? = nil
+    ) -> String {
+        if resultCount == 0 {
+            return "No recommendations found for the current inputs."
+        }
+        if inputState.requiresSemanticSeed, let semanticSeedTitle, !semanticSeedTitle.isEmpty {
+            return "Generated \(resultCount) matches from semantic seed: \(semanticSeedTitle). Curate the list before building the playlist."
+        }
+        return "Generated \(resultCount) matches. Curate the list before building the playlist."
+    }
+
+    private func refreshVisibleRecommendations() {
+        let visibleRecommendations = generatedRecommendations.filter { candidate in
+            !excludedGeneratedTrackIDs.contains(candidate.track.id)
+        }
+        recommendations = visibleRecommendations
+
+        let visibleTrackIDs = Set(visibleRecommendations.map { $0.track.id })
+        curationSelectionTrackIDs = curationSelectionTrackIDs.intersection(visibleTrackIDs)
+
+        if let selectedRecommendationID, !visibleTrackIDs.contains(selectedRecommendationID) {
+            self.selectedRecommendationID = visibleRecommendations.first?.id
+        } else if self.selectedRecommendationID == nil {
+            self.selectedRecommendationID = visibleRecommendations.first?.id
+        }
+    }
+
+    private func updatePlaylistBuildProgress(
+        stage: PlaylistBuildStage,
+        completedCount: Int,
+        totalCount: Int,
+        progress: Double,
+        currentSeedTitle: String,
+        latestTrackTitle: String? = nil,
+        message: String
+    ) {
+        playlistBuildProgress = PlaylistBuildProgress(
+            stage: stage,
+            completedCount: completedCount,
+            totalCount: totalCount,
+            progress: progress,
+            currentSeedTitle: currentSeedTitle,
+            latestTrackTitle: latestTrackTitle,
+            message: message
+        )
+    }
+
+    private func referenceQueryEmbeddings(
+        trackEmbedding: [Double],
+        segments: [TrackSegment]
+    ) -> [String: [Double]] {
+        var output: [String: [Double]] = [:]
+        if !trackEmbedding.isEmpty {
+            let normalizedTrackEmbedding = normalizedVector(trackEmbedding)
+            if !normalizedTrackEmbedding.isEmpty {
+                output["tracks"] = normalizedTrackEmbedding
+            }
+        }
+
+        for segment in segments {
+            guard
+                let vector = segment.vector,
+                !vector.isEmpty,
+                segment.type == .intro || segment.type == .middle || segment.type == .outro
+            else {
+                continue
+            }
+
+            let normalizedSegmentVector = normalizedVector(vector)
+            guard !normalizedSegmentVector.isEmpty else { continue }
+            output[segment.type.rawValue] = normalizedSegmentVector
+        }
+
+        return output
+    }
+
+    private func curatedVectorBreakdowns(
+        seed: Track,
+        candidates: [Track]
+    ) throws -> [String: VectorScoreBreakdown] {
+        guard let referencePayload = buildReferenceTrackSearchPayload(from: [seed]) else {
+            return [:]
+        }
+
+        let queryEmbeddings = referenceQueryEmbeddings(
+            trackEmbedding: referencePayload.trackEmbedding,
+            segments: referencePayload.segments
+        )
+        guard !queryEmbeddings.isEmpty else { return [:] }
+
+        return try Dictionary(uniqueKeysWithValues: candidates.compactMap { track in
+            guard let breakdown = try exactVectorBreakdown(
+                for: track,
+                queryEmbeddings: queryEmbeddings,
+                vectorWeights: normalizedMixsetVectorWeights
+            ) else {
+                return nil
+            }
+            return (track.filePath, breakdown)
+        })
     }
 
     private static func bootstrapDatabase() -> (
@@ -2922,9 +4258,12 @@ final class AppViewModel: ObservableObject {
         )
     }
 
-    private func loadTrackEmbeddings() throws -> [UUID: [Double]] {
+    private func loadTrackEmbeddings(trackIDs: Set<UUID>? = nil) throws -> [UUID: [Double]] {
         var output: [UUID: [Double]] = [:]
         for track in tracks where readyTrackIDs.contains(track.id) {
+            if let trackIDs, !trackIDs.contains(track.id) {
+                continue
+            }
             if let embedding = try database.fetchTrackEmbedding(trackID: track.id), !embedding.isEmpty {
                 output[track.id] = embedding
             }
@@ -2985,7 +4324,7 @@ final class AppViewModel: ObservableObject {
                     bpmMax: effectiveConstraints.targetBPMMax,
                     durationMaxSec: effectiveConstraints.maxDurationMinutes.map { $0 * 60 },
                     musicalKey: effectiveConstraints.keyStrictness > 0.85 ? seed.musicalKey : nil,
-                    genre: effectiveConstraints.genreContinuity > 0.85 ? seed.genre : nil
+                    genre: nil
                 ),
                 limit: max(limit, 1),
                 excludedPaths: excludedPaths,
@@ -3201,6 +4540,7 @@ final class AppViewModel: ObservableObject {
     private func persistAnalysisSettings() throws {
         pythonExecutablePath = AppSettingsStore.savePythonExecutablePath(pythonExecutablePath)
         workerScriptPath = AppSettingsStore.saveWorkerScriptPath(workerScriptPath)
+        AppSettingsStore.saveAnalysisConcurrencyProfile(analysisConcurrencyProfile)
         AppSettingsStore.saveEmbeddingProfile(embeddingProfile)
         try AppSettingsStore.saveGoogleAIAPIKey(googleAIAPIKey)
     }
@@ -3243,15 +4583,55 @@ final class AppViewModel: ObservableObject {
             imported = try externalMetadataImporter.importSeratoCSV(from: fileURL)
         }
 
-        var entriesByPath = Dictionary(grouping: imported, by: \.trackPath)
+        let localTracks = tracks
+        guard !localTracks.isEmpty else {
+            return MetadataImportSummary(
+                source: source,
+                importedEntries: imported.count,
+                matchedLocalTracks: 0,
+                unmatchedEntries: imported.count,
+                referenceAttachmentCount: 0
+            )
+        }
+
+        let localTracksByPath = Dictionary(uniqueKeysWithValues: localTracks.map { ($0.filePath, $0) })
+        let localTracksByHash = Dictionary(
+            grouping: localTracks,
+            by: \.contentHash
+        ).compactMapValues { matches in
+            matches.sorted { lhs, rhs in
+                let lhsDate = lhs.lastSeenInLocalScanAt ?? .distantPast
+                let rhsDate = rhs.lastSeenInLocalScanAt ?? .distantPast
+                if lhsDate == rhsDate {
+                    return lhs.filePath.localizedStandardCompare(rhs.filePath) == .orderedAscending
+                }
+                return lhsDate > rhsDate
+            }.first
+        }
+        var importHashCache: [String: String?] = [:]
+        var entriesByTrackID: [UUID: [ExternalDJMetadata]] = [:]
         var updatedTracks = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
-        var matchedTracks = 0
+        var matchedTrackIDs = Set<UUID>()
+        var unmatchedEntries = 0
+        var referenceAttachmentCount = 0
 
-        for track in tracks {
-            guard let entries = entriesByPath.removeValue(forKey: track.filePath), !entries.isEmpty else { continue }
-            matchedTracks += 1
+        for entry in imported {
+            guard let localTrack = resolveLocalTrack(
+                for: entry.trackPath,
+                localTracksByPath: localTracksByPath,
+                localTracksByHash: localTracksByHash,
+                hashCache: &importHashCache
+            ) else {
+                unmatchedEntries += 1
+                continue
+            }
+            entriesByTrackID[localTrack.id, default: []].append(entry)
+            matchedTrackIDs.insert(localTrack.id)
+            referenceAttachmentCount += entry.playlistMemberships.count
+        }
 
-            var updatedTrack = track
+        for (trackID, entries) in entriesByTrackID {
+            guard var updatedTrack = updatedTracks[trackID] else { continue }
             if source == .serato { updatedTrack.hasSeratoMetadata = true }
             if source == .rekordbox { updatedTrack.hasRekordboxMetadata = true }
 
@@ -3269,8 +4649,8 @@ final class AppViewModel: ObservableObject {
             }
 
             try database.upsertTrack(updatedTrack)
-            try database.replaceExternalMetadata(trackID: track.id, source: source, entries: entries)
-            updatedTracks[track.id] = updatedTrack
+            try database.replaceExternalMetadata(trackID: trackID, source: source, entries: entries)
+            updatedTracks[trackID] = updatedTrack
         }
 
         tracks = updatedTracks.values.sorted {
@@ -3286,23 +4666,137 @@ final class AppViewModel: ObservableObject {
         return MetadataImportSummary(
             source: source,
             importedEntries: imported.count,
-            matchedTracks: matchedTracks
+            matchedLocalTracks: matchedTrackIDs.count,
+            unmatchedEntries: unmatchedEntries,
+            referenceAttachmentCount: referenceAttachmentCount
         )
+    }
+
+    private func resolveLocalTrack(
+        for trackPath: String,
+        localTracksByPath: [String: Track],
+        localTracksByHash: [String: Track],
+        hashCache: inout [String: String?]
+    ) -> Track? {
+        if let exactMatch = localTracksByPath[trackPath] {
+            return exactMatch
+        }
+
+        let contentHash = hashCache[trackPath] ?? {
+            let pathHash: String?
+            if FileManager.default.fileExists(atPath: trackPath) {
+                pathHash = FileHashingService.contentHash(for: URL(fileURLWithPath: trackPath))
+            } else {
+                pathHash = nil
+            }
+            hashCache[trackPath] = pathHash
+            return pathHash
+        }()
+
+        guard let contentHash else { return nil }
+        return localTracksByHash[contentHash]
+    }
+
+    static func playlistPathStatusMessage(
+        builtCount: Int,
+        requestedCount: Int,
+        seedTitle: String
+    ) -> String {
+        if builtCount < requestedCount {
+            return "Built \(builtCount)/\(requestedCount)-track path from seed: \(seedTitle)"
+        }
+        return "Built \(builtCount)-track path from seed: \(seedTitle)"
+    }
+
+    static func buildCuratedPlaylistCandidates(
+        seed: Track,
+        curatedCandidates: [RecommendationCandidate],
+        embeddingsByTrackID: [UUID: [Double]],
+        summariesByTrackID: [UUID: TrackAnalysisSummary],
+        libraryRoots: [String],
+        constraints: RecommendationConstraints,
+        weights: RecommendationWeights,
+        vectorWeights: MixsetVectorWeights,
+        vectorBreakdownProvider: (Track, [Track]) throws -> [String: VectorScoreBreakdown]
+    ) throws -> [RecommendationCandidate] {
+        let engine = RecommendationEngine()
+        let originalCandidatesByTrackID = Dictionary(uniqueKeysWithValues: curatedCandidates.map { ($0.track.id, $0) })
+        var orderedCandidates: [RecommendationCandidate] = []
+        var remainingTracks = curatedCandidates.map(\.track)
+        var currentSeed = seed
+
+        while !remainingTracks.isEmpty {
+            let vectorBreakdownByPath = try vectorBreakdownProvider(currentSeed, remainingTracks)
+            let vectorSimilarityByPath = Dictionary(
+                uniqueKeysWithValues: vectorBreakdownByPath.map { ($0.key, $0.value.fusedScore) }
+            )
+
+            let nextCandidate = engine.recommendNextTracks(
+                seed: currentSeed,
+                candidates: remainingTracks,
+                embeddingsByTrackID: embeddingsByTrackID,
+                summariesByTrackID: summariesByTrackID,
+                vectorSimilarityByPath: vectorSimilarityByPath,
+                vectorBreakdownByPath: vectorBreakdownByPath,
+                libraryRoots: libraryRoots,
+                constraints: constraints,
+                weights: weights,
+                vectorWeights: vectorWeights,
+                limit: 1
+            ).first ?? remainingTracks.first.flatMap { originalCandidatesByTrackID[$0.id] }
+
+            guard let nextCandidate else { break }
+            orderedCandidates.append(nextCandidate)
+            remainingTracks.removeAll { $0.id == nextCandidate.track.id }
+            currentSeed = nextCandidate.track
+        }
+
+        return orderedCandidates
     }
 
     private func refreshValidationStatus() {
         validationStatus = AppSettingsStore.currentValidationStatus(apiKey: googleAIAPIKey, profile: embeddingProfile)
         if !validationStatus.isValidated {
-            recommendations = []
+            invalidateGeneratedRecommendationResults()
         }
     }
 
+    private func markEmbeddingProfileValidatedIfNeeded(at date: Date = Date()) {
+        guard !validationStatus.isValidated else { return }
+        AppSettingsStore.markValidationSuccess(
+            apiKey: googleAIAPIKey,
+            profile: embeddingProfile,
+            date: date
+        )
+        validationStatus = .validated(date)
+    }
+
+    private func validateInitialSetupEmbeddingProfileIfNeeded() async -> Bool {
+        guard !validationStatus.isValidated else { return true }
+        validationTask?.cancel()
+        let succeeded = await runRuntimeValidation(userInitiated: true)
+        if !succeeded && initialSetupStatusMessage.isEmpty {
+            initialSetupStatusMessage = settingsStatusMessage.isEmpty
+                ? validationStatus.summaryText
+                : settingsStatusMessage
+        }
+        return succeeded
+    }
+
     private func startRuntimeValidation(userInitiated: Bool) {
+        validationTask?.cancel()
+        validationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            _ = await self.runRuntimeValidation(userInitiated: userInitiated)
+        }
+    }
+
+    private func runRuntimeValidation(userInitiated: Bool) async -> Bool {
         guard isSelectedEmbeddingProfileSupported else {
             let message = selectedEmbeddingProfileDependencyMessage ?? "The selected embedding profile is unavailable."
             validationStatus = .failed(message)
             settingsStatusMessage = message
-            return
+            return false
         }
 
         let trimmedKey = googleAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3314,7 +4808,7 @@ final class AppViewModel: ObservableObject {
                 validationStatus = .unvalidated
                 settingsStatusMessage = "Enter a Google AI API Key to enable runtime validation."
             }
-            return
+            return false
         }
 
         do {
@@ -3322,41 +4816,39 @@ final class AppViewModel: ObservableObject {
         } catch {
             validationStatus = .failed(error.localizedDescription)
             settingsStatusMessage = "Failed to save settings before validation: \(error.localizedDescription)"
-            return
+            return false
         }
 
-        validationTask?.cancel()
         let validatingProfile = embeddingProfile
         validationStatus = .validating
         settingsStatusMessage = userInitiated
             ? "Validating \(validatingProfile.displayName)..."
             : "Checking \(validatingProfile.displayName)..."
 
-        validationTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                let response = try await worker.validateEmbeddingProfile()
-                guard !Task.isCancelled, validatingProfile.id == self.embeddingProfile.id else { return }
-                let validatedAt = Date()
-                AppSettingsStore.markValidationSuccess(
-                    apiKey: self.googleAIAPIKey,
-                    profile: validatingProfile,
-                    date: validatedAt
-                )
-                self.validationStatus = .validated(validatedAt)
-                self.settingsStatusMessage = "Validated \(response.modelName)."
-            } catch {
-                guard !Task.isCancelled, validatingProfile.id == self.embeddingProfile.id else { return }
-                let failureSummary = PythonWorkerClient.failureSummary(
-                    for: "validate_embedding_profile",
-                    error: error
-                )
-                self.validationStatus = .failed(failureSummary)
-                self.settingsStatusMessage = userInitiated
-                    ? "Validation failed: \(failureSummary)"
-                    : "Runtime validation failed: \(failureSummary)"
-                AppLogger.shared.error("Embedding validation failed: \(failureSummary)")
-            }
+        do {
+            let response = try await worker.validateEmbeddingProfile()
+            guard !Task.isCancelled, validatingProfile.id == embeddingProfile.id else { return false }
+            let validatedAt = Date()
+            AppSettingsStore.markValidationSuccess(
+                apiKey: googleAIAPIKey,
+                profile: validatingProfile,
+                date: validatedAt
+            )
+            validationStatus = .validated(validatedAt)
+            settingsStatusMessage = "Validated \(response.modelName)."
+            return true
+        } catch {
+            guard !Task.isCancelled, validatingProfile.id == embeddingProfile.id else { return false }
+            let failureSummary = PythonWorkerClient.failureSummary(
+                for: "validate_embedding_profile",
+                error: error
+            )
+            validationStatus = .failed(failureSummary)
+            settingsStatusMessage = userInitiated
+                ? "Validation failed: \(failureSummary)"
+                : "Runtime validation failed: \(failureSummary)"
+            AppLogger.shared.error("Embedding validation failed: \(failureSummary)")
+            return false
         }
     }
 
@@ -3480,67 +4972,24 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func syncLibrariesInternal() async throws -> String? {
-        let enabledNativeSources = librarySources.filter {
-            $0.kind != .folderFallback && $0.enabled && $0.resolvedPath != nil
-        }
-        guard !enabledNativeSources.isEmpty else { return nil }
-
-        for source in enabledNativeSources {
-            var syncingSource = source
-            syncingSource.status = .syncing
-            syncingSource.lastError = nil
-            persistLibrarySource(syncingSource)
-        }
-
-        do {
-            let summary = try await librarySyncService.syncEnabledSources(librarySources) { progress in
-                Task { @MainActor [weak self, progress] in
-                    self?.scanProgress = progress
-                }
-            }
-
-            let now = Date()
-            for source in enabledNativeSources {
-                var updatedSource = source
-                updatedSource.lastSyncAt = now
-                updatedSource.status = .available
-                updatedSource.lastError = nil
-                persistLibrarySource(updatedSource)
-            }
-            return summary.displayText
-        } catch {
-            for source in enabledNativeSources {
-                var failedSource = source
-                failedSource.status = .error
-                failedSource.lastError = error.localizedDescription
-                persistLibrarySource(failedSource)
-            }
-            throw error
-        }
+    private static func syncLibrariesInternal(
+        service: DJLibrarySyncService,
+        sources: [LibrarySourceRecord],
+        onProgress: @escaping @Sendable (ScanJobProgress) -> Void
+    ) async throws -> String? {
+        guard !sources.isEmpty else { return nil }
+        let summary = try await service.syncEnabledSources(sources, onProgress: onProgress)
+        return summary.displayText
     }
 
-    private func runFallbackScanInternal() async -> String? {
-        let roots = libraryRoots.map { URL(fileURLWithPath: $0, isDirectory: true) }
+    private static func runFallbackScanInternal(
+        scanner: LibraryScannerService,
+        roots: [URL],
+        onProgress: @escaping @Sendable (ScanJobProgress) -> Void
+    ) async -> String? {
         guard !roots.isEmpty else { return nil }
-
-        var folderFallbackSource = librarySources.first(where: { $0.kind == .folderFallback }) ?? .default(for: .folderFallback)
-        folderFallbackSource.enabled = true
-        folderFallbackSource.status = .syncing
-        folderFallbackSource.resolvedPath = libraryRoots.first
-        folderFallbackSource.lastError = nil
-        persistLibrarySource(folderFallbackSource)
-
-        await scanner.scan(roots: roots) { progress in
-            Task { @MainActor [weak self, progress] in
-                self?.scanProgress = progress
-            }
-        }
-
-        folderFallbackSource.lastSyncAt = Date()
-        folderFallbackSource.status = .available
-        persistLibrarySource(folderFallbackSource)
-        return "Rescanned manual fallback folder."
+        await scanner.scan(roots: roots, onProgress: onProgress)
+        return "Scanned Music Folders."
     }
 
     private func persistLibraryRoots() {
@@ -3583,15 +5032,15 @@ final class AppViewModel: ObservableObject {
         }
 
         let summaryText = summaries.map(\.displayText).joined(separator: " • ")
-        let anyMatched = summaries.contains { $0.matchedTracks > 0 }
-        let anyUnmatched = summaries.contains { $0.matchedTracks == 0 }
+        let anyMatched = summaries.contains { $0.matchedLocalTracks > 0 }
+        let anyUnmatched = summaries.contains { $0.unmatchedEntries > 0 }
 
         if !anyMatched {
-            return "\(summaryText). No indexed tracks matched the imported metadata yet. Sync libraries or scan a fallback folder first."
+            return "\(summaryText). No scanned local tracks matched the imported vendor metadata yet. Scan Music Folders first."
         }
 
         if anyUnmatched {
-            return "\(summaryText). Some imported metadata did not match indexed tracks yet. Sync libraries or scan a fallback folder first."
+            return "\(summaryText). Some vendor entries did not match scanned local tracks yet."
         }
 
         return "\(summaryText)."
@@ -3692,10 +5141,50 @@ final class AppViewModel: ObservableObject {
         return tracks.filter { filter.isEmpty || scopedIDs.contains($0.id) }
     }
 
+    private func libraryTracksMatchingCurrentFilters(trackFilter: LibraryTrackFilter) -> [Track] {
+        let scopedIDs = scopedTrackIDs(for: libraryScopeFilter)
+        let searchTokens = Self.librarySearchTokens(from: librarySearchText)
+
+        return tracks.filter { track in
+            (libraryScopeFilter.isEmpty || scopedIDs.contains(track.id))
+                && Self.libraryTrackMatchesSearch(track, searchTokens: searchTokens)
+                && trackFilter.matches(trackWorkflowStatus(for: track))
+        }
+    }
+
+    private static func libraryTrackMatchesSearch(_ track: Track, searchTokens: [String]) -> Bool {
+        guard !searchTokens.isEmpty else { return true }
+
+        let searchableText = [track.title, track.artist]
+            .joined(separator: " ")
+            .lowercased()
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+
+        return searchTokens.allSatisfy { searchableText.contains($0) }
+    }
+
+    static func shouldShowInitialSetup(
+        hasTracks: Bool,
+        initialSetupCompleted: Bool,
+        hasNativeLibraries: Bool,
+        hasExistingRoots: Bool,
+        requiresGoogleAPIKeyPrompt: Bool
+    ) -> Bool {
+        let needsLibrarySetup = !hasTracks && !initialSetupCompleted && (hasNativeLibraries || !hasExistingRoots)
+        return needsLibrarySetup || requiresGoogleAPIKeyPrompt
+    }
+
     private func shouldShowInitialSetup(hasExistingRoots: Bool) -> Bool {
-        guard tracks.isEmpty, !LibraryRootsStore.isInitialSetupCompleted() else { return false }
         let hasNativeLibraries = librarySources.contains { $0.kind != .folderFallback && $0.resolvedPath != nil }
-        return hasNativeLibraries || !hasExistingRoots
+        return Self.shouldShowInitialSetup(
+            hasTracks: !tracks.isEmpty,
+            initialSetupCompleted: LibraryRootsStore.isInitialSetupCompleted(),
+            hasNativeLibraries: hasNativeLibraries,
+            hasExistingRoots: hasExistingRoots,
+            requiresGoogleAPIKeyPrompt: initialSetupNeedsGoogleAIAPIKey
+        )
     }
 
     private func mergedReembeddedSegments(
@@ -3764,6 +5253,18 @@ private enum AnalysisMode {
     case batch
 }
 
+private enum AnalysisWorkerOutcome: Sendable {
+    case succeeded(AnalysisTaskOutput)
+    case failed(AnalysisFailedTask)
+}
+
+private struct AnalysisFailedTask: Sendable {
+    let workItem: AnalysisWorkItem
+    let errorMessage: String
+    let wasCancelled: Bool
+    let elapsedMs: Int
+}
+
 private struct RecommendationResolvedInput {
     let state: RecommendationInputState
     let readyReferenceTracks: [Track]
@@ -3821,10 +5322,12 @@ private enum RecommendationResolutionError: LocalizedError {
 struct MetadataImportSummary {
     let source: ExternalDJMetadata.Source
     let importedEntries: Int
-    let matchedTracks: Int
+    let matchedLocalTracks: Int
+    let unmatchedEntries: Int
+    let referenceAttachmentCount: Int
 
     nonisolated var displayText: String {
         let sourceName = source == .rekordbox ? "rekordbox" : "Serato"
-        return "\(sourceName): \(matchedTracks) matched / \(importedEntries) imported"
+        return "\(sourceName): \(matchedLocalTracks) matched local tracks / \(unmatchedEntries) unmatched / \(referenceAttachmentCount) references"
     }
 }

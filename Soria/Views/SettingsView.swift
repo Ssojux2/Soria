@@ -26,6 +26,19 @@ struct SettingsView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
 
+                        Text("Preparation Concurrency")
+                            .font(.headline)
+                        Picker("Preparation Concurrency", selection: $viewModel.analysisConcurrencyProfile) {
+                            ForEach(AnalysisConcurrencyProfile.allCases) { profile in
+                                Text(profile.displayName).tag(profile)
+                            }
+                        }
+                        .pickerStyle(.menu)
+
+                        Text(viewModel.analysisConcurrencyProfile.helperText)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+
                         if viewModel.embeddingProfile == .googleGeminiEmbedding2Preview {
                             Text("This is the default Google audio embedding path for direct segment-to-vector preparation.")
                                 .font(.footnote)
@@ -104,9 +117,9 @@ struct SettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                GroupBox("DJ Library Sources") {
+                GroupBox("Metadata Enrichment") {
                     VStack(alignment: .leading, spacing: 12) {
-                        ForEach(viewModel.librarySources) { source in
+                        ForEach(viewModel.librarySources.filter { $0.kind != .folderFallback }) { source in
                             VStack(alignment: .leading, spacing: 8) {
                                 HStack {
                                     Label(source.kind.displayName, systemImage: source.kind.iconName)
@@ -152,7 +165,7 @@ struct SettingsView: View {
                         HStack {
                             Button("Library Setup") { viewModel.openInitialSetup() }
                             Button("Refresh Detection") { viewModel.refreshLibrarySourceDetection() }
-                            Button("Sync Libraries") { viewModel.syncLibraries() }
+                            Button("Refresh Vendor Metadata") { viewModel.refreshVendorMetadata() }
                             Button("Auto-Import Rekordbox XML") { viewModel.autoImportRekordboxXML() }
                             Button("Import File…") { viewModel.loadExternalMetadata() }
                         }
@@ -160,7 +173,7 @@ struct SettingsView: View {
                             HStack(spacing: 2) {
                                 AccessibilityMarker(
                                     identifier: "settings-sync-libraries-button",
-                                    label: "Sync Libraries"
+                                    label: "Refresh Vendor Metadata"
                                 )
                                 AccessibilityMarker(
                                     identifier: "settings-auto-import-rekordbox-xml-button",
@@ -176,10 +189,10 @@ struct SettingsView: View {
                     .accessibilityIdentifier("settings-library-sources")
                 }
 
-                GroupBox("Manual Folder Fallback") {
+                GroupBox("Music Folders") {
                     VStack(alignment: .leading, spacing: 12) {
                         if viewModel.libraryRoots.isEmpty {
-                            Text("No fallback folder configured.")
+                            Text("No music folder configured.")
                                 .foregroundStyle(.secondary)
                         } else {
                             ForEach(viewModel.libraryRoots, id: \.self) { root in
@@ -194,7 +207,7 @@ struct SettingsView: View {
 
                         HStack {
                             Button("Choose Folder") { viewModel.addLibraryRoot() }
-                            Button("Rescan Folder") { viewModel.runFallbackScan() }
+                            Button("Scan Music Folders") { viewModel.scanMusicFolders() }
                         }
                     }
                 }

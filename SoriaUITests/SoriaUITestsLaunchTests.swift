@@ -28,7 +28,7 @@ final class SoriaUITestsLaunchTests: XCTestCase {
         ]
         app.launch()
         XCTAssertTrue(
-            app.descendants(matching: .any).matching(identifier: "library-preparation-card").firstMatch
+            app.descendants(matching: .any).matching(identifier: "library-action-bar").firstMatch
                 .waitForExistence(timeout: 10)
         )
 

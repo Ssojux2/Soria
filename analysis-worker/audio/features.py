@@ -125,7 +125,6 @@ def analyze_track(
             tags=track_metadata.get("tags") or [],
             rating=track_metadata.get("rating"),
             play_count=track_metadata.get("playCount"),
-            playlist_memberships=track_metadata.get("playlistMemberships") or [],
             cue_count=track_metadata.get("cueCount"),
             comment=track_metadata.get("comment"),
             analysis_focus=analysis_focus,
@@ -346,7 +345,6 @@ def _descriptor_text(
     tags: list[str],
     rating: int | None,
     play_count: int | None,
-    playlist_memberships: list[str],
     cue_count: int | None,
     comment: str | None,
     analysis_focus: str,
@@ -354,7 +352,6 @@ def _descriptor_text(
 ) -> str:
     bpm_value = f"{bpm:.2f}" if bpm is not None else "unknown"
     tag_text = "|".join(tags) if tags else "unknown"
-    playlists_text = "|".join(playlist_memberships) if playlist_memberships else "unknown"
     mixability_text = "|".join(mixability_tags) if mixability_tags else "unknown"
     return (
         f"segment_type={segment_type}; "
@@ -373,7 +370,6 @@ def _descriptor_text(
         f"tags={tag_text}; "
         f"rating={rating if rating is not None else 'unknown'}; "
         f"play_count={play_count if play_count is not None else 'unknown'}; "
-        f"playlists={playlists_text}; "
         f"cue_count={cue_count if cue_count is not None else 'unknown'}; "
         f"mixability_tags={mixability_text}; "
         f"comment_present={int(bool(comment))}; "

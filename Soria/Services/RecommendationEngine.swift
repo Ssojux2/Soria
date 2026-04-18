@@ -29,26 +29,36 @@ struct RecommendationEngine {
         candidates: [Track],
         embeddingsByTrackID: [UUID: [Double]],
         summariesByTrackID: [UUID: TrackAnalysisSummary],
-        vectorSimilarityByPath: [String: Double],
+        vectorSimilarityByPath: [String: Double] = [:],
         vectorBreakdownByPath: [String: VectorScoreBreakdown] = [:],
+        libraryRoots: [String] = [],
         constraints: RecommendationConstraints,
         weights: RecommendationWeights,
         vectorWeights: MixsetVectorWeights,
-        limit: Int,
-        excludeTrackIDs: Set<UUID>
+        limit: Int = 12,
+        excludeTrackIDs: Set<UUID> = []
     ) -> [RecommendationCandidate] {
         let effectiveConstraints = constraints.normalizedForScoring()
+        let seedEmbedding = embeddingsByTrackID[seed.id] ?? []
+        let seedSummary = summariesByTrackID[seed.id]
+        let seedGenreDescriptor = genreDescriptor(for: seed, libraryRoots: libraryRoots)
+
         let filtered = candidates.filter { track in
             guard !excludeTrackIDs.contains(track.id), track.id != seed.id else { return false }
+            let trackGenreDescriptor = genreDescriptor(for: track, libraryRoots: libraryRoots)
+            if shouldExclude(
+                descriptor: trackGenreDescriptor,
+                comparedTo: seedGenreDescriptor,
+                mode: effectiveConstraints.genreSearchMode
+            ) {
+                return false
+            }
             return matchesConstraints(
                 track: track,
                 summary: summariesByTrackID[track.id],
                 constraints: effectiveConstraints
             )
         }
-
-        let seedEmbedding = embeddingsByTrackID[seed.id] ?? []
-        let seedSummary = summariesByTrackID[seed.id]
 
         return filtered.compactMap { track in
             let trackEmbedding = embeddingsByTrackID[track.id] ?? []
@@ -80,6 +90,8 @@ struct RecommendationEngine {
                 seedSummary: seedSummary,
                 next: track,
                 nextSummary: summariesByTrackID[track.id],
+                seedDescriptor: seedGenreDescriptor,
+                nextDescriptor: genreDescriptor(for: track, libraryRoots: libraryRoots),
                 continuity: effectiveConstraints.genreContinuity
             )
             let externalScore = externalMetadataConfidence(
@@ -119,6 +131,7 @@ struct RecommendationEngine {
                 mixabilityTags: summary?.mixabilityTags ?? [],
                 matchReasons: matchReasons(
                     track: track,
+                    genreDescriptor: genreDescriptor(for: track, libraryRoots: libraryRoots),
                     summary: summary,
                     breakdown: breakdown
                 ),
@@ -223,24 +236,31 @@ struct RecommendationEngine {
         seedSummary: TrackAnalysisSummary?,
         next: Track,
         nextSummary: TrackAnalysisSummary?,
+        seedDescriptor: GenreDescriptor,
+        nextDescriptor: GenreDescriptor,
         continuity: Double
     ) -> Double {
-        let seedGenre = seed.genre.lowercased()
-        let nextGenre = next.genre.lowercased()
-        var score = !seedGenre.isEmpty && seedGenre == nextGenre
-            ? 0.65 + 0.35 * continuity
-            : 0.45 + 0.40 * (1 - continuity)
+        let score: Double
+        switch genreRelation(seedDescriptor: seedDescriptor, nextDescriptor: nextDescriptor) {
+        case .same:
+            score = 0.65 + 0.35 * continuity
+        case .related:
+            score = 0.56 + 0.24 * continuity
+        case .none:
+            score = 0.45 + 0.40 * (1 - continuity)
+        }
+        var adjustedScore = score
 
         if let seedSummary, seedSummary.outroLengthSec >= 24 {
-            score += 0.08
+            adjustedScore += 0.08
         }
         if let nextSummary, nextSummary.introLengthSec >= 24 {
-            score += 0.08
+            adjustedScore += 0.08
         }
         if let nextSummary, nextSummary.mixabilityTags.contains("clean_outro") || nextSummary.mixabilityTags.contains("long_intro") {
-            score += 0.05
+            adjustedScore += 0.05
         }
-        return min(1.0, score)
+        return min(1.0, adjustedScore)
     }
 
     private func externalMetadataConfidence(for track: Track, priority: Double) -> Double {
@@ -283,6 +303,7 @@ struct RecommendationEngine {
 
     private func matchReasons(
         track: Track,
+        genreDescriptor: GenreDescriptor,
         summary: TrackAnalysisSummary?,
         breakdown: ScoreBreakdown
     ) -> [String] {
@@ -297,9 +318,143 @@ struct RecommendationEngine {
         if breakdown.embeddingSimilarity >= 0.75 {
             reasons.append("High embedding match")
         }
+        if reasons.isEmpty, let family = genreDescriptor.primaryFamily, !family.isEmpty {
+            reasons.append(family.capitalized + " family")
+        }
         if reasons.isEmpty, !track.genre.isEmpty {
             reasons.append(track.genre)
         }
         return Array(reasons.prefix(3))
+    }
+
+    private func shouldExclude(
+        descriptor: GenreDescriptor,
+        comparedTo seedDescriptor: GenreDescriptor,
+        mode: GenreSearchMode
+    ) -> Bool {
+        guard mode == .lock, let seedFamily = seedDescriptor.primaryFamily, !seedFamily.isEmpty else {
+            return false
+        }
+        return descriptor.primaryFamily != seedFamily
+    }
+
+    private func genreRelation(seedDescriptor: GenreDescriptor, nextDescriptor: GenreDescriptor) -> GenreRelation {
+        if let seedFamily = seedDescriptor.primaryFamily,
+           let nextFamily = nextDescriptor.primaryFamily
+        {
+            if seedFamily == nextFamily {
+                return .same
+            }
+            if relatedFamilies(for: seedFamily).contains(nextFamily) || relatedFamilies(for: nextFamily).contains(seedFamily) {
+                return .related
+            }
+        }
+
+        let sharedHints = Set(seedDescriptor.pathHints.map(normalizeGenreText)).intersection(
+            nextDescriptor.pathHints.map(normalizeGenreText)
+        )
+        return sharedHints.isEmpty ? .none : .related
+    }
+
+    private func genreDescriptor(for track: Track, libraryRoots: [String]) -> GenreDescriptor {
+        let pathHints = folderPathHints(for: track.filePath, libraryRoots: libraryRoots)
+        let rawGenre = normalizeGenreText(track.genre)
+        let aliases = Array(
+            Set(
+                ([rawGenre] + pathHints.map(normalizeGenreText))
+                    .filter { !$0.isEmpty }
+            )
+        ).sorted()
+        let primaryFamily = aliases.compactMap(family(for:)).first
+        let canonicalGenre = rawGenre.isEmpty ? pathHints.first : track.genre.trimmingCharacters(in: .whitespacesAndNewlines)
+        return GenreDescriptor(
+            canonicalGenre: canonicalGenre?.nilIfBlank,
+            primaryFamily: primaryFamily,
+            aliases: aliases,
+            relatedFamilies: primaryFamily.map(relatedFamilies(for:)) ?? [],
+            pathHints: pathHints
+        )
+    }
+
+    private func folderPathHints(for filePath: String, libraryRoots: [String]) -> [String] {
+        let normalizedPath = TrackPathNormalizer.normalizedAbsolutePath(filePath)
+        let normalizedRoots = libraryRoots
+            .map(TrackPathNormalizer.normalizedAbsolutePath)
+            .filter { !$0.isEmpty && normalizedPath.hasPrefix($0) }
+            .sorted { $0.count > $1.count }
+        guard let bestRoot = normalizedRoots.first else { return [] }
+
+        let rootComponents = URL(fileURLWithPath: bestRoot).pathComponents
+        let pathComponents = URL(fileURLWithPath: normalizedPath).pathComponents
+        guard pathComponents.count > rootComponents.count else { return [] }
+        let relativeComponents = Array(pathComponents.dropFirst(rootComponents.count).dropLast())
+        let endIndex = min(2, relativeComponents.count)
+        return Array(relativeComponents[..<endIndex])
+    }
+
+    private func family(for value: String) -> String? {
+        for (family, tokens) in genreFamilyKeywords where tokens.contains(where: value.contains) {
+            return family
+        }
+        return nil
+    }
+
+    private func relatedFamilies(for family: String) -> [String] {
+        relatedGenreFamilies[family] ?? []
+    }
+
+    private func normalizeGenreText(_ value: String) -> String {
+        let lowered = value.lowercased()
+        let scalars = lowered.unicodeScalars.map { scalar -> Character in
+            CharacterSet.alphanumerics.contains(scalar) ? Character(String(scalar)) : " "
+        }
+        return String(scalars)
+            .replacingOccurrences(of: "hip hop", with: "hiphop")
+            .replacingOccurrences(of: "r&b", with: "rnb")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+    }
+
+    private let genreFamilyKeywords: [(String, [String])] = [
+        ("house", ["house", "tech house", "deep house", "progressive house", "jackin", "afro house"]),
+        ("techno", ["techno", "melodic techno", "peak time", "hard techno"]),
+        ("disco", ["disco", "nu disco", "disco edit"]),
+        ("hiphop", ["hiphop", "rap", "trap"]),
+        ("rnb", ["rnb", "soul"]),
+        ("bass", ["bass", "dubstep", "future bass"]),
+        ("dnb", ["drum and bass", "dnb", "liquid"]),
+        ("breakbeat", ["breakbeat", "breaks"]),
+        ("reggae", ["reggae", "dancehall"]),
+        ("latin", ["latin", "reggaeton", "baile", "afro"]),
+        ("funk", ["funk", "boogie"]),
+        ("pop", ["pop", "open format"])
+    ]
+
+    private let relatedGenreFamilies: [String: [String]] = [
+        "house": ["techno", "disco", "latin", "funk"],
+        "techno": ["house", "breakbeat", "bass"],
+        "disco": ["house", "funk", "pop"],
+        "hiphop": ["rnb", "pop", "bass"],
+        "rnb": ["hiphop", "pop", "funk"],
+        "bass": ["techno", "breakbeat", "dnb", "hiphop"],
+        "dnb": ["bass", "breakbeat"],
+        "breakbeat": ["bass", "techno", "dnb"],
+        "reggae": ["latin", "hiphop"],
+        "latin": ["house", "reggae", "pop"],
+        "funk": ["disco", "house", "rnb"],
+        "pop": ["rnb", "hiphop", "disco", "latin"]
+    ]
+
+    private enum GenreRelation {
+        case same
+        case related
+        case none
+    }
+}
+
+private extension String {
+    var nilIfBlank: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

@@ -1,9 +1,15 @@
 import Foundation
 
 final class LibraryScannerService {
+    private static let timestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
     private let database: LibraryDatabase
     private let invalidateVectorIndex: @Sendable (Track) async -> Void
-    private let supportedExtensions: Set<String> = ["mp3", "wav", "aiff", "m4a", "flac"]
+    private let supportedExtensions: Set<String> = ["mp3", "wav", "aiff", "aif", "m4a", "aac", "flac"]
 
     init(
         database: LibraryDatabase,
@@ -17,6 +23,7 @@ final class LibraryScannerService {
         roots: [URL],
         onProgress: @escaping @Sendable (ScanJobProgress) -> Void
     ) async {
+        await Task.yield()
         var progress = ScanJobProgress()
         progress.isRunning = true
         onProgress(progress)
@@ -29,20 +36,33 @@ final class LibraryScannerService {
 
         do {
             let existingTracks = try database.fetchAllTracks()
-            var hashIndex = Dictionary(grouping: existingTracks, by: { $0.contentHash })
+            var hashIndex = Dictionary(
+                grouping: existingTracks.filter { $0.lastSeenInLocalScanAt != nil },
+                by: { $0.contentHash }
+            )
             var pathIndex = Dictionary(uniqueKeysWithValues: existingTracks.map { ($0.filePath, $0) })
+            var seenPaths = Set<String>()
+            let scanTimestamp = Date()
 
             for fileURL in files {
                 let normalizedPath = TrackPathNormalizer.normalizedAbsolutePath(fileURL)
+                seenPaths.insert(normalizedPath)
                 progress.scannedFiles += 1
                 progress.currentFile = fileURL.lastPathComponent
                 onProgress(progress)
 
                 do {
                     let attrs = try fm.attributesOfItem(atPath: fileURL.path)
-                    let modified = (attrs[.modificationDate] as? Date) ?? .distantPast
+                    let modified = Self.normalizedTimestamp((attrs[.modificationDate] as? Date) ?? .distantPast)
                     let previous = pathIndex[normalizedPath]
-                    if let previous, previous.modifiedTime >= modified {
+                    let isLocallyScanned = previous?.lastSeenInLocalScanAt != nil
+                    let isUnchanged = previous.map { $0.modifiedTime >= modified } ?? false
+
+                    if let previous, isLocallyScanned, isUnchanged {
+                        var refreshedTrack = previous
+                        refreshedTrack.lastSeenInLocalScanAt = scanTimestamp
+                        try database.upsertTrack(refreshedTrack)
+                        pathIndex[normalizedPath] = refreshedTrack
                         progress.skippedFiles += 1
                         onProgress(progress)
                         continue
@@ -57,7 +77,7 @@ final class LibraryScannerService {
 
                     let metadata = await AudioMetadataReader.readMetadata(for: fileURL)
                     var track = previous ?? Track.empty(path: normalizedPath, modifiedTime: modified, hash: hash)
-                    let fileChanged = previous != nil
+                    let fileChanged = previous != nil && !isUnchanged
                     if fileChanged, let previous, previous.analyzedAt != nil {
                         try database.clearAnalysis(trackID: previous.id)
                         await invalidateVectorIndex(previous)
@@ -91,7 +111,8 @@ final class LibraryScannerService {
                         hasSeratoMetadata: track.hasSeratoMetadata,
                         hasRekordboxMetadata: track.hasRekordboxMetadata,
                         bpmSource: metadata.bpm == nil ? track.bpmSource : .audioTags,
-                        keySource: metadata.musicalKey == nil ? track.keySource : .audioTags
+                        keySource: metadata.musicalKey == nil ? track.keySource : .audioTags,
+                        lastSeenInLocalScanAt: scanTimestamp
                     )
                     try database.upsertTrack(track)
                     pathIndex[normalizedPath] = track
@@ -102,6 +123,12 @@ final class LibraryScannerService {
                 }
                 onProgress(progress)
             }
+
+            let normalizedRoots = roots.map(TrackPathNormalizer.normalizedAbsolutePath)
+            try database.clearLocalScanMarks(
+                underRoots: normalizedRoots,
+                excludingPaths: Array(seenPaths)
+            )
         } catch {
             AppLogger.shared.error("Failed to prime index: \(error.localizedDescription)")
         }
@@ -110,27 +137,59 @@ final class LibraryScannerService {
         onProgress(progress)
     }
 
+    private static func normalizedTimestamp(_ date: Date) -> Date {
+        let persistedValue = timestampFormatter.string(from: date)
+        return timestampFormatter.date(from: persistedValue) ?? date
+    }
+
     private func discoverFiles(in roots: [URL]) -> [URL] {
         let fm = FileManager.default
-        let options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles, .skipsPackageDescendants]
+        let resourceKeys: Set<URLResourceKey> = [
+            .isDirectoryKey,
+            .isRegularFileKey,
+            .isHiddenKey,
+            .isSymbolicLinkKey
+        ]
         var files: [URL] = []
+        var directoriesToVisit = roots.map(\.standardizedFileURL)
+        var visitedDirectories = Set<String>()
 
-        for root in roots {
-            guard let enumerator = fm.enumerator(
-                at: root,
-                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
-                options: options
+        while let directory = directoriesToVisit.popLast() {
+            let normalizedDirectory = TrackPathNormalizer.normalizedAbsolutePath(directory)
+            guard visitedDirectories.insert(normalizedDirectory).inserted else {
+                continue
+            }
+
+            guard let children = try? fm.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: Array(resourceKeys),
+                options: [.skipsHiddenFiles]
             ) else {
                 continue
             }
 
-            for case let fileURL as URL in enumerator {
-                if supportedExtensions.contains(fileURL.pathExtension.lowercased()) {
-                    files.append(fileURL)
+            for childURL in children {
+                let values = try? childURL.resourceValues(forKeys: resourceKeys)
+                let isHidden = values?.isHidden == true || childURL.lastPathComponent.hasPrefix(".")
+                if isHidden {
+                    continue
+                }
+
+                if values?.isDirectory == true {
+                    if values?.isSymbolicLink == true {
+                        continue
+                    }
+                    directoriesToVisit.append(childURL)
+                    continue
+                }
+
+                guard values?.isRegularFile == true else { continue }
+                if supportedExtensions.contains(childURL.pathExtension.lowercased()) {
+                    files.append(childURL)
                 }
             }
         }
 
-        return files
+        return files.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
 }

@@ -15,6 +15,7 @@ enum AppSettingsStore {
     private static let lastValidatedAtKey = "settings.lastValidatedAt"
     private static let automaticVectorRepairSignaturePrefix = "settings.vectorRepairSignature."
     private static let automaticVectorRepairAtPrefix = "settings.vectorRepairAt."
+    private static let analysisConcurrencyProfileKey = "settings.analysisConcurrencyProfile"
     private static let recommendationWeightsKey = "settings.recommendationWeights"
     private static let mixsetVectorWeightsKey = "settings.mixsetVectorWeights"
     private static let recommendationConstraintsKey = "settings.recommendationConstraints"
@@ -155,6 +156,20 @@ enum AppSettingsStore {
 
     static func saveEmbeddingProfile(_ profile: EmbeddingProfile) {
         UserDefaults.standard.set(profile.id, forKey: embeddingProfileIDKey)
+    }
+
+    static func loadAnalysisConcurrencyProfile() -> AnalysisConcurrencyProfile {
+        guard
+            let rawValue = UserDefaults.standard.string(forKey: analysisConcurrencyProfileKey),
+            let profile = AnalysisConcurrencyProfile(rawValue: rawValue)
+        else {
+            return .default
+        }
+        return profile
+    }
+
+    static func saveAnalysisConcurrencyProfile(_ profile: AnalysisConcurrencyProfile) {
+        UserDefaults.standard.set(profile.rawValue, forKey: analysisConcurrencyProfileKey)
     }
 
     static func loadRecommendationWeights() -> RecommendationWeights {

@@ -22,19 +22,19 @@ struct ScopeFilterInspectorView: View {
                         coverageText: coverageText
                     )
 
-                    Text("Selections use union matching across Serato crates and rekordbox playlists.")
+                    Text("Reference selections use union matching across Serato crates and rekordbox playlists.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
                     facetSection(
-                        title: "Serato Crates",
+                        title: "Serato References",
                         source: .serato,
                         searchText: $seratoSearchText
                     )
 
                     facetSection(
-                        title: "rekordbox Playlists",
+                        title: "rekordbox References",
                         source: .rekordbox,
                         searchText: $rekordboxSearchText
                     )
@@ -63,7 +63,7 @@ struct ScopeFilterInspectorView: View {
                 .foregroundStyle(.secondary)
 
             if activeChipLabels.isEmpty {
-                Text("No scope filters are active yet.")
+                Text("No vendor references are active yet.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
@@ -75,11 +75,11 @@ struct ScopeFilterInspectorView: View {
     private var headerTitle: String {
         switch target {
         case .library:
-            return "Advanced Filters"
+            return "Vendor References"
         case .search:
-            return "Search DJ Scope"
+            return "Search Vendor References"
         case .recommendation:
-            return "Mix Assistant DJ Scope"
+            return "Mix Assistant Vendor References"
         }
     }
 
@@ -203,13 +203,13 @@ struct ScopeFilterInspectorView: View {
 
     @ViewBuilder
     private var actionButtons: some View {
-        Button(target == .library ? "Clear Filters" : "Clear Scope") {
+        Button("Clear References") {
             viewModel.clearScope(for: target)
         }
         .disabled(viewModel.scopeFilter(for: target).isEmpty)
 
         if target != .library {
-            Button("Use Library Filter") {
+            Button("Use Library References") {
                 viewModel.copyLibraryScope(to: target)
             }
         }
@@ -260,9 +260,9 @@ struct ScopeFilterInspectorView: View {
     private func searchFieldPlaceholder(for source: ExternalDJMetadata.Source) -> String {
         switch source {
         case .serato:
-            return "Search Serato crates"
+            return "Search Serato references"
         case .rekordbox:
-            return "Search rekordbox playlists"
+            return "Search rekordbox references"
         }
     }
 
@@ -273,9 +273,9 @@ struct ScopeFilterInspectorView: View {
 
         switch source {
         case .serato:
-            return "No Serato crates are synced yet."
+            return "No Serato references are attached yet."
         case .rekordbox:
-            return "No rekordbox playlists are synced yet. Try Sync Libraries, or import a Rekordbox XML file to attach playlists to indexed tracks."
+            return "No rekordbox references are attached yet. Refresh Vendor Metadata, or import a Rekordbox XML file to attach references to scanned local tracks."
         }
     }
 

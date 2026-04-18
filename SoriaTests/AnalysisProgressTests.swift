@@ -254,6 +254,17 @@ struct AnalysisProgressTests {
             preparationBlockedMessage: nil,
             isAnalyzing: true,
             isCancellingAnalysis: false,
+            analysisSessionProgress: AnalysisSessionProgress(
+                totalCount: 20,
+                runningCount: 3,
+                queuedCount: 10,
+                completedCount: 7,
+                failedCount: 0,
+                canceledCount: 0,
+                overallProgress: 0.43,
+                latestTrackTitle: "Selected Track",
+                latestMessage: "Extracting rhythmic and spectral features"
+            ),
             analysisActivity: activity,
             preparationNotice: nil,
             analysisErrorMessage: "",
@@ -275,6 +286,7 @@ struct AnalysisProgressTests {
         #expect(overview.phase == .analyzing)
         #expect(overview.isCancellable)
         #expect(overview.message.contains("Selected Track"))
+        #expect(overview.message.contains("3 running"))
     }
 
     @Test
@@ -297,6 +309,7 @@ struct AnalysisProgressTests {
             preparationBlockedMessage: nil,
             isAnalyzing: false,
             isCancellingAnalysis: false,
+            analysisSessionProgress: nil,
             analysisActivity: nil,
             preparationNotice: nil,
             analysisErrorMessage: "",
@@ -330,6 +343,7 @@ struct AnalysisProgressTests {
             preparationBlockedMessage: nil,
             isAnalyzing: false,
             isCancellingAnalysis: false,
+            analysisSessionProgress: nil,
             analysisActivity: nil,
             preparationNotice: nil,
             analysisErrorMessage: "Worker command failed.",
@@ -355,6 +369,7 @@ struct AnalysisProgressTests {
             preparationBlockedMessage: nil,
             isAnalyzing: false,
             isCancellingAnalysis: false,
+            analysisSessionProgress: nil,
             analysisActivity: nil,
             preparationNotice: nil,
             analysisErrorMessage: "",
@@ -363,9 +378,129 @@ struct AnalysisProgressTests {
             libraryStatusMessage: ""
         )
 
-        #expect(AppViewModel.makePreparationOverview(from: syncingContext).phase == .syncing)
-        #expect(AppViewModel.makePreparationOverview(from: failedContext).phase == .failed)
-        #expect(AppViewModel.makePreparationOverview(from: completedContext).phase == .completed)
+        let syncingOverview = AppViewModel.makePreparationOverview(from: syncingContext)
+        let failedOverview = AppViewModel.makePreparationOverview(from: failedContext)
+        let completedOverview = AppViewModel.makePreparationOverview(from: completedContext)
+
+        #expect(syncingOverview.phase == .syncing)
+        #expect(syncingOverview.primaryAction == .syncLibrary)
+        #expect(syncingOverview.primaryActionTitleOverride == "Refreshing Library")
+        #expect(syncingOverview.isPrimaryActionDisabled)
+        #expect(failedOverview.phase == .failed)
+        #expect(completedOverview.phase == .completed)
+    }
+
+    @Test
+    func preparationOverviewTransitionsToAnalyzeActionsAfterSyncCompletes() {
+        let context = PreparationOverviewContext(
+            selectionReadiness: SelectionReadiness(
+                signature: "",
+                selectedCount: 0,
+                readyCount: 0,
+                needsAnalysisCount: 0,
+                needsRefreshCount: 0
+            ),
+            filteredTrackCount: 8,
+            filteredNeedsPreparationCount: 3,
+            totalTrackCount: 8,
+            hasSourceSetupIssue: false,
+            hasSyncableSource: true,
+            canPrepareSelection: false,
+            canPrepareVisible: true,
+            preparationBlockedMessage: nil,
+            isAnalyzing: false,
+            isCancellingAnalysis: false,
+            analysisSessionProgress: nil,
+            analysisActivity: nil,
+            preparationNotice: nil,
+            analysisErrorMessage: "",
+            scanProgress: ScanJobProgress(
+                scannedFiles: 120,
+                totalFiles: 120,
+                indexedFiles: 75,
+                skippedFiles: 5,
+                duplicateFiles: 0,
+                isRunning: false,
+                currentFile: ""
+            ),
+            syncingSourceNames: [],
+            libraryStatusMessage: "Synced 75 canonical tracks."
+        )
+
+        let overview = AppViewModel.makePreparationOverview(from: context)
+
+        #expect(overview.phase == .idle)
+        #expect(overview.title == "Prepare Visible Tracks")
+        #expect(overview.primaryAction == .prepareVisible)
+        #expect(overview.primaryActionTitleOverride == nil)
+        #expect(overview.isPrimaryActionDisabled == false)
+    }
+
+    @Test
+    func preparationOverviewKeepsAnalyzeActionVisibleWhenPreparationSetupNeedsAttention() {
+        let context = PreparationOverviewContext(
+            selectionReadiness: SelectionReadiness(
+                signature: "",
+                selectedCount: 0,
+                readyCount: 0,
+                needsAnalysisCount: 0,
+                needsRefreshCount: 0
+            ),
+            filteredTrackCount: 8,
+            filteredNeedsPreparationCount: 3,
+            totalTrackCount: 8,
+            hasSourceSetupIssue: false,
+            hasSyncableSource: true,
+            canPrepareSelection: false,
+            canPrepareVisible: true,
+            preparationBlockedMessage: "Enter a Google AI API Key in Settings before preparing tracks.",
+            isAnalyzing: false,
+            isCancellingAnalysis: false,
+            analysisSessionProgress: nil,
+            analysisActivity: nil,
+            preparationNotice: nil,
+            analysisErrorMessage: "",
+            scanProgress: ScanJobProgress(
+                scannedFiles: 120,
+                totalFiles: 120,
+                indexedFiles: 75,
+                skippedFiles: 5,
+                duplicateFiles: 0,
+                isRunning: false,
+                currentFile: ""
+            ),
+            syncingSourceNames: [],
+            libraryStatusMessage: "Synced 75 canonical tracks."
+        )
+
+        let overview = AppViewModel.makePreparationOverview(from: context)
+
+        #expect(overview.phase == .idle)
+        #expect(overview.primaryAction == .prepareVisible)
+        #expect(overview.isPrimaryActionDisabled == false)
+        #expect(overview.secondaryAction == .syncLibrary)
+    }
+
+    @Test
+    func initialSetupIsShownWhenGoogleAPIKeyPromptIsRequired() {
+        #expect(
+            AppViewModel.shouldShowInitialSetup(
+                hasTracks: true,
+                initialSetupCompleted: true,
+                hasNativeLibraries: true,
+                hasExistingRoots: true,
+                requiresGoogleAPIKeyPrompt: true
+            )
+        )
+        #expect(
+            AppViewModel.shouldShowInitialSetup(
+                hasTracks: true,
+                initialSetupCompleted: true,
+                hasNativeLibraries: true,
+                hasExistingRoots: true,
+                requiresGoogleAPIKeyPrompt: false
+            ) == false
+        )
     }
 
     @Test
@@ -404,6 +539,7 @@ struct AnalysisProgressTests {
             preparationBlockedMessage: nil,
             isAnalyzing: false,
             isCancellingAnalysis: false,
+            analysisSessionProgress: nil,
             analysisActivity: nil,
             preparationNotice: PreparationNotice(kind: .canceled, message: "Preparation was canceled."),
             analysisErrorMessage: "",
@@ -443,6 +579,147 @@ struct AnalysisProgressTests {
     }
 
     @Test
+    func analysisConcurrencyProfileUsesBalancedAndOverrideRules() {
+        #expect(
+            AnalysisConcurrencyProfile.balancedAuto.resolvedMaxConcurrentJobs(
+                processorCount: 10,
+                backendKind: .googleAI,
+                environment: [:]
+            ) == 3
+        )
+        #expect(
+            AnalysisConcurrencyProfile.balancedAuto.resolvedMaxConcurrentJobs(
+                processorCount: 10,
+                backendKind: .clap,
+                environment: [:]
+            ) == 1
+        )
+        #expect(
+            AnalysisConcurrencyProfile.balancedAuto.resolvedMaxConcurrentJobs(
+                processorCount: 10,
+                backendKind: .googleAI,
+                environment: ["SORIA_ANALYSIS_MAX_CONCURRENCY": "5"]
+            ) == 5
+        )
+    }
+
+    @Test
+    func analysisSessionProgressStatusLineShowsParallelSummary() {
+        let progress = AnalysisSessionProgress(
+            totalCount: 20,
+            runningCount: 3,
+            queuedCount: 10,
+            completedCount: 7,
+            failedCount: 0,
+            canceledCount: 0,
+            overallProgress: 0.45,
+            latestTrackTitle: "Track X",
+            latestMessage: "Loading audio"
+        )
+
+        #expect(progress.finishedCount == 7)
+        #expect(progress.statusLine == "3 running • 7/20 finished • latest: Track X")
+    }
+
+    @Test
+    func syncLibrariesImmediatelyPresentsSyncSheet() {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        viewModel.selectedSection = .settings
+        viewModel.tracks = [
+            {
+                var track = Track.empty(
+                    path: "/Music/Authority/Local Track.mp3",
+                    modifiedTime: Date(),
+                    hash: "local-track"
+                )
+                track.title = "Local Track"
+                track.artist = "Soria"
+                track.lastSeenInLocalScanAt = Date()
+                return track
+            }()
+        ]
+        viewModel.librarySources = [
+            LibrarySourceRecord(
+                id: UUID(),
+                kind: .serato,
+                enabled: true,
+                resolvedPath: "/UITests/Serato",
+                lastSyncAt: nil,
+                status: .available,
+                lastError: nil
+            ),
+            LibrarySourceRecord.default(for: .folderFallback)
+        ]
+
+        viewModel.syncLibraries()
+
+        #expect(viewModel.selectedSection == .library)
+        #expect(viewModel.scanProgress.isRunning == true)
+        #expect(viewModel.librarySources.first?.status == .syncing)
+        #expect(viewModel.librarySyncPresentationState?.phase == .running)
+        #expect(viewModel.librarySyncPresentationState?.title == "Refreshing Vendor Metadata")
+        #expect(viewModel.isLibrarySyncSheetPresented == true)
+        #expect(viewModel.preparationOverview.primaryAction == .syncLibrary)
+        #expect(viewModel.preparationOverview.primaryActionTitleOverride == "Refreshing Library")
+        #expect(viewModel.preparationOverview.isPrimaryActionDisabled)
+    }
+
+    @Test
+    func finishSuccessfulLibrarySyncDismissesSheetAndResetsProgress() {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        viewModel.presentLibrarySyncSheet(
+            title: "Refreshing Vendor Metadata",
+            actionVerb: "Refreshing vendor metadata for",
+            sourceNames: ["Serato"]
+        )
+        viewModel.scanProgress = ScanJobProgress(
+            scannedFiles: 12,
+            totalFiles: 24,
+            indexedFiles: 8,
+            skippedFiles: 1,
+            duplicateFiles: 0,
+            isRunning: true,
+            currentFile: "Current Track.mp3"
+        )
+        viewModel.preparationNotice = PreparationNotice(kind: .failed, message: "Old failure")
+
+        viewModel.finishSuccessfulLibrarySync(summary: "Synced 8 canonical tracks.")
+
+        #expect(viewModel.librarySyncPresentationState == nil)
+        #expect(viewModel.scanProgress.isRunning == false)
+        #expect(viewModel.scanProgress.currentFile.isEmpty)
+        #expect(viewModel.libraryStatusMessage == "Synced 8 canonical tracks.")
+        #expect(viewModel.preparationNotice == nil)
+    }
+
+    @Test
+    func syncLibrariesWithoutEnabledSourcesPublishesFailureNotice() {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        viewModel.selectedSection = .settings
+        viewModel.tracks = [
+            {
+                var track = Track.empty(
+                    path: "/Music/Authority/Local Track.mp3",
+                    modifiedTime: Date(),
+                    hash: "local-track"
+                )
+                track.title = "Local Track"
+                track.artist = "Soria"
+                track.lastSeenInLocalScanAt = Date()
+                return track
+            }()
+        ]
+        viewModel.librarySources = [LibrarySourceRecord.default(for: .folderFallback)]
+
+        viewModel.syncLibraries()
+
+        #expect(viewModel.selectedSection == .library)
+        #expect(viewModel.librarySyncPresentationState == nil)
+        #expect(viewModel.preparationNotice?.kind == .failed)
+        #expect(viewModel.preparationNotice?.message.contains("Enable Serato or rekordbox metadata sources") == true)
+    }
+
+    @Test
     func scopeSummaryTracksSelectedFacetCount() {
         var filter = LibraryScopeFilter()
         filter.seratoMembershipPaths = ["Warmup / Deep", "Peak / Tools"]
@@ -463,14 +740,14 @@ struct AnalysisProgressTests {
                 target: .recommendation,
                 filter: filter,
                 statistics: statistics
-            ) == "3 filters • 9 tracks in scope"
+            ) == "3 references • 9 tracks in scope"
         )
         #expect(
             AppViewModel.scopeSummary(
                 target: .library,
                 filter: LibraryScopeFilter(),
                 statistics: statistics
-            ) == "All library files"
+            ) == "All scanned local tracks"
         )
     }
 

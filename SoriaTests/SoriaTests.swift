@@ -51,6 +51,25 @@ struct SoriaTests {
         #expect(resolved == customFile.path)
     }
 
+    @Test func bundleAnalysisWorkerBuildPhaseAlwaysRuns() throws {
+        let projectFile = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Soria.xcodeproj/project.pbxproj")
+        let contents = try String(contentsOf: projectFile, encoding: .utf8)
+
+        guard
+            let start = contents.range(of: "84B5A1D331B91B4200A8EB7B /* Bundle Analysis Worker */ = {"),
+            let end = contents[start.upperBound...].range(of: "};")
+        else {
+            Issue.record("Bundle Analysis Worker build phase was not found in project.pbxproj.")
+            return
+        }
+
+        let block = String(contents[start.lowerBound..<end.upperBound])
+        #expect(block.contains("alwaysOutOfDate = 1;"))
+    }
+
     @Test func recommendationRankingPrefersCloserBPMAndKey() {
         let engine = RecommendationEngine()
         let seed = makeTrack(
@@ -1107,7 +1126,8 @@ struct SoriaTests {
             embeddingProfileID: "profile",
             embeddingUpdatedAt: Date(),
             bpmSource: .soriaAnalysis,
-            keySource: .soriaAnalysis
+            keySource: .soriaAnalysis,
+            lastSeenInLocalScanAt: Date()
         )
         try database.upsertTrack(existingTrack)
         try database.replaceSegments(
@@ -1206,11 +1226,13 @@ struct SoriaTests {
             )
         )
 
-        let mergedCount = try await syncService.syncImportedTracks([seratoRecord, rekordboxRecord])
+        let summary = try await syncService.syncImportedTracks([seratoRecord, rekordboxRecord])
         let tracks = try database.fetchAllTracks()
         let metadata = try database.fetchExternalMetadata(trackID: existingTrack.id)
 
-        #expect(mergedCount == 1)
+        #expect(summary.matchedTrackCount == 1)
+        #expect(summary.matchedEntryCount == 2)
+        #expect(summary.unmatchedEntryCount == 0)
         #expect(tracks.count == 1)
         #expect(tracks.first?.hasSeratoMetadata == true)
         #expect(tracks.first?.hasRekordboxMetadata == true)
@@ -1702,25 +1724,209 @@ struct SoriaTests {
     @Test func metadataImportStatusMessageSummarizesSuccessfulMatches() {
         let message = AppViewModel.metadataImportStatusMessage(
             for: [
-                MetadataImportSummary(source: .rekordbox, importedEntries: 18, matchedTracks: 12),
-                MetadataImportSummary(source: .serato, importedEntries: 4, matchedTracks: 4)
+                MetadataImportSummary(source: .rekordbox, importedEntries: 18, matchedLocalTracks: 12, unmatchedEntries: 6, referenceAttachmentCount: 9),
+                MetadataImportSummary(source: .serato, importedEntries: 4, matchedLocalTracks: 4, unmatchedEntries: 0, referenceAttachmentCount: 3)
             ]
         )
 
-        #expect(message.contains("rekordbox: 12 matched / 18 imported"))
-        #expect(message.contains("Serato: 4 matched / 4 imported"))
-        #expect(!message.contains("Sync libraries or scan a fallback folder first."))
+        #expect(message.contains("rekordbox: 12 matched local tracks / 6 unmatched / 9 references"))
+        #expect(message.contains("Serato: 4 matched local tracks / 0 unmatched / 3 references"))
+        #expect(message.contains("Some vendor entries did not match scanned local tracks yet."))
     }
 
     @Test func metadataImportStatusMessageIncludesFallbackHintWhenNothingMatches() {
         let message = AppViewModel.metadataImportStatusMessage(
             for: [
-                MetadataImportSummary(source: .rekordbox, importedEntries: 18, matchedTracks: 0)
+                MetadataImportSummary(source: .rekordbox, importedEntries: 18, matchedLocalTracks: 0, unmatchedEntries: 18, referenceAttachmentCount: 0)
             ]
         )
 
-        #expect(message.contains("rekordbox: 0 matched / 18 imported"))
-        #expect(message.contains("Sync libraries or scan a fallback folder first."))
+        #expect(message.contains("rekordbox: 0 matched local tracks / 18 unmatched / 0 references"))
+        #expect(message.contains("No scanned local tracks matched the imported vendor metadata yet. Scan Music Folders first."))
+    }
+
+    @Test func libraryScannerIncludesAudioInNestedSubfolders() async throws {
+        let directory = try makeTemporaryDirectory()
+        let packageDirectory = directory.appendingPathComponent("Collection.musiclibrary", isDirectory: true)
+        let nestedDirectory = packageDirectory.appendingPathComponent("Media/Deep Set", isDirectory: true)
+        try FileManager.default.createDirectory(at: nestedDirectory, withIntermediateDirectories: true)
+
+        let rootTrackURL = directory.appendingPathComponent("Root Track.wav")
+        let nestedTrackURL = nestedDirectory.appendingPathComponent("Nested Track.wav")
+        try writeTestWAV(to: rootTrackURL, frequency: 440)
+        try writeTestWAV(to: nestedTrackURL, frequency: 554.37)
+
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let database = try LibraryDatabase(databaseURL: databaseURL)
+        let scanner = LibraryScannerService(database: database)
+
+        await scanner.scan(roots: [directory]) { _ in }
+
+        let scannedTracks = try database.fetchScannedTracks()
+        let scannedPaths = Set(scannedTracks.map(\.filePath))
+
+        #expect(scannedPaths.contains(TrackPathNormalizer.normalizedAbsolutePath(rootTrackURL)))
+        #expect(scannedPaths.contains(TrackPathNormalizer.normalizedAbsolutePath(nestedTrackURL)))
+    }
+
+    @Test func libraryScannerRecoversExistingUnscannedTrackWhenFileIsUnchanged() async throws {
+        let directory = try makeTemporaryDirectory()
+        let trackURL = directory.appendingPathComponent("Recovered Track.wav")
+        try writeTestWAV(to: trackURL)
+
+        let normalizedPath = TrackPathNormalizer.normalizedAbsolutePath(trackURL)
+        let modified = try #require(
+            FileManager.default.attributesOfItem(atPath: trackURL.path)[.modificationDate] as? Date
+        )
+        let contentHash = FileHashingService.contentHash(for: trackURL)
+        let analysisDate = Date(timeIntervalSince1970: 1_234)
+
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let database = try LibraryDatabase(databaseURL: databaseURL)
+        try database.upsertTrack(
+            Track(
+                id: UUID(),
+                filePath: normalizedPath,
+                fileName: trackURL.lastPathComponent,
+                title: "Stale Title",
+                artist: "Legacy Artist",
+                album: "",
+                genre: "",
+                duration: 0,
+                sampleRate: 0,
+                bpm: nil,
+                musicalKey: nil,
+                modifiedTime: modified,
+                contentHash: contentHash,
+                analyzedAt: analysisDate,
+                embeddingProfileID: "profile",
+                embeddingPipelineID: EmbeddingPipeline.audioSegmentsV1.id,
+                embeddingUpdatedAt: analysisDate,
+                hasSeratoMetadata: false,
+                hasRekordboxMetadata: false,
+                bpmSource: nil,
+                keySource: nil,
+                lastSeenInLocalScanAt: nil
+            )
+        )
+
+        let scanner = LibraryScannerService(database: database)
+        await scanner.scan(roots: [directory]) { _ in }
+
+        let recovered = try database.fetchTrack(path: normalizedPath)
+        let recoveredTrack = try #require(recovered)
+
+        #expect(recoveredTrack.lastSeenInLocalScanAt != nil)
+        #expect(recoveredTrack.title == "Recovered Track")
+        #expect(abs(recoveredTrack.sampleRate - 22_050) < 0.001)
+        #expect(recoveredTrack.analyzedAt == analysisDate)
+        #expect(recoveredTrack.embeddingProfileID == "profile")
+        #expect(Set(try database.fetchScannedTracks().map(\.filePath)) == Set([normalizedPath]))
+    }
+
+    @Test func libraryScannerFastSkipRefreshesLastSeenWithoutClearingAnalysis() async throws {
+        let directory = try makeTemporaryDirectory()
+        let trackURL = directory.appendingPathComponent("Fast Skip Track.wav")
+        try writeTestWAV(to: trackURL)
+
+        let normalizedPath = TrackPathNormalizer.normalizedAbsolutePath(trackURL)
+        let modified = try #require(
+            FileManager.default.attributesOfItem(atPath: trackURL.path)[.modificationDate] as? Date
+        )
+        let contentHash = FileHashingService.contentHash(for: trackURL)
+        let analysisDate = Date(timeIntervalSince1970: 4_321)
+        let previousLastSeen = Date(timeIntervalSince1970: 200)
+
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let database = try LibraryDatabase(databaseURL: databaseURL)
+        try database.upsertTrack(
+            Track(
+                id: UUID(),
+                filePath: normalizedPath,
+                fileName: trackURL.lastPathComponent,
+                title: "Existing Title",
+                artist: "Indexed Artist",
+                album: "",
+                genre: "",
+                duration: 42,
+                sampleRate: 11_025,
+                bpm: nil,
+                musicalKey: nil,
+                modifiedTime: modified,
+                contentHash: contentHash,
+                analyzedAt: analysisDate,
+                embeddingProfileID: "profile",
+                embeddingPipelineID: EmbeddingPipeline.audioSegmentsV1.id,
+                embeddingUpdatedAt: analysisDate,
+                hasSeratoMetadata: false,
+                hasRekordboxMetadata: false,
+                bpmSource: nil,
+                keySource: nil,
+                lastSeenInLocalScanAt: previousLastSeen
+            )
+        )
+
+        let scanner = LibraryScannerService(database: database)
+        await scanner.scan(roots: [directory]) { _ in }
+
+        let refreshed = try database.fetchTrack(path: normalizedPath)
+        let refreshedTrack = try #require(refreshed)
+
+        #expect(refreshedTrack.lastSeenInLocalScanAt != nil)
+        #expect(refreshedTrack.lastSeenInLocalScanAt! > previousLastSeen)
+        #expect(refreshedTrack.title == "Existing Title")
+        #expect(abs(refreshedTrack.sampleRate - 11_025) < 0.001)
+        #expect(refreshedTrack.analyzedAt == analysisDate)
+        #expect(refreshedTrack.embeddingProfileID == "profile")
+    }
+
+    @Test func libraryScannerIgnoresHistoricalUnscannedHashMatchesForDuplicateDetection() async throws {
+        let directory = try makeTemporaryDirectory()
+        let trackURL = directory.appendingPathComponent("Visible Track.wav")
+        try writeTestWAV(to: trackURL)
+
+        let normalizedPath = TrackPathNormalizer.normalizedAbsolutePath(trackURL)
+        let modified = try #require(
+            FileManager.default.attributesOfItem(atPath: trackURL.path)[.modificationDate] as? Date
+        )
+        let contentHash = FileHashingService.contentHash(for: trackURL)
+
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let database = try LibraryDatabase(databaseURL: databaseURL)
+        try database.upsertTrack(
+            Track(
+                id: UUID(),
+                filePath: "/Archive/Historical Copy.wav",
+                fileName: "Historical Copy.wav",
+                title: "Historical Copy",
+                artist: "Archive",
+                album: "",
+                genre: "",
+                duration: 1,
+                sampleRate: 22_050,
+                bpm: nil,
+                musicalKey: nil,
+                modifiedTime: modified,
+                contentHash: contentHash,
+                analyzedAt: nil,
+                embeddingProfileID: nil,
+                embeddingPipelineID: nil,
+                embeddingUpdatedAt: nil,
+                hasSeratoMetadata: true,
+                hasRekordboxMetadata: false,
+                bpmSource: nil,
+                keySource: nil,
+                lastSeenInLocalScanAt: nil
+            )
+        )
+
+        let scanner = LibraryScannerService(database: database)
+        await scanner.scan(roots: [directory]) { _ in }
+
+        let scannedTracks = try database.fetchScannedTracks()
+
+        #expect(scannedTracks.count == 1)
+        #expect(scannedTracks.first?.filePath == normalizedPath)
     }
 }
 
@@ -1741,7 +1947,8 @@ private func makeTrack(
     hasSeratoMetadata: Bool = false,
     hasRekordboxMetadata: Bool = false,
     bpmSource: TrackMetadataSource? = nil,
-    keySource: TrackMetadataSource? = nil
+    keySource: TrackMetadataSource? = nil,
+    lastSeenInLocalScanAt: Date? = nil
 ) -> Track {
     Track(
         id: UUID(),
@@ -1764,7 +1971,8 @@ private func makeTrack(
         hasSeratoMetadata: hasSeratoMetadata,
         hasRekordboxMetadata: hasRekordboxMetadata,
         bpmSource: bpmSource,
-        keySource: keySource
+        keySource: keySource,
+        lastSeenInLocalScanAt: lastSeenInLocalScanAt
     )
 }
 
@@ -1842,6 +2050,53 @@ private func makeTemporaryDirectory() throws -> URL {
     return directory
 }
 
+private func writeTestWAV(
+    to url: URL,
+    frequency: Double = 440,
+    durationSec: Double = 1.0
+) throws {
+    let sampleRate = 22_050
+    let sampleCount = Int(Double(sampleRate) * durationSec)
+    var pcmData = Data(capacity: sampleCount * MemoryLayout<Int16>.size)
+
+    for index in 0..<sampleCount {
+        let sample = sin(2 * Double.pi * frequency * Double(index) / Double(sampleRate))
+        let scaled = Int16(max(min(sample * Double(Int16.max) * 0.25, Double(Int16.max)), Double(Int16.min)))
+        var littleEndian = scaled.littleEndian
+        withUnsafeBytes(of: &littleEndian) { bytes in
+            pcmData.append(contentsOf: bytes)
+        }
+    }
+
+    let byteRate = sampleRate * 2
+    let blockAlign: UInt16 = 2
+    let bitsPerSample: UInt16 = 16
+    let dataSize = UInt32(pcmData.count)
+    let riffSize = 36 + dataSize
+
+    var wavData = Data()
+    wavData.append(Data("RIFF".utf8))
+    wavData.append(contentsOf: withUnsafeBytes(of: riffSize.littleEndian, Array.init))
+    wavData.append(Data("WAVE".utf8))
+    wavData.append(Data("fmt ".utf8))
+
+    let fmtChunkSize: UInt32 = 16
+    let audioFormat: UInt16 = 1
+    let numChannels: UInt16 = 1
+    wavData.append(contentsOf: withUnsafeBytes(of: fmtChunkSize.littleEndian, Array.init))
+    wavData.append(contentsOf: withUnsafeBytes(of: audioFormat.littleEndian, Array.init))
+    wavData.append(contentsOf: withUnsafeBytes(of: numChannels.littleEndian, Array.init))
+    wavData.append(contentsOf: withUnsafeBytes(of: UInt32(sampleRate).littleEndian, Array.init))
+    wavData.append(contentsOf: withUnsafeBytes(of: UInt32(byteRate).littleEndian, Array.init))
+    wavData.append(contentsOf: withUnsafeBytes(of: blockAlign.littleEndian, Array.init))
+    wavData.append(contentsOf: withUnsafeBytes(of: bitsPerSample.littleEndian, Array.init))
+    wavData.append(Data("data".utf8))
+    wavData.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian, Array.init))
+    wavData.append(pcmData)
+
+    try wavData.write(to: url)
+}
+
 private func createSQLiteDatabase(at url: URL, statements: [String]) throws {
     var db: OpaquePointer?
     guard sqlite3_open(url.path, &db) == SQLITE_OK else {
@@ -1865,7 +2120,8 @@ private func makeReadyTrack(
     let track = makeTrack(
         path: path,
         title: title,
-        analyzedAt: Date()
+        analyzedAt: Date(),
+        lastSeenInLocalScanAt: Date()
     )
     try database.upsertTrack(track)
     let segments = [

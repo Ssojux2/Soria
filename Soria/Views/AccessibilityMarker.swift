@@ -5,13 +5,12 @@ struct AccessibilityMarker: View {
     let label: String
 
     var body: some View {
-        Text(label)
+        Text(label.isEmpty ? " " : label)
+            .id("\(identifier)-\(label)")
             .font(.system(size: 1))
-            .foregroundStyle(.clear)
+            .opacity(0.01)
             .frame(width: 1, height: 1)
             .clipped()
-            .accessibilityElement()
-            .accessibilityLabel(label)
             .accessibilityIdentifier(identifier)
             .allowsHitTesting(false)
     }
