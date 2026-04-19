@@ -58,6 +58,7 @@ actor AnalysisCommitActor {
             rhythmicDensity: result.rhythmicDensity,
             lowMidHighBalance: result.lowMidHighBalance,
             waveformPreview: result.waveformPreview,
+            waveformEnvelope: result.waveformEnvelope,
             analysisFocus: result.analysisFocus,
             introLengthSec: result.introLengthSec,
             outroLengthSec: result.outroLengthSec,

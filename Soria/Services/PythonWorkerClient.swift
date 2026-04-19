@@ -26,6 +26,7 @@ struct WorkerAnalysisResult: Codable {
     let rhythmicDensity: Double
     let lowMidHighBalance: [Double]
     let waveformPreview: [Double]
+    let waveformEnvelope: TrackWaveformEnvelope?
     let analysisFocus: AnalysisFocus
     let introLengthSec: Double
     let outroLengthSec: Double
@@ -134,6 +135,26 @@ final class PythonWorkerClient {
             options: workerOptions(analysisFocus: analysisFocus)
         )
         return try await runGeneric(payload: payload, progress: progress, commandName: payload.command)
+    }
+
+    func extractWaveformEnvelope(
+        filePath: String,
+        track: Track,
+        externalMetadata: [ExternalDJMetadata] = [],
+        progress: WorkerProgressHandler? = nil
+    ) async throws -> TrackWaveformEnvelope {
+        let payload = WorkerAnalyzePayload(
+            command: "extract_waveform_envelope",
+            filePath: filePath,
+            trackMetadata: trackMetadata(for: track, externalMetadata: externalMetadata),
+            options: workerOptions()
+        )
+        let response: WorkerWaveformEnvelopeResponse = try await runGeneric(
+            payload: payload,
+            progress: progress,
+            commandName: payload.command
+        )
+        return response.waveformEnvelope
     }
 
     func embedAudioSegments(
@@ -865,6 +886,10 @@ private struct WorkerAnalyzePayload: Codable {
     let filePath: String
     let trackMetadata: WorkerTrackMetadataPayload
     let options: WorkerOptionsPayload
+}
+
+private struct WorkerWaveformEnvelopeResponse: Codable {
+    let waveformEnvelope: TrackWaveformEnvelope
 }
 
 private struct WorkerDescriptorSegment: Codable {

@@ -6,6 +6,13 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 @MainActor
+enum LibraryPreviewInteractionPhase: Equatable {
+    case mouseDown
+    case dragChanged
+    case mouseUp
+}
+
+@MainActor
 final class AppViewModel: ObservableObject {
     private static let uiTestMixAssistantArgument = "UITEST_START_IN_MIX_ASSISTANT"
     private static let uiTestLibraryStatePrefix = "UITEST_LIBRARY_STATE="
@@ -15,6 +22,7 @@ final class AppViewModel: ObservableObject {
         case empty
         case prepared
         case readySelection = "ready_selection"
+        case multiSelection = "multi_selection"
         case analyzing
         case generated
         case generating
@@ -53,10 +61,58 @@ final class AppViewModel: ObservableObject {
         let completionStatusMessage: String?
     }
 
+    private struct PendingInteractiveSeekRequest {
+        let normalizedPosition: Double
+        let autoplay: Bool
+    }
+
+    private enum CommittedPreviewAction {
+        case play(trackID: UUID, url: URL, fromTime: Double)
+        case seek(trackID: UUID, url: URL, time: Double, autoplay: Bool, kind: LibraryPreviewSeekKind)
+
+        var trackID: UUID {
+            switch self {
+            case .play(let trackID, _, _):
+                return trackID
+            case .seek(let trackID, _, _, _, _):
+                return trackID
+            }
+        }
+
+        var url: URL {
+            switch self {
+            case .play(_, let url, _):
+                return url
+            case .seek(_, let url, _, _, _):
+                return url
+            }
+        }
+
+        var debugName: String {
+            switch self {
+            case .play:
+                return "play"
+            case .seek(_, _, _, _, let kind):
+                return "seek:\(kind)"
+            }
+        }
+    }
+
+    private struct PendingPreviewAction {
+        let requestID: UInt64
+        let action: CommittedPreviewAction
+
+        var trackID: UUID { action.trackID }
+        var url: URL { action.url }
+    }
+
     @Published var selectedSection: SidebarSection = .library {
         didSet {
             if !allowsScopeInspector(for: activeScopeInspectorTarget, in: selectedSection) {
                 closeScopeInspector()
+            }
+            if selectedSection != oldValue {
+                stopLibraryPreview()
             }
         }
     }
@@ -69,6 +125,7 @@ final class AppViewModel: ObservableObject {
             reconcileLibrarySelectionToVisibleTracks()
         }
     }
+    @Published private(set) var libraryTrackSortState: LibraryTrackSortState?
     @Published var libraryScopeFilter = LibraryScopeFilter() {
         didSet {
             guard libraryScopeFilter != oldValue else { return }
@@ -87,6 +144,8 @@ final class AppViewModel: ObservableObject {
     @Published var selectedTrackAnalysis: TrackAnalysisSummary?
     @Published var selectedTrackExternalMetadata: [ExternalDJMetadata] = []
     @Published var selectedTrackWaveformPreview: [Double] = []
+    @Published var selectedTrackWaveformEnvelope: TrackWaveformEnvelope?
+    @Published private(set) var libraryPreviewState = LibraryPreviewState.hidden
     @Published var selectedRecommendationID: UUID?
     @Published var scanProgress = ScanJobProgress()
     @Published var libraryRoots: [String] = LibraryRootsStore.loadRoots().map(TrackPathNormalizer.normalizedAbsolutePath)
@@ -211,12 +270,19 @@ final class AppViewModel: ObservableObject {
     private let exporter = PlaylistExportService()
     private let externalMetadataImporter = ExternalMetadataService()
     private let externalVisualizationResolver = ExternalVisualizationResolver()
+    private let libraryPreviewPlayer: LibraryPreviewControlling
     private var pendingAnalyzeAllTrackIDs: [UUID] = []
     private var analysisTask: Task<Void, Never>?
     private var analysisWatchdogTasks: [UUID: Task<Void, Never>] = [:]
+    private var waveformBackfillTask: Task<Void, Never>?
     private var librarySyncDismissTask: Task<Void, Never>?
     private var workerHealthTask: Task<Void, Never>?
     private var validationTask: Task<Void, Never>?
+    private var previewPreparationTask: Task<Void, Error>?
+    private var previewPreparationURL: URL?
+    private var previewTransportTask: Task<Void, Never>?
+    private var libraryPreviewReleaseWorkItem: DispatchWorkItem?
+    private var libraryPreviewInteractiveSeekDispatchWorkItem: DispatchWorkItem?
     private var readyTrackIDs: Set<UUID> = []
     private var pendingAnalysisTrackIDs: [UUID] = []
     private var analysisActivitiesByTrackID: [UUID: AnalysisActivity] = [:]
@@ -224,10 +290,21 @@ final class AppViewModel: ObservableObject {
     private var membershipSnapshotsByTrackID: [UUID: TrackMembershipSnapshot] = [:]
     private var scopeTrackCache: [LibraryScopeFilter: Set<UUID>] = [:]
     private var isSuppressingRecommendationResultInvalidation = false
+    private var isLibrarySearchFieldFocused = false
+    private var pendingInteractiveSeekRequest: PendingInteractiveSeekRequest?
+    private var pendingPreviewAction: PendingPreviewAction?
+    private var committedPreviewRequestID: UInt64 = 0
+    private var lastInteractiveSeekDispatchTime: TimeInterval?
+    private var lastInteractiveSeekNormalizedPosition: Double?
+    private var isDispatchingInteractiveSeek = false
     private var recommendationGenerationStub: RecommendationGenerationStub?
     private let workerTimeoutSec = PythonWorkerClient.defaultWorkerTimeoutSec
     private let analysisWatchdogDelaySec =
         max(Double(ProcessInfo.processInfo.environment["SORIA_ANALYSIS_WATCHDOG_SEC"] ?? "") ?? 12, 5)
+    private let libraryPreviewWarmReleaseDelaySec: Double
+    private let libraryPreviewInteractiveSeekDispatchIntervalSec: Double
+    private let libraryPreviewInteractiveSeekMinimumDelta = 0.01
+    private let libraryPreviewInteractiveSeekImmediateDelta = 0.08
     private lazy var worker: PythonWorkerClient = PythonWorkerClient(
         configProvider: { [unowned self] in
             PythonWorkerClient.WorkerConfig(
@@ -245,13 +322,23 @@ final class AppViewModel: ObservableObject {
         await self?.invalidateTrackVectors(for: track)
     }
 
-    init(skipAsyncBootstrap: Bool = false) {
+    init(
+        skipAsyncBootstrap: Bool = false,
+        libraryPreviewPlayer: LibraryPreviewControlling? = nil,
+        libraryPreviewWarmReleaseDelaySec: Double = 0.35,
+        libraryPreviewInteractiveSeekDispatchIntervalSec: Double = 0.03
+    ) {
         AppPaths.ensureDirectories()
         let processInfo = ProcessInfo.processInfo
         let processArguments = processInfo.arguments
         let processEnvironment = processInfo.environment
         let uiTestLibraryState = Self.uiTestLibraryState(from: processArguments)
         let forceInitialSetupPrompt = processArguments.contains(Self.uiTestForceInitialSetupArgument)
+        self.libraryPreviewWarmReleaseDelaySec = max(libraryPreviewWarmReleaseDelaySec, 0)
+        self.libraryPreviewInteractiveSeekDispatchIntervalSec = max(libraryPreviewInteractiveSeekDispatchIntervalSec, 0)
+        self.libraryPreviewPlayer = libraryPreviewPlayer ?? (uiTestLibraryState == nil
+            ? LibraryPreviewPlayer()
+            : UITestLibraryPreviewPlayer())
 
         if processArguments.contains(Self.uiTestMixAssistantArgument) {
             selectedSection = .mixAssistant
@@ -288,6 +375,10 @@ final class AppViewModel: ObservableObject {
         if hasExistingRoots {
             initialSetupLibraryRoot = libraryRoots[0]
             LibraryRootsStore.markInitialSetupCompleted()
+        }
+
+        self.libraryPreviewPlayer.onPlaybackStateChange = { [weak self] playbackState in
+            self?.applyLibraryPreviewPlaybackState(playbackState)
         }
 
         persistFolderFallbackSource()
@@ -357,6 +448,15 @@ final class AppViewModel: ObservableObject {
         )
     }
 
+    var libraryTrackSortOrderBinding: Binding<[LibraryTrackSortComparator]> {
+        Binding(
+            get: { self.currentLibraryTrackSortOrder },
+            set: { [weak self] newValue in
+                self?.applyLibraryTrackSortOrder(newValue)
+            }
+        )
+    }
+
     var selectedTrackIDsInOrder: [UUID] {
         selectedTracks.map(\.id)
     }
@@ -370,7 +470,9 @@ final class AppViewModel: ObservableObject {
     }
 
     var filteredTracks: [Track] {
-        libraryTracksMatchingCurrentFilters(trackFilter: libraryTrackFilter)
+        sortLibraryTracks(
+            libraryTracksMatchingCurrentFilters(trackFilter: libraryTrackFilter)
+        )
     }
 
     var trimmedLibrarySearchText: String {
@@ -664,6 +766,17 @@ final class AppViewModel: ObservableObject {
         selectionReadiness.hasSelection
     }
 
+    var shouldShowLibraryPreviewStrip: Bool {
+        libraryPreviewState.trackID != nil
+    }
+
+    var shouldHandleLibraryPreviewSpacebar: Bool {
+        selectedSection == .library
+            && !isLibrarySearchFieldFocused
+            && shouldShowLibraryPreviewStrip
+            && libraryPreviewState.isAvailable
+    }
+
     var recommendationInteractionDisabled: Bool {
         isBuildingPlaylist || isGeneratingRecommendations
     }
@@ -688,15 +801,24 @@ final class AppViewModel: ObservableObject {
 
     var librarySelectionStatusText: String {
         if !selectionReadiness.hasSelection {
-            return "Select tracks in the library to analyze them or move them into recommendation search."
+            return "Select one track to preview it, or select tracks to analyze them or move them into recommendation search."
+        }
+        if selectionReadiness.selectedCount > 1 {
+            let summary = selectionReadiness.pendingCount == 0
+                ? "Selected tracks are ready. Move into recommendation search whenever you are ready."
+                : selectionReadiness.bannerMessage
+            return "\(summary) Preview is available for one selected track at a time."
+        }
+        if !libraryPreviewState.message.isEmpty, !libraryPreviewState.isAvailable {
+            return libraryPreviewState.message
         }
         if let blockedMessage = preparationBlockedMessage, selectionReadiness.hasPendingTracks {
-            return blockedMessage
+            return "\(blockedMessage) Press Space to preview the selected track."
         }
         if selectionReadiness.pendingCount == 0 {
-            return "Selected tracks are ready. Move into recommendation search whenever you are ready."
+            return "Selected track is ready. Press Space to preview it or move it into recommendation search."
         }
-        return selectionReadiness.bannerMessage
+        return "\(selectionReadiness.bannerMessage) Press Space to preview the selected track."
     }
 
     var librarySetupPromptTitle: String {
@@ -763,6 +885,16 @@ final class AppViewModel: ObservableObject {
 
     func libraryTrackCount(for filter: LibraryTrackFilter) -> Int {
         libraryTracksMatchingCurrentFilters(trackFilter: filter).count
+    }
+
+    func applyLibraryTrackSortOrder(_ requestedSortOrder: [LibraryTrackSortComparator]) {
+        let requestedSort = Self.libraryTrackSortState(from: requestedSortOrder)
+        let normalizedSort = Self.normalizedLibraryTrackSortState(
+            previousSort: libraryTrackSortState,
+            requestedSort: requestedSort
+        )
+
+        libraryTrackSortState = normalizedSort
     }
 
     static func librarySearchTokens(from queryText: String) -> [String] {
@@ -1104,6 +1236,31 @@ final class AppViewModel: ObservableObject {
         return compact
     }
 
+    private static func uiTestWaveformPreview() -> [Double] {
+        (0..<256).map { index in
+            let normalized = Double(index) / 255.0
+            let sine = (sin(normalized * .pi * 10) + 1.0) * 0.28
+            let swell = max(0.18, 1.0 - abs((normalized * 2.0) - 1.0))
+            return min(max((sine * 0.55) + (swell * 0.65), 0), 1)
+        }
+    }
+
+    private static func uiTestWaveformEnvelope(durationSec: Double) -> TrackWaveformEnvelope {
+        let upperPeaks = (0..<TrackWaveformEnvelope.denseBinCount).map { index -> Double in
+            let normalized = Double(index) / Double(max(TrackWaveformEnvelope.denseBinCount - 1, 1))
+            let pulse = (sin(normalized * .pi * 18) + 1.0) * 0.22
+            let contour = 0.18 + (0.62 * max(0.25, 1.0 - abs((normalized * 2.0) - 1.0)))
+            return min(max((pulse * 0.45) + contour, 0), 1)
+        }
+        return TrackWaveformEnvelope(
+            durationSec: durationSec,
+            upperPeaks: upperPeaks,
+            lowerPeaks: upperPeaks.map { -$0 },
+            binCount: upperPeaks.count,
+            sourceVersion: TrackWaveformEnvelope.canonicalSourceVersion
+        )
+    }
+
     private static func uiTestLibraryState(from arguments: [String]) -> UITestLibraryState? {
         guard let argument = arguments.first(where: { $0.hasPrefix(uiTestLibraryStatePrefix) }) else {
             return nil
@@ -1121,6 +1278,7 @@ final class AppViewModel: ObservableObject {
         selectedTrackAnalysis = nil
         selectedTrackExternalMetadata = []
         selectedTrackWaveformPreview = []
+        selectedTrackWaveformEnvelope = nil
         selectedRecommendationID = nil
         resetGeneratedRecommendationResults(clearStatusMessage: true)
         recommendationStatusMessage = fixture.recommendationStatusMessage
@@ -1171,11 +1329,112 @@ final class AppViewModel: ObservableObject {
         isShowingInitialSetupSheet = false
         isRunningInitialSetup = false
         initialSetupStatusMessage = ""
+        if selectedTrackIDs.count == 1, let uiTestTrack = selectedTrack {
+            let waveformPreview = Self.uiTestWaveformPreview()
+            let waveformEnvelope = Self.uiTestWaveformEnvelope(durationSec: uiTestTrack.duration)
+            selectedTrackAnalysis = TrackAnalysisSummary(
+                trackID: uiTestTrack.id,
+                segments: [],
+                trackEmbedding: nil,
+                estimatedBPM: uiTestTrack.bpm,
+                estimatedKey: uiTestTrack.musicalKey,
+                brightness: 0.48,
+                onsetDensity: 0.42,
+                rhythmicDensity: 0.37,
+                lowMidHighBalance: [0.31, 0.44, 0.25],
+                waveformPreview: waveformPreview,
+                waveformEnvelope: waveformEnvelope,
+                introLengthSec: 14
+            )
+            selectedTrackWaveformPreview = waveformPreview
+            selectedTrackWaveformEnvelope = waveformEnvelope
+            selectedTrackExternalMetadata = [
+                ExternalDJMetadata(
+                    id: UUID(),
+                    trackPath: uiTestTrack.filePath,
+                    source: .serato,
+                    bpm: uiTestTrack.bpm,
+                    musicalKey: uiTestTrack.musicalKey,
+                    rating: nil,
+                    color: nil,
+                    tags: [],
+                    playCount: nil,
+                    lastPlayed: nil,
+                    playlistMemberships: [],
+                    cueCount: 2,
+                    cuePoints: [
+                        ExternalDJCuePoint(
+                            kind: .hotcue,
+                            name: "Drop",
+                            index: 1,
+                            startSec: 24,
+                            endSec: nil,
+                            color: "#FF5500",
+                            source: "serato:markers2"
+                        ),
+                        ExternalDJCuePoint(
+                            kind: .cue,
+                            name: "Mix In",
+                            index: nil,
+                            startSec: 8,
+                            endSec: nil,
+                            color: "#F59E0B",
+                            source: "serato:markers2"
+                        )
+                    ],
+                    comment: nil,
+                    vendorTrackID: nil,
+                    analysisState: nil,
+                    analysisCachePath: nil,
+                    syncVersion: nil
+                ),
+                ExternalDJMetadata(
+                    id: UUID(),
+                    trackPath: uiTestTrack.filePath,
+                    source: .rekordbox,
+                    bpm: uiTestTrack.bpm,
+                    musicalKey: uiTestTrack.musicalKey,
+                    rating: nil,
+                    color: nil,
+                    tags: [],
+                    playCount: nil,
+                    lastPlayed: nil,
+                    playlistMemberships: [],
+                    cueCount: 2,
+                    cuePoints: [
+                        ExternalDJCuePoint(
+                            kind: .hotcue,
+                            name: "Drop",
+                            index: 1,
+                            startSec: 24.02,
+                            endSec: nil,
+                            color: "#2563EB",
+                            source: "rekordbox:anlz"
+                        ),
+                        ExternalDJCuePoint(
+                            kind: .loop,
+                            name: "Utility Loop",
+                            index: 2,
+                            startSec: 96,
+                            endSec: 104,
+                            color: "#10B981",
+                            source: "rekordbox:anlz_ext"
+                        )
+                    ],
+                    comment: nil,
+                    vendorTrackID: nil,
+                    analysisState: nil,
+                    analysisCachePath: nil,
+                    syncVersion: nil
+                )
+            ]
+        }
         if !fixture.generatedRecommendations.isEmpty {
             replaceGeneratedRecommendations(fixture.generatedRecommendations)
             playlistBuildProgress = fixture.playlistBuildProgress
             isBuildingPlaylist = fixture.isBuildingPlaylist
         }
+        refreshLibraryPreviewAvailability()
         if analysisSessionProgress != nil || analysisActivity != nil {
             refreshAnalysisQueueText()
         }
@@ -1260,7 +1519,7 @@ final class AppViewModel: ObservableObject {
                 seratoMembershipFacets: facets.serato,
                 rekordboxMembershipFacets: facets.rekordbox
             )
-        case .prepared, .readySelection, .analyzing, .generated, .generating, .buildingPlaylist:
+        case .prepared, .readySelection, .multiSelection, .analyzing, .generated, .generating, .buildingPlaylist:
             let readyTrackID = UUID()
             let pendingTrackID = UUID()
             let curatedTrackID = UUID()
@@ -1472,7 +1731,7 @@ final class AppViewModel: ObservableObject {
             switch state {
             case .prepared, .analyzing:
                 fixtureReadyTrackIDs = [readyTrackID]
-            case .readySelection, .generating:
+            case .readySelection, .multiSelection, .generating:
                 fixtureReadyTrackIDs = [readyTrackID, curatedTrackID, backupTrackID]
             case .generated, .buildingPlaylist:
                 fixtureReadyTrackIDs = [readyTrackID, pendingTrackID, curatedTrackID, backupTrackID]
@@ -1487,9 +1746,11 @@ final class AppViewModel: ObservableObject {
                 libraryStatusMessage: "",
                 selectedTrackIDs: state == .analyzing
                     ? Set([pendingTrackID])
-                    : (state == .readySelection || state == .generated || state == .generating || state == .buildingPlaylist
-                        ? Set([readyTrackID])
-                        : []),
+                    : (state == .multiSelection
+                        ? Set([readyTrackID, curatedTrackID])
+                        : (state == .readySelection || state == .generated || state == .generating || state == .buildingPlaylist
+                            ? Set([readyTrackID])
+                            : [])),
                 analysisStateByTrackID: state == .analyzing
                     ? [
                         pendingTrackID: TrackAnalysisState(
@@ -2315,6 +2576,212 @@ final class AppViewModel: ObservableObject {
         updateSelectedTrackIDs([trackID], deferSideEffects: true)
     }
 
+    func toggleLibraryPreview() {
+        guard selectedTrackIDs.count == 1, let track = selectedTrack else { return }
+        cancelLibraryPreviewRelease()
+        cancelPendingInteractiveSeekDispatch()
+        if libraryPreviewState.trackID != track.id {
+            refreshLibraryPreviewAvailability()
+        }
+        guard libraryPreviewState.isAvailable else { return }
+
+        if libraryPreviewState.isPlaying {
+            invalidatePendingPreviewActions()
+            libraryPreviewPlayer.pause()
+            libraryPreviewState.isPlaying = false
+            libraryPreviewState.progress = progressForLibraryPreview(
+                currentTimeSec: libraryPreviewState.currentTimeSec,
+                totalDurationSec: libraryPreviewState.totalDurationSec
+            )
+            return
+        }
+
+        let previewURL = URL(fileURLWithPath: track.filePath).standardizedFileURL
+        let startTime = libraryPreviewState.isPrepared
+            ? min(
+                max(libraryPreviewState.currentTimeSec, 0),
+                max(libraryPreviewState.totalDurationSec, 0)
+            )
+            : libraryPreviewState.defaultStartSec
+
+        libraryPreviewState.currentTimeSec = startTime
+        libraryPreviewState.isPlaying = true
+        libraryPreviewState.progress = progressForLibraryPreview(
+            currentTimeSec: startTime,
+            totalDurationSec: libraryPreviewState.totalDurationSec
+        )
+        libraryPreviewState.message = ""
+
+        commitPreviewAction(
+            .play(trackID: track.id, url: previewURL, fromTime: startTime)
+        )
+    }
+
+    func handleLibraryPreviewTogglePress() {
+        debugLibraryPreviewInput("toggle press | will_pause=\(libraryPreviewState.isPlaying)")
+        toggleLibraryPreview()
+    }
+
+    func seekLibraryPreview(
+        to timeSec: Double,
+        autoplay: Bool = true,
+        seekKind: LibraryPreviewSeekKind = .waveformScrub
+    ) {
+        guard selectedTrackIDs.count == 1, let track = selectedTrack else { return }
+        cancelLibraryPreviewRelease()
+        if !isDispatchingInteractiveSeek {
+            cancelPendingInteractiveSeekDispatch()
+        }
+        if libraryPreviewState.trackID != track.id {
+            refreshLibraryPreviewAvailability()
+        }
+        guard libraryPreviewState.isAvailable else { return }
+
+        let previewURL = URL(fileURLWithPath: track.filePath).standardizedFileURL
+        let resolvedTimeSec = min(
+            max(timeSec, 0),
+            max(libraryPreviewState.totalDurationSec, 0)
+        )
+
+        libraryPreviewState.currentTimeSec = resolvedTimeSec
+        libraryPreviewState.isPlaying = autoplay
+        libraryPreviewState.progress = progressForLibraryPreview(
+            currentTimeSec: libraryPreviewState.currentTimeSec,
+            totalDurationSec: libraryPreviewState.totalDurationSec
+        )
+        libraryPreviewState.message = ""
+
+        commitPreviewAction(
+            .seek(
+                trackID: track.id,
+                url: previewURL,
+                time: resolvedTimeSec,
+                autoplay: autoplay,
+                kind: seekKind
+            )
+        )
+    }
+
+    func seekLibraryPreview(normalizedPosition: Double, autoplay: Bool = true) {
+        guard libraryPreviewState.totalDurationSec > 0 else { return }
+        let clamped = min(max(normalizedPosition, 0), 1)
+        seekLibraryPreview(
+            to: libraryPreviewState.totalDurationSec * clamped,
+            autoplay: autoplay,
+            seekKind: .waveformScrub
+        )
+    }
+
+    func handleLibraryPreviewInteraction(normalizedPosition: Double, phase: LibraryPreviewInteractionPhase) {
+        guard libraryPreviewState.totalDurationSec > 0 else { return }
+        let clampedPosition = min(max(normalizedPosition, 0), 1)
+
+        switch phase {
+        case .mouseDown:
+            debugLibraryPreviewInput(
+                "waveform mouseDown | normalized=\(String(format: "%.3f", clampedPosition))"
+            )
+            cancelPendingInteractiveSeekDispatch()
+            dispatchInteractiveSeek(
+                normalizedPosition: clampedPosition,
+                autoplay: true
+            )
+        case .dragChanged:
+            queueInteractiveSeek(
+                normalizedPosition: clampedPosition,
+                autoplay: true
+            )
+        case .mouseUp:
+            debugLibraryPreviewInput(
+                "waveform mouseUp | normalized=\(String(format: "%.3f", clampedPosition))"
+            )
+        }
+    }
+
+    func stopLibraryPreview() {
+        cancelPendingInteractiveSeekDispatch()
+        invalidatePendingPreviewActions()
+        let releaseTrack = trackForLibraryPreview(trackID: libraryPreviewState.trackID)
+        libraryPreviewPlayer.stop()
+        guard libraryPreviewState.trackID != nil else { return }
+        libraryPreviewState.isPlaying = false
+        libraryPreviewState.currentTimeSec = 0
+        libraryPreviewState.progress = 0
+        lastInteractiveSeekNormalizedPosition = nil
+        scheduleLibraryPreviewRelease(for: releaseTrack)
+    }
+
+    func refreshLibraryPreviewAvailability() {
+        guard selectedTrackIDs.count == 1, let track = selectedTrack else {
+            cancelPreviewPreparationIfNeeded()
+            invalidatePendingPreviewActions()
+            cancelWaveformBackfill()
+            libraryPreviewState = .hidden
+            return
+        }
+
+        let totalDurationSec = resolvedLibraryPreviewTotalDuration(for: track)
+        let resolvedStartSec = resolvedLibraryPreviewStartSec(for: track)
+        let url = URL(fileURLWithPath: track.filePath)
+        let availabilityMessage = libraryPreviewPlayer.availabilityMessage(for: url)
+        let isSameTrack = libraryPreviewState.trackID == track.id
+        let shouldPreservePlaybackState = isSameTrack && (
+            libraryPreviewState.isWarm
+                || libraryPreviewState.isPrepared
+                || libraryPreviewState.isPlaying
+                || libraryPreviewState.currentTimeSec > 0
+        )
+        let shouldPreserveDefaultStart = isSameTrack && (
+            libraryPreviewState.isPlaying || libraryPreviewState.currentTimeSec > 0
+        )
+        let currentTimeSec = shouldPreservePlaybackState
+            ? min(max(libraryPreviewState.currentTimeSec, 0), max(totalDurationSec, 0))
+            : 0
+        let isPrepared = shouldPreservePlaybackState ? libraryPreviewState.isPrepared : false
+        let isWarm = shouldPreservePlaybackState ? libraryPreviewState.isWarm : false
+        let isPlaying = shouldPreservePlaybackState ? libraryPreviewState.isPlaying && availabilityMessage == nil : false
+
+        if availabilityMessage == nil {
+            if shouldPreservePlaybackState, currentTimeSec > 0, !libraryPreviewState.isWarm, !isPrepared {
+                pendingPreviewAction = PendingPreviewAction(
+                    requestID: nextCommittedPreviewRequestID(),
+                    action: .seek(
+                        trackID: track.id,
+                        url: url,
+                        time: currentTimeSec,
+                        autoplay: isPlaying,
+                        kind: .playbackResume
+                    )
+                )
+            }
+            startPreviewPreparationIfNeeded(trackID: track.id, url: url)
+        }
+
+        libraryPreviewState = LibraryPreviewState(
+            trackID: track.id,
+            isAvailable: availabilityMessage == nil,
+            isPrepared: isPrepared,
+            isWarm: isWarm,
+            isPlaying: isPlaying,
+            currentTimeSec: currentTimeSec,
+            totalDurationSec: totalDurationSec,
+            defaultStartSec: shouldPreserveDefaultStart ? libraryPreviewState.defaultStartSec : resolvedStartSec,
+            progress: progressForLibraryPreview(
+                currentTimeSec: currentTimeSec,
+                totalDurationSec: totalDurationSec
+            ),
+            message: availabilityMessage ?? ""
+        )
+    }
+
+    func setLibrarySearchFieldFocused(_ isFocused: Bool) {
+        let didGainFocus = isFocused && !isLibrarySearchFieldFocused
+        isLibrarySearchFieldFocused = isFocused
+        if didGainFocus {
+            stopLibraryPreview()
+        }
+    }
+
     func setRecommendationSelectedForCuration(_ trackID: UUID, isSelected: Bool) {
         if isSelected {
             curationSelectionTrackIDs.insert(trackID)
@@ -2380,6 +2847,7 @@ final class AppViewModel: ObservableObject {
             replaceGeneratedRecommendations(generatedRecommendations)
         }
         self.recommendationStatusMessage = recommendationStatusMessage
+        refreshLibraryPreviewAvailability()
     }
 
     func setRecommendationGenerationStubForTesting(
@@ -3707,6 +4175,9 @@ final class AppViewModel: ObservableObject {
             selectedTrackAnalysis = nil
             selectedTrackExternalMetadata = []
             selectedTrackWaveformPreview = []
+            selectedTrackWaveformEnvelope = nil
+            cancelWaveformBackfill()
+            refreshLibraryPreviewAvailability()
             return
         }
 
@@ -3714,41 +4185,63 @@ final class AppViewModel: ObservableObject {
             selectedTrackSegments = try database.fetchSegments(trackID: track.id)
             selectedTrackAnalysis = try database.fetchAnalysisSummary(trackID: track.id)
             selectedTrackExternalMetadata = try database.fetchExternalMetadata(trackID: track.id)
+            let cachedWaveform = try database.fetchWaveformCache(trackID: track.id)
             selectedTrackWaveformPreview = selectedTrackAnalysis?.waveformPreview ?? []
+            selectedTrackWaveformEnvelope = preferredWaveformEnvelope(
+                for: track,
+                cachedWaveform: cachedWaveform,
+                analysisSummary: selectedTrackAnalysis,
+                fallbackPreview: selectedTrackWaveformPreview,
+                fallbackSourceVersion: TrackWaveformEnvelope.legacyPreviewSourceVersion
+            )
+            refreshLibraryPreviewAvailability()
 
             let metadataSnapshot = selectedTrackExternalMetadata
             let shouldResolveExternalPreview =
+                selectedTrackWaveformEnvelope == nil ||
                 selectedTrackWaveformPreview.isEmpty ||
                 metadataSnapshot.contains(where: { $0.cuePoints.isEmpty })
 
-            guard shouldResolveExternalPreview, !metadataSnapshot.isEmpty else { return }
-            let selectedTrackID = track.id
-            let trackPath = track.filePath
-            let resolver = externalVisualizationResolver
-            let resolution = await Task.detached(priority: .userInitiated) {
-                resolver.enrich(trackPath: trackPath, metadata: metadataSnapshot)
-            }.value
+            if shouldResolveExternalPreview, !metadataSnapshot.isEmpty {
+                let selectedTrackID = track.id
+                let trackPath = track.filePath
+                let resolver = externalVisualizationResolver
+                let resolution = await Task.detached(priority: .userInitiated) {
+                    resolver.enrich(trackPath: trackPath, metadata: metadataSnapshot)
+                }.value
 
-            guard selectedTrack?.id == selectedTrackID else { return }
+                guard selectedTrack?.id == selectedTrackID else { return }
 
-            if selectedTrackWaveformPreview.isEmpty, !resolution.waveformPreview.isEmpty {
-                selectedTrackWaveformPreview = resolution.waveformPreview
-            }
-
-            if resolution.metadata != metadataSnapshot {
-                selectedTrackExternalMetadata = resolution.metadata
-                for source in Set(resolution.metadata.map(\.source)) {
-                    let entries = resolution.metadata.filter { $0.source == source }
-                    try database.replaceExternalMetadata(trackID: selectedTrackID, source: source, entries: entries)
+                if selectedTrackWaveformPreview.isEmpty, !resolution.waveformPreview.isEmpty {
+                    selectedTrackWaveformPreview = resolution.waveformPreview
                 }
-                membershipSnapshotsByTrackID[selectedTrackID] = (
-                    try? database.fetchTrackMembershipSnapshots(trackIDs: [selectedTrackID])
-                )?[selectedTrackID] ?? membershipSnapshotsByTrackID[selectedTrackID]
-                scopeTrackCache.removeAll()
-                try? refreshMembershipFacets()
+                if selectedTrackWaveformEnvelope == nil {
+                    selectedTrackWaveformEnvelope = TrackWaveformEnvelope.fromPreview(
+                        resolution.waveformPreview,
+                        durationSec: resolvedLibraryPreviewTotalDuration(for: track),
+                        sourceVersion: TrackWaveformEnvelope.vendorFallbackSourceVersion
+                    )
+                }
+
+                if resolution.metadata != metadataSnapshot {
+                    selectedTrackExternalMetadata = resolution.metadata
+                    for source in Set(resolution.metadata.map(\.source)) {
+                        let entries = resolution.metadata.filter { $0.source == source }
+                        try database.replaceExternalMetadata(trackID: selectedTrackID, source: source, entries: entries)
+                    }
+                    membershipSnapshotsByTrackID[selectedTrackID] = (
+                        try? database.fetchTrackMembershipSnapshots(trackIDs: [selectedTrackID])
+                    )?[selectedTrackID] ?? membershipSnapshotsByTrackID[selectedTrackID]
+                    scopeTrackCache.removeAll()
+                    try? refreshMembershipFacets()
+                }
             }
+
+            queueWaveformBackfillIfNeeded(for: track, externalMetadata: selectedTrackExternalMetadata)
+            refreshLibraryPreviewAvailability()
         } catch {
             AppLogger.shared.error("Track detail load failed: \(error.localizedDescription)")
+            refreshLibraryPreviewAvailability()
         }
     }
 
@@ -3767,6 +4260,7 @@ final class AppViewModel: ObservableObject {
     private func updateSelectedTrackIDs(_ newValue: Set<UUID>, deferSideEffects: Bool = false) {
         guard selectedTrackIDs != newValue else { return }
         selectedTrackIDs = newValue
+        handleLibraryPreviewSelectionChange()
 
         if deferSideEffects {
             DispatchQueue.main.async { [weak self] in
@@ -3783,6 +4277,457 @@ final class AppViewModel: ObservableObject {
             message: "Reference selection changed. Generate again to rebuild the curated list."
         )
         Task { await loadSelectedTrackDetails() }
+    }
+
+    private func handleLibraryPreviewSelectionChange() {
+        cancelWaveformBackfill()
+        stopLibraryPreview()
+        refreshLibraryPreviewAvailability()
+    }
+
+    private func applyLibraryPreviewPlaybackState(_ playbackState: LibraryPreviewPlaybackState) {
+        guard let track = selectedTrack, libraryPreviewState.trackID == track.id else { return }
+
+        let selectedTrackURL = URL(fileURLWithPath: track.filePath).standardizedFileURL
+        guard playbackState.url.standardizedFileURL == selectedTrackURL else { return }
+
+        let preferredTotalDurationSec = resolvedLibraryPreviewTotalDuration(for: track)
+        let resolvedTotalDurationSec = preferredTotalDurationSec > 0
+            ? preferredTotalDurationSec
+            : (playbackState.totalDurationSec > 0 ? playbackState.totalDurationSec : libraryPreviewState.totalDurationSec)
+        libraryPreviewState.isPrepared = playbackState.isPrepared
+        libraryPreviewState.isWarm = playbackState.isWarm
+        libraryPreviewState.isPlaying = playbackState.isPlaying
+        libraryPreviewState.totalDurationSec = max(resolvedTotalDurationSec, 0)
+        libraryPreviewState.currentTimeSec = min(
+            max(playbackState.currentTimeSec, 0),
+            max(libraryPreviewState.totalDurationSec, 0)
+        )
+        libraryPreviewState.progress = progressForLibraryPreview(
+            currentTimeSec: libraryPreviewState.currentTimeSec,
+            totalDurationSec: libraryPreviewState.totalDurationSec
+        )
+    }
+
+    private func applyLibraryPreviewError(_ error: Error) {
+        cancelPendingInteractiveSeekDispatch()
+        cancelPreviewPreparationIfNeeded()
+        cancelPreviewTransportTask()
+        committedPreviewRequestID &+= 1
+        pendingPreviewAction = nil
+        let resolvedMessage = libraryPreviewMessage(for: error)
+        libraryPreviewState.isAvailable = false
+        libraryPreviewState.isPrepared = false
+        libraryPreviewState.isWarm = false
+        libraryPreviewState.isPlaying = false
+        libraryPreviewState.currentTimeSec = 0
+        libraryPreviewState.progress = 0
+        libraryPreviewState.message = resolvedMessage
+    }
+
+    private func cancelPendingInteractiveSeekDispatch() {
+        libraryPreviewInteractiveSeekDispatchWorkItem?.cancel()
+        libraryPreviewInteractiveSeekDispatchWorkItem = nil
+        pendingInteractiveSeekRequest = nil
+    }
+
+    private func cancelPreviewPreparationIfNeeded() {
+        previewPreparationTask?.cancel()
+        previewPreparationTask = nil
+        previewPreparationURL = nil
+    }
+
+    private func cancelPreviewTransportTask() {
+        previewTransportTask?.cancel()
+        previewTransportTask = nil
+    }
+
+    private func invalidatePendingPreviewActions() {
+        committedPreviewRequestID &+= 1
+        pendingPreviewAction = nil
+        cancelPreviewTransportTask()
+    }
+
+    private func cancelLibraryPreviewRelease() {
+        libraryPreviewReleaseWorkItem?.cancel()
+        libraryPreviewReleaseWorkItem = nil
+    }
+
+    private func scheduleLibraryPreviewRelease(for track: Track?) {
+        cancelLibraryPreviewRelease()
+        guard let track else { return }
+
+        let expectedURL = URL(fileURLWithPath: track.filePath).standardizedFileURL
+        let expectedTrackID = track.id
+        guard libraryPreviewWarmReleaseDelaySec > 0 else {
+            releaseLibraryPreviewIfNeeded(expectedTrackID: expectedTrackID, expectedURL: expectedURL)
+            return
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.releaseLibraryPreviewIfNeeded(expectedTrackID: expectedTrackID, expectedURL: expectedURL)
+        }
+        libraryPreviewReleaseWorkItem = workItem
+
+        let deadline = DispatchTime.now() + libraryPreviewWarmReleaseDelaySec
+        DispatchQueue.main.asyncAfter(deadline: deadline, execute: workItem)
+    }
+
+    private func releaseLibraryPreviewIfNeeded(expectedTrackID: UUID, expectedURL: URL) {
+        libraryPreviewReleaseWorkItem = nil
+        guard !shouldKeepWarmLibraryPreview(for: expectedTrackID) else { return }
+        if previewPreparationURL == expectedURL {
+            cancelPreviewPreparationIfNeeded()
+        }
+        if pendingPreviewAction?.trackID == expectedTrackID {
+            invalidatePendingPreviewActions()
+        }
+        libraryPreviewPlayer.discardPreparedItem(for: expectedURL)
+    }
+
+    private func shouldKeepWarmLibraryPreview(for trackID: UUID) -> Bool {
+        selectedSection == .library
+            && !isLibrarySearchFieldFocused
+            && selectedTrackIDs.count == 1
+            && selectedTrackIDs.contains(trackID)
+    }
+
+    private func nextCommittedPreviewRequestID() -> UInt64 {
+        committedPreviewRequestID &+= 1
+        return committedPreviewRequestID
+    }
+
+    private func commitPreviewAction(_ action: CommittedPreviewAction) {
+        let requestID = nextCommittedPreviewRequestID()
+        cancelPreviewTransportTask()
+
+        if executeCommittedPreviewActionDirectlyIfPossible(action, requestID: requestID) {
+            pendingPreviewAction = nil
+            return
+        }
+
+        if shouldDelayCommittedPreviewActionUntilPreparation(action) {
+            pendingPreviewAction = PendingPreviewAction(requestID: requestID, action: action)
+            startPreviewPreparationIfNeeded(trackID: action.trackID, url: action.url)
+            runPendingPreviewActionIfPossible()
+            return
+        }
+
+        pendingPreviewAction = nil
+        startPreviewTransportTask(for: action, requestID: requestID)
+    }
+
+    @discardableResult
+    private func executeCommittedPreviewActionDirectlyIfPossible(
+        _ action: CommittedPreviewAction,
+        requestID: UInt64
+    ) -> Bool {
+        guard requestID == committedPreviewRequestID else { return false }
+        guard previewPreparationURL != action.url || previewPreparationTask == nil else { return false }
+
+        do {
+            let executed: Bool
+            switch action {
+            case .play(_, let url, let fromTime):
+                executed = try libraryPreviewPlayer.playPrepared(url: url, fromTime: fromTime)
+            case .seek(_, let url, let time, let autoplay, let kind):
+                executed = try libraryPreviewPlayer.seekPrepared(
+                    url: url,
+                    to: time,
+                    autoplay: autoplay,
+                    kind: kind
+                )
+            }
+
+            if executed {
+                debugLibraryPreviewInput("committed direct | request_id=\(requestID)")
+            }
+            return executed
+        } catch {
+            applyLibraryPreviewError(error)
+            return true
+        }
+    }
+
+    private func shouldDelayCommittedPreviewActionUntilPreparation(_ action: CommittedPreviewAction) -> Bool {
+        if previewPreparationURL == action.url, previewPreparationTask != nil {
+            return true
+        }
+
+        guard selectedTrack?.id == action.trackID else { return false }
+        return !(libraryPreviewState.isPrepared || libraryPreviewState.isWarm)
+    }
+
+    private func startPreviewPreparationIfNeeded(trackID: UUID, url: URL) {
+        if previewPreparationURL == url, previewPreparationTask != nil {
+            return
+        }
+        if libraryPreviewState.trackID == trackID, (libraryPreviewState.isPrepared || libraryPreviewState.isWarm) {
+            return
+        }
+
+        cancelPreviewPreparationIfNeeded()
+        previewPreparationURL = url
+        previewPreparationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.previewPreparationURL == url {
+                    self.previewPreparationTask = nil
+                    self.previewPreparationURL = nil
+                }
+            }
+
+            do {
+                try await self.libraryPreviewPlayer.prepare(url: url)
+                guard self.selectedTrack?.id == trackID else { return }
+                if self.pendingPreviewAction?.trackID == trackID {
+                    self.runPendingPreviewActionIfPossible()
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.selectedTrack?.id == trackID else { return }
+                self.applyLibraryPreviewError(error)
+                throw error
+            }
+        }
+    }
+
+    private func runPendingPreviewActionIfPossible() {
+        guard let pendingPreviewAction else { return }
+        startPreviewTransportTask(
+            for: pendingPreviewAction.action,
+            requestID: pendingPreviewAction.requestID,
+            waitsForPreparation: true
+        )
+    }
+
+    private func startPreviewTransportTask(
+        for action: CommittedPreviewAction,
+        requestID: UInt64,
+        waitsForPreparation: Bool = false
+    ) {
+        cancelPreviewTransportTask()
+        previewTransportTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if requestID == self.committedPreviewRequestID {
+                    self.previewTransportTask = nil
+                }
+            }
+
+            do {
+                if waitsForPreparation || self.shouldDelayCommittedPreviewActionUntilPreparation(action) {
+                    if self.previewPreparationURL != action.url || self.previewPreparationTask == nil {
+                        self.startPreviewPreparationIfNeeded(trackID: action.trackID, url: action.url)
+                    }
+                    if let preparationTask = self.previewPreparationTask, self.previewPreparationURL == action.url {
+                        try await preparationTask.value
+                    }
+                }
+
+                guard !Task.isCancelled else { return }
+                guard requestID == self.committedPreviewRequestID else { return }
+                guard self.selectedTrack?.id == action.trackID else { return }
+                if self.executeCommittedPreviewActionDirectlyIfPossible(action, requestID: requestID) {
+                    if self.pendingPreviewAction?.requestID == requestID {
+                        self.pendingPreviewAction = nil
+                    }
+                    return
+                }
+                self.debugLibraryPreviewInput(
+                    "transport started | request_id=\(requestID) | action=\(action.debugName)"
+                )
+
+                switch action {
+                case .play(_, let url, let fromTime):
+                    try await self.libraryPreviewPlayer.play(url: url, fromTime: fromTime)
+                case .seek(_, _, let time, let autoplay, let kind):
+                    try await self.libraryPreviewPlayer.seek(to: time, autoplay: autoplay, kind: kind)
+                }
+
+                guard requestID == self.committedPreviewRequestID else { return }
+                if self.pendingPreviewAction?.requestID == requestID {
+                    self.pendingPreviewAction = nil
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard requestID == self.committedPreviewRequestID else { return }
+                self.applyLibraryPreviewError(error)
+            }
+        }
+    }
+
+    private func queueInteractiveSeek(normalizedPosition: Double, autoplay: Bool) {
+        let deltaFromLastDispatch = abs(normalizedPosition - (lastInteractiveSeekNormalizedPosition ?? normalizedPosition))
+        guard deltaFromLastDispatch >= libraryPreviewInteractiveSeekMinimumDelta else { return }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        pendingInteractiveSeekRequest = PendingInteractiveSeekRequest(
+            normalizedPosition: normalizedPosition,
+            autoplay: autoplay
+        )
+
+        let elapsedSinceLastDispatch = now - (lastInteractiveSeekDispatchTime ?? 0)
+        let shouldDispatchImmediately = lastInteractiveSeekDispatchTime == nil
+            || elapsedSinceLastDispatch >= libraryPreviewInteractiveSeekDispatchIntervalSec
+            || deltaFromLastDispatch >= libraryPreviewInteractiveSeekImmediateDelta
+
+        if shouldDispatchImmediately {
+            flushPendingInteractiveSeekIfNeeded()
+            return
+        }
+
+        guard libraryPreviewInteractiveSeekDispatchWorkItem == nil else { return }
+        let delaySec = max(libraryPreviewInteractiveSeekDispatchIntervalSec - elapsedSinceLastDispatch, 0)
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.flushPendingInteractiveSeekIfNeeded()
+        }
+        libraryPreviewInteractiveSeekDispatchWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delaySec, execute: workItem)
+    }
+
+    private func flushPendingInteractiveSeekIfNeeded() {
+        libraryPreviewInteractiveSeekDispatchWorkItem = nil
+        guard let request = pendingInteractiveSeekRequest else { return }
+        pendingInteractiveSeekRequest = nil
+        dispatchInteractiveSeek(
+            normalizedPosition: request.normalizedPosition,
+            autoplay: request.autoplay
+        )
+    }
+
+    private func dispatchInteractiveSeek(normalizedPosition: Double, autoplay: Bool) {
+        isDispatchingInteractiveSeek = true
+        seekLibraryPreview(normalizedPosition: normalizedPosition, autoplay: autoplay)
+        isDispatchingInteractiveSeek = false
+        lastInteractiveSeekDispatchTime = ProcessInfo.processInfo.systemUptime
+        lastInteractiveSeekNormalizedPosition = normalizedPosition
+    }
+
+    private func debugLibraryPreviewInput(_ message: String) {
+#if DEBUG
+        AppLogger.shared.info("Library preview input | \(message)")
+#endif
+    }
+
+    private func trackForLibraryPreview(trackID: UUID?) -> Track? {
+        guard let trackID else { return nil }
+        return tracks.first(where: { $0.id == trackID })
+    }
+
+    private func libraryPreviewMessage(for error: Error) -> String {
+        if let previewError = error as? LibraryPreviewPlayerError {
+            return previewError.errorDescription ?? "Preview unavailable."
+        }
+        return "Preview unavailable. \(error.localizedDescription)"
+    }
+
+    private func resolvedLibraryPreviewTotalDuration(for track: Track) -> Double {
+        if let waveformDuration = selectedTrackWaveformEnvelope?.durationSec,
+           waveformDuration.isFinite,
+           waveformDuration > 0 {
+            return waveformDuration
+        }
+        if track.duration.isFinite, track.duration > 0 {
+            return track.duration
+        }
+        if libraryPreviewState.totalDurationSec.isFinite, libraryPreviewState.totalDurationSec > 0 {
+            return libraryPreviewState.totalDurationSec
+        }
+        return 0
+    }
+
+    private func resolvedLibraryPreviewStartSec(for track: Track) -> Double {
+        let earliestCueStartSec = selectedTrackExternalMetadata
+            .flatMap(\.cuePoints)
+            .compactMap { cuePoint in
+                cuePoint.startSec.isFinite ? cuePoint.startSec : nil
+            }
+            .min()
+
+        let introEndSec: Double? = {
+            guard
+                let summary = selectedTrackAnalysis,
+                summary.introLengthSec.isFinite,
+                summary.introLengthSec > 8
+            else {
+                return nil
+            }
+            return summary.introLengthSec
+        }()
+
+        let preferredStartSec = max(0, earliestCueStartSec ?? introEndSec ?? 0)
+        let totalDurationSec = resolvedLibraryPreviewTotalDuration(for: track)
+        guard totalDurationSec.isFinite, totalDurationSec > 0 else {
+            return 0
+        }
+        return min(preferredStartSec, totalDurationSec)
+    }
+
+    private func progressForLibraryPreview(currentTimeSec: Double, totalDurationSec: Double) -> Double {
+        guard totalDurationSec > 0 else { return 0 }
+        return min(max(currentTimeSec / totalDurationSec, 0), 1)
+    }
+
+    private func preferredWaveformEnvelope(
+        for track: Track,
+        cachedWaveform: TrackWaveformEnvelope?,
+        analysisSummary: TrackAnalysisSummary?,
+        fallbackPreview: [Double],
+        fallbackSourceVersion: String
+    ) -> TrackWaveformEnvelope? {
+        if let cachedWaveform, cachedWaveform.hasRenderableData {
+            return cachedWaveform
+        }
+        if let waveformEnvelope = analysisSummary?.waveformEnvelope, waveformEnvelope.hasRenderableData {
+            return waveformEnvelope
+        }
+        return TrackWaveformEnvelope.fromPreview(
+            fallbackPreview,
+            durationSec: track.duration,
+            sourceVersion: fallbackSourceVersion
+        )
+    }
+
+    private func cancelWaveformBackfill() {
+        waveformBackfillTask?.cancel()
+        waveformBackfillTask = nil
+    }
+
+    private func queueWaveformBackfillIfNeeded(for track: Track, externalMetadata: [ExternalDJMetadata]) {
+        cancelWaveformBackfill()
+        if let waveformEnvelope = selectedTrackWaveformEnvelope, waveformEnvelope.isDenseCanonical {
+            return
+        }
+        let previewURL = URL(fileURLWithPath: track.filePath)
+        guard libraryPreviewPlayer.availabilityMessage(for: previewURL) == nil else {
+            return
+        }
+
+        let trackID = track.id
+        waveformBackfillTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let waveformEnvelope = try await worker.extractWaveformEnvelope(
+                    filePath: track.filePath,
+                    track: track,
+                    externalMetadata: externalMetadata
+                )
+                guard !Task.isCancelled else { return }
+                try database.replaceWaveformCache(trackID: trackID, waveformEnvelope: waveformEnvelope)
+                guard selectedTrack?.id == trackID else { return }
+                selectedTrackWaveformEnvelope = waveformEnvelope
+                refreshLibraryPreviewAvailability()
+            } catch is CancellationError {
+                return
+            } catch {
+                AppLogger.shared.error(
+                    "Waveform backfill failed for \(track.filePath): \(error.localizedDescription)"
+                )
+            }
+        }
     }
 
     private func recommendationSearchEntryActionFromLibrary() -> LibraryRecommendationSearchEntryAction {
@@ -5141,6 +6086,25 @@ final class AppViewModel: ObservableObject {
         return tracks.filter { filter.isEmpty || scopedIDs.contains($0.id) }
     }
 
+    private func sortLibraryTracks(_ candidateTracks: [Track]) -> [Track] {
+        guard let sort = libraryTrackSortState else { return candidateTracks }
+
+        let originalIndexByID = Dictionary(uniqueKeysWithValues: tracks.enumerated().map { ($1.id, $0) })
+
+        return candidateTracks.sorted { lhs, rhs in
+            let comparison = Self.compareLibraryTracks(
+                lhs,
+                rhs,
+                sort: sort,
+                readyTrackIDs: readyTrackIDs
+            )
+            if comparison == .orderedSame {
+                return (originalIndexByID[lhs.id] ?? 0) < (originalIndexByID[rhs.id] ?? 0)
+            }
+            return comparison == .orderedAscending
+        }
+    }
+
     private func libraryTracksMatchingCurrentFilters(trackFilter: LibraryTrackFilter) -> [Track] {
         let scopedIDs = scopedTrackIDs(for: libraryScopeFilter)
         let searchTokens = Self.librarySearchTokens(from: librarySearchText)
@@ -5163,6 +6127,132 @@ final class AppViewModel: ObservableObject {
             .joined(separator: " ")
 
         return searchTokens.allSatisfy { searchableText.contains($0) }
+    }
+
+    private var currentLibraryTrackSortOrder: [LibraryTrackSortComparator] {
+        guard let sort = libraryTrackSortState else { return [] }
+        return [
+            Self.libraryTrackComparator(
+                for: sort,
+                statusValues: libraryTrackStatusSortValues()
+            )
+        ]
+    }
+
+    private func libraryTrackStatusSortValues() -> [UUID: String] {
+        Dictionary(uniqueKeysWithValues: tracks.map { track in
+            (track.id, trackWorkflowStatus(for: track).displayName)
+        })
+    }
+
+    private static func libraryTrackSortState(from sortOrder: [LibraryTrackSortComparator]) -> LibraryTrackSortState? {
+        guard let comparator = sortOrder.first else { return nil }
+        return LibraryTrackSortState(column: comparator.column, direction: comparator.order)
+    }
+
+    // Map the platform header toggle into the requested descending -> ascending -> cleared cycle.
+    private static func normalizedLibraryTrackSortState(
+        previousSort: LibraryTrackSortState?,
+        requestedSort: LibraryTrackSortState?
+    ) -> LibraryTrackSortState? {
+        guard let requestedSort else { return nil }
+        guard let previousSort else {
+            return LibraryTrackSortState(column: requestedSort.column, direction: .reverse)
+        }
+        guard previousSort.column == requestedSort.column else {
+            return LibraryTrackSortState(column: requestedSort.column, direction: .reverse)
+        }
+
+        if previousSort.direction == .reverse && requestedSort.direction == .forward {
+            return LibraryTrackSortState(column: requestedSort.column, direction: .forward)
+        }
+        if previousSort.direction == .forward && requestedSort.direction == .reverse {
+            return nil
+        }
+        return requestedSort
+    }
+
+    private static func libraryTrackComparator(
+        for sort: LibraryTrackSortState,
+        statusValues: [UUID: String]
+    ) -> LibraryTrackSortComparator {
+        LibraryTrackSortComparator(
+            column: sort.column,
+            order: sort.direction,
+            statusValues: statusValues
+        )
+    }
+
+    private static func compareLibraryTracks(
+        _ lhs: Track,
+        _ rhs: Track,
+        sort: LibraryTrackSortState,
+        readyTrackIDs: Set<UUID>
+    ) -> ComparisonResult {
+        switch sort.column {
+        case .title:
+            return reorderComparison(lhs.title.localizedStandardCompare(rhs.title), direction: sort.direction)
+        case .artist:
+            return reorderComparison(lhs.artist.localizedStandardCompare(rhs.artist), direction: sort.direction)
+        case .bpm:
+            return compareLibraryTrackBPM(lhs.bpm, rhs.bpm, direction: sort.direction)
+        case .status:
+            return reorderComparison(
+                libraryTrackWorkflowStatus(lhs, readyTrackIDs: readyTrackIDs)
+                    .displayName
+                    .localizedStandardCompare(libraryTrackWorkflowStatus(rhs, readyTrackIDs: readyTrackIDs).displayName),
+                direction: sort.direction
+            )
+        }
+    }
+
+    private static func libraryTrackWorkflowStatus(
+        _ track: Track,
+        readyTrackIDs: Set<UUID>
+    ) -> TrackWorkflowStatus {
+        if readyTrackIDs.contains(track.id) {
+            return .ready
+        }
+        if track.analyzedAt == nil {
+            return .needsAnalysis
+        }
+        return .needsRefresh
+    }
+
+    private static func reorderComparison(_ comparison: ComparisonResult, direction: SortOrder) -> ComparisonResult {
+        guard direction == .reverse else { return comparison }
+
+        switch comparison {
+        case .orderedAscending:
+            return .orderedDescending
+        case .orderedDescending:
+            return .orderedAscending
+        case .orderedSame:
+            return .orderedSame
+        }
+    }
+
+    private static func compareLibraryTrackBPM(
+        _ lhs: Double?,
+        _ rhs: Double?,
+        direction: SortOrder
+    ) -> ComparisonResult {
+        switch (lhs, rhs) {
+        case let (left?, right?):
+            if left == right {
+                return .orderedSame
+            }
+            if direction == .forward {
+                return left < right ? .orderedAscending : .orderedDescending
+            }
+            return left > right ? .orderedAscending : .orderedDescending
+        case (nil, nil):
+            return .orderedSame
+        case (nil, _?):
+            return .orderedDescending
+        case (_?, nil):
+            return .orderedAscending
+        }
     }
 
     static func shouldShowInitialSetup(

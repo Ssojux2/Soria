@@ -51,6 +51,9 @@ def main() -> int:
         if command == "analyze":
             _print_json(handle_analyze(payload))
             return 0
+        if command == "extract_waveform_envelope":
+            _print_json(handle_extract_waveform_envelope(payload))
+            return 0
         if command in {"embed_audio_segments", "embed_descriptors"}:
             _print_json(handle_embed_audio_segments(payload))
             return 0
@@ -143,6 +146,7 @@ def handle_analyze(payload: dict[str, Any]) -> dict[str, Any]:
         "rhythmicDensity": analysis["rhythmic_density"],
         "lowMidHighBalance": analysis["low_mid_high_balance"],
         "waveformPreview": analysis["waveform_preview"],
+        "waveformEnvelope": analysis["waveform_envelope"],
         "analysisFocus": analysis.get("analysis_focus", "balanced"),
         "introLengthSec": analysis.get("intro_length_sec", 0.0),
         "outroLengthSec": analysis.get("outro_length_sec", 0.0),
@@ -153,6 +157,22 @@ def handle_analyze(payload: dict[str, Any]) -> dict[str, Any]:
         "segments": embedding_result["segments"],
         "embeddingProfileID": embedding_result["embeddingProfileID"],
         "embeddingPipelineID": embedding_result["embeddingPipelineID"],
+    }
+
+
+def handle_extract_waveform_envelope(payload: dict[str, Any]) -> dict[str, Any]:
+    extract_waveform_envelope = _load_extract_waveform_envelope()
+    file_path = payload["filePath"]
+    progress = _progress_emitter(file_path)
+    progress("launching", "Launching waveform extraction worker", 0.02)
+    waveform_envelope = _call_with_optional_keyword(
+        extract_waveform_envelope,
+        "progress_callback",
+        progress,
+        file_path=file_path,
+    )
+    return {
+        "waveformEnvelope": waveform_envelope,
     }
 
 
@@ -839,6 +859,12 @@ def _load_analyze_track():
     from audio.features import analyze_track
 
     return analyze_track
+
+
+def _load_extract_waveform_envelope():
+    from audio.features import extract_waveform_envelope
+
+    return extract_waveform_envelope
 
 
 def _load_vector_store():

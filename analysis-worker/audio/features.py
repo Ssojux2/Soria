@@ -80,6 +80,7 @@ def analyze_track(
     has_rekordbox = bool(track_metadata.get("hasRekordboxMetadata") or False)
     overall_features = _extract_segment_features(y, sr)
     waveform_preview = _waveform_preview(y)
+    waveform_envelope = _waveform_envelope(y, sr=sr)
     energy_arc = _energy_arc_for_segments(segments, combined_energy, frame_times)
     mixability_tags = _build_mixability_tags(
         intro_length_sec=intro_end - intro_start,
@@ -154,6 +155,7 @@ def analyze_track(
             float(overall_features["high_balance"]),
         ],
         "waveform_preview": waveform_preview,
+        "waveform_envelope": waveform_envelope,
         "analysis_focus": analysis_focus,
         "intro_length_sec": float(max(0.0, intro_end - intro_start)),
         "outro_length_sec": float(max(0.0, outro_end - outro_start)),
@@ -162,6 +164,22 @@ def analyze_track(
         "confidence": confidence,
         "segments": segment_features,
     }
+
+
+def extract_waveform_envelope(
+    file_path: str,
+    bins: int = 2048,
+    progress_callback: Callable[[str, str, float | None], None] | None = None,
+) -> dict[str, Any]:
+    _ensure_librosa()
+    if progress_callback:
+        progress_callback("loading_audio", "Loading audio file", 0.15)
+    y, sr = librosa.load(file_path, sr=22050, mono=True)
+    if y.size == 0:
+        raise ValueError("Empty audio file")
+    if progress_callback:
+        progress_callback("building_waveform", "Building dense waveform envelope", 0.78)
+    return _waveform_envelope(y, sr=sr, bins=bins)
 
 
 def _ensure_librosa() -> None:
@@ -332,6 +350,38 @@ def _waveform_preview(y: np.ndarray, bins: int = 256) -> list[float]:
         values /= max_value
     values = np.sqrt(values)
     return [float(v) for v in values.tolist()]
+
+
+def _waveform_envelope(y: np.ndarray, sr: int, bins: int = 2048) -> dict[str, Any]:
+    safe_bins = max(int(bins), 1)
+    duration_sec = float(y.size / sr) if sr > 0 else 0.0
+    if y.size == 0:
+        return {
+            "durationSec": duration_sec,
+            "upperPeaks": [0.0] * safe_bins,
+            "lowerPeaks": [0.0] * safe_bins,
+            "binCount": safe_bins,
+            "sourceVersion": "soria.waveform.envelope.v1",
+        }
+
+    splits = np.array_split(np.asarray(y, dtype=np.float32), safe_bins)
+    upper = np.array([float(np.max(chunk)) if chunk.size else 0.0 for chunk in splits], dtype=np.float64)
+    lower = np.array([float(np.min(chunk)) if chunk.size else 0.0 for chunk in splits], dtype=np.float64)
+    peak = max(
+        float(np.max(np.abs(upper))) if upper.size else 0.0,
+        float(np.max(np.abs(lower))) if lower.size else 0.0,
+        1e-6,
+    )
+    upper = np.clip(upper / peak, 0.0, 1.0)
+    lower = np.clip(lower / peak, -1.0, 0.0)
+
+    return {
+        "durationSec": duration_sec,
+        "upperPeaks": [float(value) for value in upper.tolist()],
+        "lowerPeaks": [float(value) for value in lower.tolist()],
+        "binCount": safe_bins,
+        "sourceVersion": "soria.waveform.envelope.v1",
+    }
 
 
 def _descriptor_text(

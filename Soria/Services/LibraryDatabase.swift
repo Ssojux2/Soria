@@ -194,14 +194,18 @@ final class LibraryDatabase {
             let updateSQL = """
             UPDATE tracks
             SET analyzed_at = ?, track_embedding_json = ?, analysis_summary_json = ?,
+                waveform_cache_json = ?, waveform_cache_updated_at = ?,
                 embedding_profile_id = NULL, embedding_pipeline_id = NULL, embedding_updated_at = NULL
             WHERE id = ?;
             """
             try withStatement(updateSQL) { statement in
+                let updatedAt = Self.iso8601.string(from: Date())
                 bind(statement, index: 1, text: Self.iso8601.string(from: Date()))
                 bind(statement, index: 2, text: nonEmptyJSONArrayText(analysisSummary.trackEmbedding))
                 bind(statement, index: 3, text: jsonString(analysisSummary))
-                bind(statement, index: 4, text: trackID.uuidString)
+                bind(statement, index: 4, text: analysisSummary.waveformEnvelope.map { jsonString($0) })
+                bind(statement, index: 5, text: analysisSummary.waveformEnvelope == nil ? nil : updatedAt)
+                bind(statement, index: 6, text: trackID.uuidString)
                 guard sqlite3_step(statement) == SQLITE_DONE else {
                     throw DatabaseError.writeFailed
                 }
@@ -229,6 +233,7 @@ final class LibraryDatabase {
             rhythmicDensity: existingSummary.rhythmicDensity,
             lowMidHighBalance: existingSummary.lowMidHighBalance,
             waveformPreview: existingSummary.waveformPreview,
+            waveformEnvelope: existingSummary.waveformEnvelope,
             analysisFocus: existingSummary.analysisFocus,
             introLengthSec: existingSummary.introLengthSec,
             outroLengthSec: existingSummary.outroLengthSec,
@@ -312,6 +317,36 @@ final class LibraryDatabase {
             guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
             guard let jsonText = sqliteString(statement, index: 0), !jsonText.isEmpty else { return nil }
             return optionalDoubles(from: jsonText)
+        }
+    }
+
+    func fetchWaveformCache(trackID: UUID) throws -> TrackWaveformEnvelope? {
+        let sql = "SELECT waveform_cache_json FROM tracks WHERE id = ? LIMIT 1;"
+        return try withStatement(sql) { statement in
+            bind(statement, index: 1, text: trackID.uuidString)
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+            guard let jsonText = sqliteString(statement, index: 0), !jsonText.isEmpty else { return nil }
+            return try? decode(TrackWaveformEnvelope.self, from: jsonText)
+        }
+    }
+
+    func replaceWaveformCache(trackID: UUID, waveformEnvelope: TrackWaveformEnvelope?) throws {
+        let sql = """
+        UPDATE tracks
+        SET waveform_cache_json = ?, waveform_cache_updated_at = ?
+        WHERE id = ?;
+        """
+        try withStatement(sql) { statement in
+            bind(statement, index: 1, text: waveformEnvelope.map { jsonString($0) })
+            bind(
+                statement,
+                index: 2,
+                text: waveformEnvelope == nil ? nil : Self.iso8601.string(from: Date())
+            )
+            bind(statement, index: 3, text: trackID.uuidString)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
         }
     }
 
@@ -498,6 +533,7 @@ final class LibraryDatabase {
                 """
                 UPDATE tracks
                 SET analyzed_at = NULL, track_embedding_json = NULL, analysis_summary_json = NULL,
+                    waveform_cache_json = NULL, waveform_cache_updated_at = NULL,
                     embedding_profile_id = NULL, embedding_pipeline_id = NULL, embedding_updated_at = NULL
                 WHERE id = ?;
                 """
@@ -1027,6 +1063,8 @@ final class LibraryDatabase {
             has_rekordbox INTEGER NOT NULL DEFAULT 0,
             track_embedding_json TEXT,
             analysis_summary_json TEXT,
+            waveform_cache_json TEXT,
+            waveform_cache_updated_at TEXT,
             embedding_profile_id TEXT,
             embedding_pipeline_id TEXT,
             embedding_updated_at TEXT,
@@ -1151,6 +1189,12 @@ final class LibraryDatabase {
         }
         if try !columnExists(table: "tracks", column: "analysis_summary_json") {
             try exec("ALTER TABLE tracks ADD COLUMN analysis_summary_json TEXT;")
+        }
+        if try !columnExists(table: "tracks", column: "waveform_cache_json") {
+            try exec("ALTER TABLE tracks ADD COLUMN waveform_cache_json TEXT;")
+        }
+        if try !columnExists(table: "tracks", column: "waveform_cache_updated_at") {
+            try exec("ALTER TABLE tracks ADD COLUMN waveform_cache_updated_at TEXT;")
         }
         if try !columnExists(table: "tracks", column: "embedding_profile_id") {
             try exec("ALTER TABLE tracks ADD COLUMN embedding_profile_id TEXT;")

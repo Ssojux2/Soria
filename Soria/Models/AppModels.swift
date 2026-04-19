@@ -263,6 +263,97 @@ enum LibraryTrackFilter: String, CaseIterable, Identifiable {
     }
 }
 
+enum LibraryTrackSortColumn: String, Equatable {
+    case title
+    case artist
+    case bpm
+    case status
+}
+
+struct LibraryTrackSortState: Equatable {
+    let column: LibraryTrackSortColumn
+    let direction: SortOrder
+}
+
+struct LibraryPreviewState: Equatable {
+    var trackID: UUID?
+    var isAvailable: Bool
+    var isPrepared: Bool
+    var isWarm: Bool
+    var isPlaying: Bool
+    var currentTimeSec: Double
+    var totalDurationSec: Double
+    var defaultStartSec: Double
+    var progress: Double
+    var message: String
+
+    static let hidden = LibraryPreviewState(
+        trackID: nil,
+        isAvailable: false,
+        isPrepared: false,
+        isWarm: false,
+        isPlaying: false,
+        currentTimeSec: 0,
+        totalDurationSec: 0,
+        defaultStartSec: 0,
+        progress: 0,
+        message: ""
+    )
+}
+
+struct LibraryTrackSortComparator: SortComparator {
+    let column: LibraryTrackSortColumn
+    var order: SortOrder = .forward
+    var statusValues: [UUID: String] = [:]
+
+    func compare(_ lhs: Track, _ rhs: Track) -> ComparisonResult {
+        switch column {
+        case .title:
+            return reordered(lhs.title.localizedStandardCompare(rhs.title))
+        case .artist:
+            return reordered(lhs.artist.localizedStandardCompare(rhs.artist))
+        case .bpm:
+            return compareBPM(lhs.bpm, rhs.bpm)
+        case .status:
+            let lhsStatus = statusValues[lhs.id] ?? ""
+            let rhsStatus = statusValues[rhs.id] ?? ""
+            return reordered(lhsStatus.localizedStandardCompare(rhsStatus))
+        }
+    }
+
+    private func reordered(_ comparison: ComparisonResult) -> ComparisonResult {
+        guard order == .reverse else { return comparison }
+
+        switch comparison {
+        case .orderedAscending:
+            return .orderedDescending
+        case .orderedDescending:
+            return .orderedAscending
+        case .orderedSame:
+            return .orderedSame
+        }
+    }
+
+    private func compareBPM(_ lhs: Double?, _ rhs: Double?) -> ComparisonResult {
+        switch (lhs, rhs) {
+        case let (left?, right?):
+            if left == right {
+                return .orderedSame
+            }
+            if order == .forward {
+                return left < right ? .orderedAscending : .orderedDescending
+            }
+            return left > right ? .orderedAscending : .orderedDescending
+        case (nil, nil):
+            return .orderedSame
+        case (nil, _?):
+            return .orderedDescending
+        case (_?, nil):
+            return .orderedAscending
+        }
+    }
+}
+
 enum PreparationOverviewPhase: String, Equatable {
     case idle
     case syncing

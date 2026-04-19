@@ -1,6 +1,59 @@
 import Foundation
 
 enum TrackCuePresentation {
+    struct WaveformCueSource: Identifiable, Equatable {
+        let source: ExternalDJMetadata.Source
+        let kindLabel: String
+        let indexLabel: String?
+        let timeText: String
+        let noteText: String?
+        let sourceTag: String?
+
+        var id: String {
+            [
+                source.rawValue,
+                kindLabel,
+                indexLabel ?? "",
+                timeText,
+                noteText ?? "",
+                sourceTag ?? ""
+            ].joined(separator: "|")
+        }
+    }
+
+    struct WaveformCueGroup: Identifiable, Equatable {
+        let kind: ExternalDJCuePoint.Kind
+        let startSec: Double
+        let endSec: Double?
+        let color: String?
+        let sources: [WaveformCueSource]
+
+        var id: String {
+            [
+                kind.rawValue,
+                String(format: "%.3f", startSec),
+                endSec.map { String(format: "%.3f", $0) } ?? "",
+                color ?? "",
+                sources.map(\.id).joined(separator: ",")
+            ].joined(separator: "|")
+        }
+
+        var isLoop: Bool {
+            kind == .loop && (endSec ?? startSec) > startSec
+        }
+
+        var tooltipText: String {
+            sources
+                .map { source in
+                    let note = source.noteText.map { " \($0)" } ?? ""
+                    let slot = source.indexLabel.map { " \($0)" } ?? ""
+                    let vendor = source.source.displayName
+                    return "\(vendor) \(source.kindLabel)\(slot) @ \(source.timeText)\(note)"
+                }
+                .joined(separator: "\n")
+        }
+    }
+
     struct CueGroup: Identifiable, Equatable {
         let source: ExternalDJMetadata.Source
         let items: [CueItem]
@@ -73,6 +126,57 @@ enum TrackCuePresentation {
         }
     }
 
+    nonisolated static func waveformCueGroups(from metadata: [ExternalDJMetadata]) -> [WaveformCueGroup] {
+        let flattened = metadata
+            .flatMap { entry in
+                entry.cuePoints.map { cuePoint in
+                    (source: entry.source, cuePoint: cuePoint)
+                }
+            }
+            .sorted { lhs, rhs in
+                if lhs.cuePoint.startSec == rhs.cuePoint.startSec {
+                    return lhs.source.rawValue < rhs.source.rawValue
+                }
+                return lhs.cuePoint.startSec < rhs.cuePoint.startSec
+            }
+
+        var results: [WaveformCueGroup] = []
+        for candidate in flattened {
+            let source = WaveformCueSource(
+                source: candidate.source,
+                kindLabel: typeLabel(for: candidate.cuePoint.kind),
+                indexLabel: indexLabel(for: candidate.cuePoint),
+                timeText: timeText(for: candidate.cuePoint.startSec),
+                noteText: normalizedText(candidate.cuePoint.name),
+                sourceTag: normalizedText(candidate.cuePoint.source)
+            )
+
+            if let last = results.last, canMergeWaveformCueGroup(last, with: candidate.cuePoint) {
+                let mergedColor = normalizedText(last.color) ?? normalizedText(candidate.cuePoint.color)
+                results[results.count - 1] = WaveformCueGroup(
+                    kind: last.kind,
+                    startSec: min(last.startSec, candidate.cuePoint.startSec),
+                    endSec: mergedEndSec(existing: last.endSec, incoming: candidate.cuePoint.endSec),
+                    color: mergedColor,
+                    sources: (last.sources + [source]).sorted { $0.source.rawValue < $1.source.rawValue }
+                )
+                continue
+            }
+
+            results.append(
+                WaveformCueGroup(
+                    kind: candidate.cuePoint.kind,
+                    startSec: candidate.cuePoint.startSec,
+                    endSec: candidate.cuePoint.endSec,
+                    color: normalizedText(candidate.cuePoint.color),
+                    sources: [source]
+                )
+            )
+        }
+
+        return results
+    }
+
     nonisolated static func typeLabel(for kind: ExternalDJCuePoint.Kind) -> String {
         switch kind {
         case .cue:
@@ -134,5 +238,35 @@ enum TrackCuePresentation {
             normalizedText(cuePoint.color) ?? "",
             normalizedText(cuePoint.source) ?? ""
         ].joined(separator: "|")
+    }
+
+    nonisolated private static func canMergeWaveformCueGroup(
+        _ group: WaveformCueGroup,
+        with cuePoint: ExternalDJCuePoint
+    ) -> Bool {
+        guard group.kind == cuePoint.kind else { return false }
+        guard abs(group.startSec - cuePoint.startSec) <= 0.05 else { return false }
+
+        switch (group.endSec, cuePoint.endSec) {
+        case (nil, nil):
+            return true
+        case let (lhs?, rhs?):
+            return abs(lhs - rhs) <= 0.05
+        default:
+            return false
+        }
+    }
+
+    nonisolated private static func mergedEndSec(existing: Double?, incoming: Double?) -> Double? {
+        switch (existing, incoming) {
+        case let (lhs?, rhs?):
+            return max(lhs, rhs)
+        case (.some(let lhs), .none):
+            return lhs
+        case (.none, .some(let rhs)):
+            return rhs
+        case (.none, .none):
+            return nil
+        }
     }
 }

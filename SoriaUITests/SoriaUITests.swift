@@ -12,6 +12,7 @@ final class SoriaUITests: XCTestCase {
         case empty
         case prepared
         case readySelection = "ready_selection"
+        case multiSelection = "multi_selection"
         case analyzing
         case generated
         case generating
@@ -374,6 +375,129 @@ final class SoriaUITests: XCTestCase {
 
         XCTAssertTrue(element(in: app, identifier: "settings-library-sources").waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["Refresh Vendor Metadata"].waitForExistence(timeout: 10))
+    }
+
+    @MainActor
+    func testLibraryPreviewStripAppearsForSingleSelection() throws {
+        let app = launchApp(libraryState: .readySelection)
+
+        XCTAssertTrue(element(in: app, identifier: "library-preview-strip").waitForExistence(timeout: 10))
+        XCTAssertTrue(element(in: app, identifier: "library-preview-toggle").waitForExistence(timeout: 10))
+        XCTAssertTrue(element(in: app, identifier: "library-preview-progress").waitForExistence(timeout: 10))
+        XCTAssertTrue(element(in: app, identifier: "library-preview-time").waitForExistence(timeout: 10))
+    }
+
+    @MainActor
+    func testLibraryPreviewStripHidesForMultiSelection() throws {
+        let app = launchApp(libraryState: .multiSelection)
+
+        XCTAssertFalse(element(in: app, identifier: "library-preview-strip").waitForExistence(timeout: 2))
+    }
+
+    @MainActor
+    func testLibraryPreviewToggleButtonUpdatesPlaybackState() throws {
+        let app = launchApp(libraryState: .readySelection)
+        let previewToggle = element(in: app, identifier: "library-preview-toggle")
+
+        XCTAssertTrue(previewToggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForLabel(of: previewToggle, toEqual: "Play Preview"))
+
+        previewToggle.click()
+        XCTAssertTrue(waitForLabel(of: previewToggle, toEqual: "Pause Preview"))
+
+        previewToggle.click()
+        XCTAssertTrue(waitForLabel(of: previewToggle, toEqual: "Play Preview"))
+    }
+
+    @MainActor
+    func testLibraryPreviewWaveformClickSeeksAndUpdatesTimeLabel() throws {
+        let app = launchApp(libraryState: .readySelection)
+        let waveform = element(in: app, identifier: "library-preview-progress")
+        let timeLabel = element(in: app, identifier: "library-preview-time")
+        let previewToggle = element(in: app, identifier: "library-preview-toggle")
+
+        XCTAssertTrue(waveform.waitForExistence(timeout: 10))
+        XCTAssertTrue(timeLabel.waitForExistence(timeout: 10))
+
+        waveform.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+
+        XCTAssertTrue(waitForLabel(of: timeLabel, toContain: "2:01 / 4:03"))
+        XCTAssertTrue(waitForLabel(of: previewToggle, toEqual: "Pause Preview"))
+    }
+
+    @MainActor
+    func testLibraryPreviewRapidWaveformClicksKeepLatestPosition() throws {
+        let app = launchApp(libraryState: .readySelection)
+        let waveform = element(in: app, identifier: "library-preview-progress")
+        let timeLabel = element(in: app, identifier: "library-preview-time")
+        let previewToggle = element(in: app, identifier: "library-preview-toggle")
+
+        XCTAssertTrue(waveform.waitForExistence(timeout: 10))
+        XCTAssertTrue(timeLabel.waitForExistence(timeout: 10))
+
+        waveform.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.5)).click()
+        waveform.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.5)).click()
+
+        XCTAssertTrue(waitForLabel(of: timeLabel, toContain: "3:02 / 4:03"))
+        XCTAssertTrue(waitForLabel(of: previewToggle, toEqual: "Pause Preview"))
+    }
+
+    @MainActor
+    func testLibraryPreviewCueMarkerExistsAndSeeksToCueTime() throws {
+        let app = launchApp(libraryState: .readySelection)
+        let cueMarker = element(in: app, identifier: "library-preview-cue-1")
+        let timeLabel = element(in: app, identifier: "library-preview-time")
+
+        XCTAssertTrue(cueMarker.waitForExistence(timeout: 10))
+        XCTAssertTrue(timeLabel.waitForExistence(timeout: 10))
+
+        cueMarker.click()
+
+        XCTAssertTrue(waitForLabel(of: timeLabel, toContain: "0:24 / 4:03"))
+    }
+
+    @MainActor
+    func testSpaceTogglesLibraryPreviewWhenSearchIsNotFocused() throws {
+        let app = launchApp(libraryState: .readySelection)
+        let previewToggle = element(in: app, identifier: "library-preview-toggle")
+
+        XCTAssertTrue(previewToggle.waitForExistence(timeout: 10))
+        element(in: app, identifier: "library-action-bar").click()
+        app.typeKey(XCUIKeyboardKey.space, modifierFlags: [])
+
+        XCTAssertTrue(waitForLabel(of: previewToggle, toEqual: "Pause Preview"))
+    }
+
+    @MainActor
+    func testSpaceDoesNotToggleLibraryPreviewWhileSearchIsFocused() throws {
+        let app = launchApp(libraryState: .readySelection)
+        let previewToggle = element(in: app, identifier: "library-preview-toggle")
+        let searchField = librarySearchField(in: app)
+
+        XCTAssertTrue(previewToggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(searchField.waitForExistence(timeout: 10))
+        searchField.click()
+        app.typeKey(XCUIKeyboardKey.space, modifierFlags: [])
+
+        XCTAssertTrue(waitForLabel(of: previewToggle, toEqual: "Play Preview"))
+    }
+
+    @MainActor
+    func testLibraryPreviewStopsImmediatelyWhenSearchGetsFocus() throws {
+        let app = launchApp(libraryState: .readySelection)
+        let waveform = element(in: app, identifier: "library-preview-progress")
+        let previewToggle = element(in: app, identifier: "library-preview-toggle")
+        let searchField = librarySearchField(in: app)
+
+        XCTAssertTrue(waveform.waitForExistence(timeout: 10))
+        XCTAssertTrue(previewToggle.waitForExistence(timeout: 10))
+        XCTAssertTrue(searchField.waitForExistence(timeout: 10))
+
+        waveform.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(waitForLabel(of: previewToggle, toEqual: "Pause Preview"))
+
+        searchField.click()
+        XCTAssertTrue(waitForLabel(of: previewToggle, toEqual: "Play Preview"))
     }
 
     @MainActor

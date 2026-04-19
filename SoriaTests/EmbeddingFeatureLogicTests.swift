@@ -210,6 +210,155 @@ extension SoriaTests {
     }
 
     @Test
+    @MainActor
+    func libraryTrackSortCyclesTitleDescendingAscendingAndClear() {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        let bravo = makeTrack(
+            title: "Bravo",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+        let alpha = makeTrack(
+            title: "Alpha",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+        let charlie = makeTrack(
+            title: "Charlie",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+
+        viewModel.tracks = [bravo, alpha, charlie]
+
+        viewModel.applyLibraryTrackSortOrder([LibraryTrackSortComparator(column: .title)])
+        #expect(viewModel.libraryTrackSortState == LibraryTrackSortState(column: .title, direction: .reverse))
+        #expect(viewModel.filteredTracks.map(\.title) == ["Charlie", "Bravo", "Alpha"])
+
+        viewModel.applyLibraryTrackSortOrder([LibraryTrackSortComparator(column: .title, order: .forward)])
+        #expect(viewModel.libraryTrackSortState == LibraryTrackSortState(column: .title, direction: .forward))
+        #expect(viewModel.filteredTracks.map(\.title) == ["Alpha", "Bravo", "Charlie"])
+
+        viewModel.applyLibraryTrackSortOrder([LibraryTrackSortComparator(column: .title, order: .reverse)])
+        #expect(viewModel.libraryTrackSortState == nil)
+        #expect(viewModel.filteredTracks.map(\.title) == ["Bravo", "Alpha", "Charlie"])
+    }
+
+    @Test
+    @MainActor
+    func libraryTrackSortStartsNewColumnInDescendingOrder() {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        let alpha = makeTrack(
+            title: "Alpha",
+            artist: "Zulu",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+        let bravo = makeTrack(
+            title: "Bravo",
+            artist: "Alpha",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+        let charlie = makeTrack(
+            title: "Charlie",
+            artist: "Mike",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+
+        viewModel.tracks = [alpha, bravo, charlie]
+        viewModel.applyLibraryTrackSortOrder([LibraryTrackSortComparator(column: .title)])
+        viewModel.applyLibraryTrackSortOrder([LibraryTrackSortComparator(column: .artist)])
+
+        #expect(viewModel.libraryTrackSortState == LibraryTrackSortState(column: .artist, direction: .reverse))
+        #expect(viewModel.filteredTracks.map(\.artist) == ["Zulu", "Mike", "Alpha"])
+    }
+
+    @Test
+    @MainActor
+    func libraryTrackSortKeepsMissingBPMAtBottom() {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        let missing = makeTrack(
+            title: "Missing",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil,
+            bpm: nil
+        )
+        let low = makeTrack(
+            title: "Low",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil,
+            bpm: 120
+        )
+        let high = makeTrack(
+            title: "High",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil,
+            bpm: 128
+        )
+
+        viewModel.tracks = [missing, low, high]
+
+        viewModel.applyLibraryTrackSortOrder([LibraryTrackSortComparator(column: .bpm)])
+        #expect(viewModel.filteredTracks.map(\.title) == ["High", "Low", "Missing"])
+
+        viewModel.applyLibraryTrackSortOrder([LibraryTrackSortComparator(column: .bpm, order: .forward)])
+        #expect(viewModel.filteredTracks.map(\.title) == ["Low", "High", "Missing"])
+    }
+
+    @Test
+    @MainActor
+    func libraryTrackSortSupportsStatusColumn() {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        let ready = makeTrack(
+            title: "Ready",
+            analyzedAt: Date(),
+            embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+            embeddingUpdatedAt: Date()
+        )
+        let needsRefresh = makeTrack(
+            title: "Needs Refresh",
+            analyzedAt: Date(),
+            embeddingProfileID: EmbeddingProfile.clapHTSATUnfused.id,
+            embeddingUpdatedAt: Date()
+        )
+        let needsAnalysis = makeTrack(
+            title: "Needs Analysis",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingUpdatedAt: nil
+        )
+
+        viewModel.configureRecommendationSearchStateForTesting(
+            tracks: [needsAnalysis, ready, needsRefresh],
+            selectedTrackIDs: [],
+            readyTrackIDs: [ready.id],
+            validationStatus: .validated(Date())
+        )
+
+        viewModel.applyLibraryTrackSortOrder([LibraryTrackSortComparator(column: .status)])
+        #expect(viewModel.libraryTrackSortState == LibraryTrackSortState(column: .status, direction: .reverse))
+        #expect(viewModel.filteredTracks.map(\.title) == ["Ready", "Needs Refresh", "Needs Analysis"])
+
+        viewModel.applyLibraryTrackSortOrder([LibraryTrackSortComparator(column: .status, order: .forward)])
+        #expect(viewModel.filteredTracks.map(\.title) == ["Needs Analysis", "Needs Refresh", "Ready"])
+
+        viewModel.applyLibraryTrackSortOrder([LibraryTrackSortComparator(column: .status, order: .reverse)])
+        #expect(viewModel.libraryTrackSortState == nil)
+        #expect(viewModel.filteredTracks.map(\.title) == ["Needs Analysis", "Ready", "Needs Refresh"])
+    }
+
+    @Test
     func selectionReadinessSummarizesBlendReferenceState() {
         let readiness = SelectionReadiness(
             signature: "a|b|c|d|e",
@@ -710,7 +859,8 @@ extension SoriaTests {
         artist: String = "Artist",
         analyzedAt: Date?,
         embeddingProfileID: String?,
-        embeddingUpdatedAt: Date?
+        embeddingUpdatedAt: Date?,
+        bpm: Double? = 124
     ) -> Track {
         Track(
             id: id,
@@ -722,7 +872,7 @@ extension SoriaTests {
             genre: "House",
             duration: 240,
             sampleRate: 44_100,
-            bpm: 124,
+            bpm: bpm,
             musicalKey: "8A",
             modifiedTime: Date(timeIntervalSince1970: 1_700_000_000),
             contentHash: id.uuidString,

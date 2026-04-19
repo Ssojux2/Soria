@@ -530,6 +530,13 @@ def test_analyze_does_not_mutate_vector_store(monkeypatch: pytest.MonkeyPatch) -
             "rhythmic_density": 0.5,
             "low_mid_high_balance": [0.3, 0.4, 0.3],
             "waveform_preview": [0.1, 0.2],
+            "waveform_envelope": {
+                "durationSec": 30.0,
+                "upperPeaks": [0.1, 0.2],
+                "lowerPeaks": [-0.1, -0.2],
+                "binCount": 2,
+                "sourceVersion": "soria.waveform.envelope.v1",
+            },
         }
 
     class FakeEmbeddingClient:

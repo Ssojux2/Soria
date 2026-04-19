@@ -1110,6 +1110,70 @@ struct SoriaTests {
         #expect(groups[1].items[0].indexLabel == "Loop 2")
     }
 
+    @Test func waveformCacheRoundTripsAndLegacyAnalysisSummaryStillDecodes() throws {
+        let directory = try makeTemporaryDirectory()
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let database = try LibraryDatabase(databaseURL: databaseURL)
+        let track = makeTrack(path: "/music/cache-track.wav", title: "Cache Track")
+        try database.upsertTrack(track)
+
+        let waveformEnvelope = TrackWaveformEnvelope(
+            durationSec: 180,
+            upperPeaks: [0.2, 0.4, 0.6, 0.8],
+            lowerPeaks: [-0.2, -0.4, -0.6, -0.8],
+            binCount: 4,
+            sourceVersion: TrackWaveformEnvelope.canonicalSourceVersion
+        )
+        try database.replaceWaveformCache(trackID: track.id, waveformEnvelope: waveformEnvelope)
+        #expect(try database.fetchWaveformCache(trackID: track.id) == waveformEnvelope)
+
+        var rawDB: OpaquePointer?
+        defer { sqlite3_close(rawDB) }
+        #expect(sqlite3_open(databaseURL.path, &rawDB) == SQLITE_OK)
+
+        let legacySummaryJSON = """
+        {
+          "trackID": "\(track.id.uuidString)",
+          "segments": [],
+          "trackEmbedding": null,
+          "estimatedBPM": 124.0,
+          "estimatedKey": "8A",
+          "brightness": 0.5,
+          "onsetDensity": 0.4,
+          "rhythmicDensity": 0.3,
+          "lowMidHighBalance": [0.2, 0.5, 0.3],
+          "waveformPreview": [0.1, 0.2, 0.3],
+          "analysisFocus": "balanced",
+          "introLengthSec": 12.0,
+          "outroLengthSec": 18.0,
+          "energyArc": [0.2, 0.4, 0.6],
+          "mixabilityTags": ["test"],
+          "confidence": 0.75
+        }
+        """
+
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
+        let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        #expect(
+            sqlite3_prepare_v2(
+                rawDB,
+                "UPDATE tracks SET analysis_summary_json = ? WHERE id = ?;",
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK
+        )
+        sqlite3_bind_text(statement, 1, legacySummaryJSON, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 2, track.id.uuidString, -1, sqliteTransient)
+        #expect(sqlite3_step(statement) == SQLITE_DONE)
+
+        let decodedSummary = try database.fetchAnalysisSummary(trackID: track.id)
+        #expect(decodedSummary?.waveformEnvelope == nil)
+        #expect(decodedSummary?.waveformPreview == [0.1, 0.2, 0.3])
+        #expect(decodedSummary?.analysisFocus == .balanced)
+    }
+
     @Test func syncMergesSourcesAndPreservesExistingAnalysis() async throws {
         let directory = try makeTemporaryDirectory()
         let databaseURL = directory.appendingPathComponent("library.sqlite")

@@ -59,6 +59,7 @@ struct Track: Identifiable, Codable, Hashable {
     var bpmSource: TrackMetadataSource?
     var keySource: TrackMetadataSource?
     var lastSeenInLocalScanAt: Date? = nil
+    var bpmSortValue: Double { bpm ?? 0 }
 
     func hasCurrentEmbedding(profileID: String, pipelineID: String) -> Bool {
         embeddingProfileID == profileID
@@ -113,6 +114,57 @@ struct TrackSegment: Identifiable, Codable, Hashable {
     let energyScore: Double
     let descriptorText: String
     let vector: [Double]?
+}
+
+struct TrackWaveformEnvelope: Codable, Hashable {
+    static let denseBinCount = 2048
+    static let canonicalSourceVersion = "soria.waveform.envelope.v1"
+    static let vendorFallbackSourceVersion = "vendor.preview.envelope.v1"
+    static let legacyPreviewSourceVersion = "legacy.preview.envelope.v1"
+
+    let durationSec: Double
+    let upperPeaks: [Double]
+    let lowerPeaks: [Double]
+    let binCount: Int
+    let sourceVersion: String
+
+    init(
+        durationSec: Double,
+        upperPeaks: [Double],
+        lowerPeaks: [Double],
+        binCount: Int? = nil,
+        sourceVersion: String = Self.canonicalSourceVersion
+    ) {
+        self.durationSec = durationSec.isFinite ? max(durationSec, 0) : 0
+        self.upperPeaks = upperPeaks.map { min(max($0, 0), 1) }
+        self.lowerPeaks = lowerPeaks.map { min(max($0, -1), 0) }
+        self.binCount = max(binCount ?? upperPeaks.count, 0)
+        self.sourceVersion = sourceVersion
+    }
+
+    var isDenseCanonical: Bool {
+        sourceVersion == Self.canonicalSourceVersion && binCount >= Self.denseBinCount
+    }
+
+    var hasRenderableData: Bool {
+        binCount > 0 && !upperPeaks.isEmpty && upperPeaks.count == lowerPeaks.count
+    }
+
+    static func fromPreview(
+        _ preview: [Double],
+        durationSec: Double,
+        sourceVersion: String = Self.legacyPreviewSourceVersion
+    ) -> TrackWaveformEnvelope? {
+        let normalized = preview.map { min(max($0, 0), 1) }
+        guard !normalized.isEmpty else { return nil }
+        return TrackWaveformEnvelope(
+            durationSec: durationSec,
+            upperPeaks: normalized,
+            lowerPeaks: normalized.map { -$0 },
+            binCount: normalized.count,
+            sourceVersion: sourceVersion
+        )
+    }
 }
 
 enum AnalysisFocus: String, Codable, CaseIterable, Identifiable {
@@ -202,6 +254,7 @@ struct TrackAnalysisSummary: Codable, Hashable {
     let rhythmicDensity: Double
     let lowMidHighBalance: [Double]
     let waveformPreview: [Double]
+    let waveformEnvelope: TrackWaveformEnvelope?
     let analysisFocus: AnalysisFocus
     let introLengthSec: Double
     let outroLengthSec: Double
@@ -220,6 +273,7 @@ struct TrackAnalysisSummary: Codable, Hashable {
         rhythmicDensity: Double,
         lowMidHighBalance: [Double],
         waveformPreview: [Double],
+        waveformEnvelope: TrackWaveformEnvelope? = nil,
         analysisFocus: AnalysisFocus = .balanced,
         introLengthSec: Double = 0,
         outroLengthSec: Double = 0,
@@ -237,6 +291,7 @@ struct TrackAnalysisSummary: Codable, Hashable {
         self.rhythmicDensity = rhythmicDensity
         self.lowMidHighBalance = lowMidHighBalance
         self.waveformPreview = waveformPreview
+        self.waveformEnvelope = waveformEnvelope
         self.analysisFocus = analysisFocus
         self.introLengthSec = introLengthSec
         self.outroLengthSec = outroLengthSec
@@ -258,6 +313,7 @@ extension TrackAnalysisSummary {
         case rhythmicDensity
         case lowMidHighBalance
         case waveformPreview
+        case waveformEnvelope
         case analysisFocus
         case introLengthSec
         case outroLengthSec
@@ -278,6 +334,7 @@ extension TrackAnalysisSummary {
         rhythmicDensity = try container.decode(Double.self, forKey: .rhythmicDensity)
         lowMidHighBalance = try container.decode([Double].self, forKey: .lowMidHighBalance)
         waveformPreview = try container.decode([Double].self, forKey: .waveformPreview)
+        waveformEnvelope = try container.decodeIfPresent(TrackWaveformEnvelope.self, forKey: .waveformEnvelope)
         analysisFocus = try container.decodeIfPresent(AnalysisFocus.self, forKey: .analysisFocus) ?? .balanced
         introLengthSec = try container.decodeIfPresent(Double.self, forKey: .introLengthSec) ?? 0
         outroLengthSec = try container.decodeIfPresent(Double.self, forKey: .outroLengthSec) ?? 0
