@@ -68,7 +68,8 @@ struct VendorExportPreflight {
         playlistName: String,
         tracks: [Track],
         target: ExportTarget,
-        librarySources: [LibrarySourceRecord] = []
+        librarySources: [LibrarySourceRecord] = [],
+        detectedTargetsOverride: DetectedVendorTargets? = nil
     ) throws -> PreparedVendorExport {
         let normalizedPlaylistName = VendorPlaylistNaming.logicalPlaylistName(from: playlistName)
         guard !normalizedPlaylistName.isEmpty else {
@@ -80,7 +81,7 @@ struct VendorExportPreflight {
             throw PlaylistExportError.invalidPlaylistName
         }
 
-        let detectedTargets = detectTargets(librarySources: librarySources)
+        let detectedTargets = detectedTargetsOverride ?? detectTargets(librarySources: librarySources)
         let preparedTracks = preparedTracks(from: tracks)
         guard !preparedTracks.tracks.isEmpty else {
             throw PlaylistExportError.noValidTracksToExport
@@ -106,7 +107,15 @@ struct VendorExportPreflight {
                 warnings.append("Serato appears to be running. Close the app before direct crate writes to avoid library refresh issues.")
             }
 
-            let root = try resolveSeratoCratesRoot(for: preparedTracks.tracks)
+            let root: URL
+            if let overrideRootPath = detectedTargets.seratoCratesRoot {
+                root = URL(fileURLWithPath: overrideRootPath, isDirectory: true)
+                guard fileManager.fileExists(atPath: root.path) else {
+                    throw PlaylistExportError.seratoCratesRootUnavailable
+                }
+            } else {
+                root = try resolveSeratoCratesRoot(for: preparedTracks.tracks)
+            }
             seratoCratesRoot = root
 
             let existingCrateURL = root

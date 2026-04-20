@@ -35,7 +35,7 @@ struct ExportsView: View {
                 Button(viewModel.selectedExportTarget == .seratoCrate ? "Create Serato Crate" : "Export Playlist") {
                     viewModel.exportPlaylist()
                 }
-                .disabled(viewModel.playlistTracks.isEmpty || !viewModel.isSelectedExportTargetAvailable)
+                .disabled(!viewModel.canExportPlaylist)
 
                 if !viewModel.exportMessage.isEmpty {
                     Text(viewModel.exportMessage)

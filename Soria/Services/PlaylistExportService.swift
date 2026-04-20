@@ -58,18 +58,19 @@ enum ExportTarget: String, CaseIterable, Identifiable {
 
 enum PlaylistExportError: LocalizedError {
     case invalidPlaylistName
-    case missingOutputDirectory
+    case missingOutputURL
     case noTracksToExport
     case noValidTracksToExport
     case seratoCratesRootUnavailable
     case multipleSeratoRoots([String])
+    case invalidSeratoCrateDestination(expectedDirectory: String)
 
     var errorDescription: String? {
         switch self {
         case .invalidPlaylistName:
             return "Enter a playlist name before exporting."
-        case .missingOutputDirectory:
-            return "Choose an export destination folder first."
+        case .missingOutputURL:
+            return "Choose an export destination first."
         case .noTracksToExport:
             return "Add at least one playlist track before exporting."
         case .noValidTracksToExport:
@@ -79,6 +80,8 @@ enum PlaylistExportError: LocalizedError {
         case .multipleSeratoRoots(let roots):
             let joined = roots.joined(separator: ", ")
             return "The selected tracks span multiple Serato roots. Export one drive at a time. Roots: \(joined)"
+        case .invalidSeratoCrateDestination(let expectedDirectory):
+            return "Choose a crate file inside the detected _Serato_/Subcrates folder: \(expectedDirectory)"
         }
     }
 }
@@ -153,8 +156,9 @@ final class PlaylistExportService {
         playlistName: String,
         tracks: [Track],
         target: ExportTarget,
-        outputDirectory: URL? = nil,
-        librarySources: [LibrarySourceRecord] = []
+        outputURL: URL? = nil,
+        librarySources: [LibrarySourceRecord] = [],
+        detectedVendorTargets: DetectedVendorTargets? = nil
     ) throws -> ExportJobResult {
         guard !tracks.isEmpty else {
             throw PlaylistExportError.noTracksToExport
@@ -164,22 +168,24 @@ final class PlaylistExportService {
             playlistName: playlistName,
             tracks: tracks,
             target: target,
-            librarySources: librarySources
+            librarySources: librarySources,
+            detectedTargetsOverride: detectedVendorTargets
         )
 
         switch target {
         case .rekordboxPlaylistM3U8:
-            guard let outputDirectory else {
-                throw PlaylistExportError.missingOutputDirectory
+            guard let outputURL else {
+                throw PlaylistExportError.missingOutputURL
             }
-            try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-            let outputURL = outputDirectory
-                .appendingPathComponent(prepared.safeFileBaseName)
-                .appendingPathExtension(target.defaultFileExtension)
+            let resolvedOutputURL = resolvedOutputURL(outputURL, defaultExtension: target.defaultFileExtension)
+            try fileManager.createDirectory(
+                at: resolvedOutputURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
             let writtenURL = try rekordboxPlaylistWriter.write(
                 playlistName: prepared.playlistName,
                 tracks: prepared.tracks,
-                to: outputURL
+                to: resolvedOutputURL
             )
             return ExportJobResult(
                 outputPaths: [writtenURL.path],
@@ -189,17 +195,18 @@ final class PlaylistExportService {
             )
 
         case .rekordboxLibraryXML:
-            guard let outputDirectory else {
-                throw PlaylistExportError.missingOutputDirectory
+            guard let outputURL else {
+                throw PlaylistExportError.missingOutputURL
             }
-            try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-            let outputURL = outputDirectory
-                .appendingPathComponent(prepared.safeFileBaseName)
-                .appendingPathExtension(target.defaultFileExtension)
+            let resolvedOutputURL = resolvedOutputURL(outputURL, defaultExtension: target.defaultFileExtension)
+            try fileManager.createDirectory(
+                at: resolvedOutputURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
             let writtenURL = try rekordboxXMLWriter.write(
                 playlistName: prepared.playlistName,
                 tracks: prepared.tracks,
-                to: outputURL
+                to: resolvedOutputURL
             )
             return ExportJobResult(
                 outputPaths: [writtenURL.path],
@@ -212,11 +219,21 @@ final class PlaylistExportService {
             guard let cratesRoot = prepared.seratoCratesRoot else {
                 throw PlaylistExportError.seratoCratesRootUnavailable
             }
-            let subcratesPath = cratesRoot.appendingPathComponent("Subcrates", isDirectory: true).path
+            guard let outputURL else {
+                throw PlaylistExportError.missingOutputURL
+            }
+            let subcratesURL = cratesRoot.appendingPathComponent("Subcrates", isDirectory: true).standardizedFileURL
+            let resolvedOutputURL = resolvedOutputURL(outputURL, defaultExtension: target.defaultFileExtension)
+            let selectedDirectory = resolvedOutputURL.deletingLastPathComponent().standardizedFileURL
+            guard selectedDirectory.path == subcratesURL.path else {
+                throw PlaylistExportError.invalidSeratoCrateDestination(expectedDirectory: subcratesURL.path)
+            }
+            try fileManager.createDirectory(at: subcratesURL, withIntermediateDirectories: true)
             let writeResult = try seratoCrateWriter.write(
                 playlistName: prepared.playlistName,
                 tracks: prepared.tracks,
-                cratesRoot: cratesRoot
+                cratesRoot: cratesRoot,
+                crateURL: resolvedOutputURL
             )
 
             var outputPaths = [writeResult.crateURL.path]
@@ -227,9 +244,15 @@ final class PlaylistExportService {
             return ExportJobResult(
                 outputPaths: outputPaths,
                 message: "Serato crate export complete (experimental)",
-                destinationDescription: "Crate written directly to \(subcratesPath).",
+                destinationDescription: "Crate written directly to \(writeResult.crateURL.path).",
                 warnings: prepared.warnings
             )
         }
+    }
+
+    private func resolvedOutputURL(_ outputURL: URL, defaultExtension: String) -> URL {
+        let standardizedURL = outputURL.standardizedFileURL
+        guard standardizedURL.pathExtension.isEmpty else { return standardizedURL }
+        return standardizedURL.appendingPathExtension(defaultExtension)
     }
 }

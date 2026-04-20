@@ -13,18 +13,18 @@ struct SeratoCrateWriter {
     }
 
     func write(
-        playlistName: String,
+        playlistName _: String,
         tracks: [VendorExportTrack],
-        cratesRoot: URL
+        cratesRoot: URL,
+        crateURL: URL
     ) throws -> SeratoCrateWriteResult {
-        let subcratesURL = cratesRoot.appendingPathComponent("Subcrates", isDirectory: true)
+        let subcratesURL = crateURL.deletingLastPathComponent().standardizedFileURL
         try fileManager.createDirectory(at: subcratesURL, withIntermediateDirectories: true)
 
-        let crateURL = subcratesURL.appendingPathComponent(VendorPlaylistNaming.seratoCrateFileName(for: playlistName))
         let relativePaths = tracks.map { seratoRelativePath(for: $0.normalizedPath, cratesRoot: cratesRoot) }
         let payload = serializedCrateData(for: relativePaths)
 
-        let backupURL = try backupExistingCrateIfNeeded(at: crateURL, cratesRoot: cratesRoot)
+        let backupURL = try backupExistingCrateIfNeeded(at: crateURL)
         try payload.write(to: crateURL, options: .atomic)
 
         return SeratoCrateWriteResult(crateURL: crateURL, backupURL: backupURL)
@@ -59,14 +59,11 @@ struct SeratoCrateWriter {
         return standardizedPath.trimmingPrefix("/")
     }
 
-    private func backupExistingCrateIfNeeded(at crateURL: URL, cratesRoot: URL) throws -> URL? {
+    private func backupExistingCrateIfNeeded(at crateURL: URL) throws -> URL? {
         guard fileManager.fileExists(atPath: crateURL.path) else { return nil }
 
-        let backupDirectory = cratesRoot.appendingPathComponent("Export Backups", isDirectory: true)
-        try fileManager.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
-
         let timestamp = Self.backupTimestampFormatter.string(from: Date())
-        let backupURL = backupDirectory
+        let backupURL = crateURL.deletingLastPathComponent()
             .appendingPathComponent("\(crateURL.deletingPathExtension().lastPathComponent)-\(timestamp)")
             .appendingPathExtension("crate.bak")
 

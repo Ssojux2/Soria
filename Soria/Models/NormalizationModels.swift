@@ -266,9 +266,70 @@ struct AudioNormalizationQueueResult {
     let skippedLowPriorityCount: Int
 }
 
-struct ExportNormalizationConfirmationState: Equatable {
-    let playlistName: String
-    let outputURL: URL
-    let outputDirectory: URL?
-    let warnings: [String]
+struct PlaylistQueueNormalizationProgress: Equatable {
+    enum Phase: Equatable {
+        case reviewingSuggestedTracks
+        case normalizingSuggestedTracks
+        case refreshingNormalizedTracks
+    }
+
+    let phase: Phase
+    let queuedTrackCount: Int
+    let totalSuggestedTrackCount: Int
+    let completedSuggestedTrackCount: Int
+    let activeSuggestedTrackCount: Int
+    let currentTrackTitle: String?
+
+    var fractionCompleted: Double? {
+        guard totalSuggestedTrackCount > 0 else { return nil }
+        let rawValue = Double(completedSuggestedTrackCount) / Double(totalSuggestedTrackCount)
+        return min(max(rawValue, 0), 1)
+    }
+
+    var titleText: String {
+        switch phase {
+        case .reviewingSuggestedTracks:
+            return "Reviewing suggested normalization targets..."
+        case .normalizingSuggestedTracks:
+            return "Normalizing suggested tracks"
+        case .refreshingNormalizedTracks:
+            return "Refreshing normalized tracks..."
+        }
+    }
+
+    var detailText: String {
+        switch phase {
+        case .reviewingSuggestedTracks:
+            switch queuedTrackCount {
+            case 0:
+                return "Checking which queue tracks should be proposed for normalization."
+            case 1:
+                return "Checking 1 queued track for suggested normalization."
+            default:
+                return "Checking \(queuedTrackCount) queued tracks for suggested normalization."
+            }
+        case .normalizingSuggestedTracks:
+            let completed = completedSuggestedTrackCount
+            let total = max(totalSuggestedTrackCount, 1)
+            let trackSuffix: String
+            if let currentTrackTitle, !currentTrackTitle.isEmpty {
+                trackSuffix = " Current: \(currentTrackTitle)."
+            } else {
+                trackSuffix = ""
+            }
+            switch activeSuggestedTrackCount {
+            case 0:
+                return "Completed \(completed) of \(total) suggested tracks.\(trackSuffix)"
+            case 1:
+                return "Completed \(completed) of \(total) suggested tracks. 1 track is currently normalizing.\(trackSuffix)"
+            default:
+                return "Completed \(completed) of \(total) suggested tracks. \(activeSuggestedTrackCount) tracks are currently normalizing.\(trackSuffix)"
+            }
+        case .refreshingNormalizedTracks:
+            if totalSuggestedTrackCount == 1 {
+                return "Refreshing library metadata for 1 normalized track."
+            }
+            return "Refreshing library metadata for \(totalSuggestedTrackCount) normalized tracks."
+        }
+    }
 }

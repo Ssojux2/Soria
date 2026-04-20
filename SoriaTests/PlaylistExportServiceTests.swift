@@ -23,18 +23,18 @@ struct PlaylistExportServiceTests {
                 runningApplicationTokensProvider: { [] }
             )
         )
+        let outputURL = directory.appendingPathComponent("Custom Warmup Export.m3u8")
         let result = try service.export(
             playlistName: "Warmup Set",
             tracks: [trackOne, duplicateTrack, missingTrack, trackTwo],
             target: .rekordboxPlaylistM3U8,
-            outputDirectory: directory,
+            outputURL: outputURL,
             librarySources: [stubLibrarySource(kind: .rekordbox, resolvedPath: directory.path)]
         )
 
-        let playlistURL = directory.appendingPathComponent("Warmup Set.m3u8")
-        let contents = try String(contentsOf: playlistURL, encoding: .utf8)
+        let contents = try String(contentsOf: outputURL, encoding: .utf8)
 
-        #expect(result.outputPaths == [playlistURL.path])
+        #expect(result.outputPaths == [outputURL.path])
         #expect(contents.contains("#EXTM3U"))
         #expect(contents.contains(trackOneURL.path))
         #expect(contents.contains(trackTwoURL.path))
@@ -59,6 +59,7 @@ struct PlaylistExportServiceTests {
                 runningApplicationTokensProvider: { [] }
             )
         )
+        let outputURL = directory.appendingPathComponent("Exact Sunrise Export.xml")
         let result = try service.export(
             playlistName: "Festival / Day 1 / Sunrise",
             tracks: [
@@ -66,15 +67,14 @@ struct PlaylistExportServiceTests {
                 makeExportTrack(path: trackTwoURL.path, title: "Sunrise Tool", artist: "Soria", bpm: 124, musicalKey: "9A"),
             ],
             target: .rekordboxLibraryXML,
-            outputDirectory: directory,
+            outputURL: outputURL,
             librarySources: [stubLibrarySource(kind: .rekordbox, resolvedPath: directory.path)]
         )
 
-        let xmlURL = directory.appendingPathComponent("Festival - Day 1 - Sunrise.xml")
-        let xml = try String(contentsOf: xmlURL, encoding: .utf8)
-        let parsed = try RekordboxXMLParser().parse(from: xmlURL)
+        let xml = try String(contentsOf: outputURL, encoding: .utf8)
+        let parsed = try RekordboxXMLParser().parse(from: outputURL)
 
-        #expect(result.outputPaths == [xmlURL.path])
+        #expect(result.outputPaths == [outputURL.path])
         #expect(xml.contains("<PRODUCT Name=\"Soria\""))
         #expect(xml.contains("KeyType=\"1\""))
         #expect(xml.contains("Count=\"1\""))
@@ -108,7 +108,8 @@ struct PlaylistExportServiceTests {
                 VendorExportTrack(track: makeExportTrack(path: trackOneURL.path, title: "One"), normalizedPath: trackOneURL.path),
                 VendorExportTrack(track: makeExportTrack(path: trackTwoURL.path, title: "두번째"), normalizedPath: trackTwoURL.path),
             ],
-            cratesRoot: cratesRoot
+            cratesRoot: cratesRoot,
+            crateURL: existingCrateURL
         )
 
         let crateData = try Data(contentsOf: result.crateURL)
@@ -123,9 +124,58 @@ struct PlaylistExportServiceTests {
         #expect(result.crateURL.lastPathComponent == "Digging%%Warmup.crate")
         #expect(result.backupURL != nil)
         #expect(result.backupURL.flatMap { FileManager.default.fileExists(atPath: $0.path) } == true)
+        #expect(result.backupURL?.deletingLastPathComponent() == subcratesURL)
+        #expect(result.backupURL?.lastPathComponent.hasPrefix("Digging%%Warmup-") == true)
+        #expect(result.backupURL?.lastPathComponent.hasSuffix(".crate.bak") == true)
         #expect(topLevelRecords.first?.tag == "vrsn")
         #expect(trackRecords.count == 2)
         #expect(ptrkValues == ["Music/One.mp3", "Music/Sub/두번째.aiff"])
+    }
+
+    @Test func seratoCrateExportRejectsDestinationOutsideSubcrates() throws {
+        let fileManager = FileManager.default
+        let directory = try makeExportTemporaryDirectory()
+        let cratesRoot = directory.appendingPathComponent("MockSeratoRoot", isDirectory: true)
+        let subcratesURL = cratesRoot.appendingPathComponent("Subcrates", isDirectory: true)
+        let invalidOutputURL = directory.appendingPathComponent("Outside Subcrates.crate")
+        let trackURL = directory.appendingPathComponent("Tracks/Serato Candidate.mp3")
+        try fileManager.createDirectory(at: subcratesURL, withIntermediateDirectories: true)
+        try createFile(at: trackURL)
+
+        defer {
+            try? fileManager.removeItem(at: directory)
+        }
+
+        let service = PlaylistExportService(
+            preflight: VendorExportPreflight(
+                fileManager: .default,
+                runningApplicationTokensProvider: { [] }
+            )
+        )
+
+        do {
+            _ = try service.export(
+                playlistName: "Outside Subcrates",
+                tracks: [makeExportTrack(path: trackURL.path, title: "Serato Candidate")],
+                target: .seratoCrate,
+                outputURL: invalidOutputURL,
+                detectedVendorTargets: DetectedVendorTargets(
+                    rekordboxLibraryDirectory: nil,
+                    rekordboxSettingsPath: nil,
+                    seratoDatabasePath: nil,
+                    seratoCratesRoot: cratesRoot.path
+                )
+            )
+            Issue.record("Expected Serato export to reject destinations outside Subcrates.")
+        } catch let error as PlaylistExportError {
+            guard case let .invalidSeratoCrateDestination(expectedDirectory) = error else {
+                Issue.record("Unexpected export error: \(error)")
+                return
+            }
+            #expect(expectedDirectory == subcratesURL.standardizedFileURL.path)
+        } catch {
+            Issue.record("Unexpected non-export error: \(error)")
+        }
     }
 }
 
@@ -211,6 +261,7 @@ private func makeExportTemporaryDirectory() throws -> URL {
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
 }
+
 
 private func createFile(at url: URL) throws {
     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

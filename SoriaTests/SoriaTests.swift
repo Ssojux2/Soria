@@ -2489,7 +2489,7 @@ struct SoriaTests {
         #expect(result.updatedTracksByID[secondTrack.id]?.contentHash == "high-normalized")
     }
 
-    @Test func appViewModelPromptsBeforeExportWhenQueueNeedsNormalization() async throws {
+    @Test func appViewModelExportsImmediatelyWhenQueueNeedsNormalization() async throws {
         let directory = try makeTemporaryDirectory()
         let trackURL = directory.appendingPathComponent("Needs Normalize.wav")
         try writeTestWAV(to: trackURL)
@@ -2509,7 +2509,7 @@ struct SoriaTests {
                 detailMessage: nil
             ),
             normalizeHandler: { _, _ in
-                Issue.record("Normalization should not run during export review.")
+                Issue.record("Normalization should not run during export.")
                 throw NSError(domain: "SoriaTests", code: 9)
             }
         )
@@ -2517,7 +2517,7 @@ struct SoriaTests {
             worker: worker,
             fileManager: .default,
             trackRefresher: { _ in
-                Issue.record("Track refresh should not run during export review.")
+                Issue.record("Track refresh should not run during export.")
                 throw NSError(domain: "SoriaTests", code: 10)
             }
         )
@@ -2532,9 +2532,11 @@ struct SoriaTests {
         let exportURL = directory.appendingPathComponent("Test Playlist.m3u8")
         await viewModel.beginExport(to: exportURL)
 
-        #expect(viewModel.exportNormalizationConfirmationState?.playlistName == "Test Playlist")
-        #expect(viewModel.exportNormalizationConfirmationState?.warnings.count == 1)
-        #expect(viewModel.exportNormalizationConfirmationState?.warnings.first?.contains(track.fileName) == true)
+        #expect(await waitUntil(timeoutNanoseconds: 2_000_000_000) {
+            FileManager.default.fileExists(atPath: exportURL.path)
+        })
+        #expect(viewModel.exportWarnings.allSatisfy { !$0.localizedCaseInsensitiveContains("normalize") })
+        #expect(viewModel.exportMessage.contains("export complete"))
     }
 
     @Test func appViewModelAllowsExportWhenQueueOnlyHasLowPriorityNormalization() async throws {
@@ -2557,7 +2559,7 @@ struct SoriaTests {
                 detailMessage: nil
             ),
             normalizeHandler: { _, _ in
-                Issue.record("Low-priority export review should not normalize the queue.")
+                Issue.record("Low-priority export should not normalize the queue.")
                 throw NSError(domain: "SoriaTests", code: 14)
             }
         )
@@ -2565,7 +2567,7 @@ struct SoriaTests {
             worker: worker,
             fileManager: .default,
             trackRefresher: { _ in
-                Issue.record("Export review should not refresh tracks.")
+                Issue.record("Export should not refresh tracks.")
                 throw NSError(domain: "SoriaTests", code: 15)
             }
         )
@@ -2580,9 +2582,185 @@ struct SoriaTests {
         let exportURL = directory.appendingPathComponent("Low Priority Playlist.m3u8")
         await viewModel.beginExport(to: exportURL)
 
-        #expect(viewModel.exportNormalizationConfirmationState == nil)
+        #expect(await waitUntil(timeoutNanoseconds: 2_000_000_000) {
+            FileManager.default.fileExists(atPath: exportURL.path)
+        })
         #expect(viewModel.exportWarnings.allSatisfy { !$0.localizedCaseInsensitiveContains("normalize") })
         #expect(viewModel.exportMessage.contains("export complete"))
+    }
+
+    @Test func appViewModelExportsSeratoUsingSelectedOutputURLWithoutNormalizationReview() async throws {
+        let fileManager = FileManager.default
+        let directory = try makeTemporaryDirectory()
+        let cratesRoot = directory.appendingPathComponent("MockSeratoRoot", isDirectory: true)
+        let subcratesURL = cratesRoot.appendingPathComponent("Subcrates", isDirectory: true)
+        try fileManager.createDirectory(at: subcratesURL, withIntermediateDirectories: true)
+
+        let trackDirectory = directory.appendingPathComponent("Tracks", isDirectory: true)
+        try fileManager.createDirectory(at: trackDirectory, withIntermediateDirectories: true)
+        let trackURL = trackDirectory.appendingPathComponent("Needs Normalize Serato.wav")
+        try writeTestWAV(to: trackURL)
+
+        let exportURL = subcratesURL.appendingPathComponent("Soria Test \(UUID().uuidString).crate")
+        defer {
+            try? fileManager.removeItem(at: directory)
+        }
+
+        let worker = StubNormalizationWorker(
+            inspectionResult: WorkerNormalizationInspectionResponse(
+                state: .needsNormalize,
+                peakAmplitude: 0.42,
+                formatName: "WAV",
+                subtype: "PCM_16",
+                endian: "FILE",
+                sampleRate: 22_050,
+                channelCount: 1,
+                frameCount: 22_050,
+                hasMetadata: false,
+                isLossy: false,
+                detailMessage: nil
+            ),
+            normalizeHandler: { _, _ in
+                Issue.record("Normalization should not run during export.")
+                throw NSError(domain: "SoriaTests", code: 18)
+            }
+        )
+        let normalizationService = AudioNormalizationService(
+            worker: worker,
+            fileManager: .default,
+            trackRefresher: { _ in
+                Issue.record("Track refresh should not run during export.")
+                throw NSError(domain: "SoriaTests", code: 19)
+            }
+        )
+        let exporter = PlaylistExportService(
+            preflight: VendorExportPreflight(
+                fileManager: .default,
+                runningApplicationTokensProvider: { [] }
+            )
+        )
+
+        let viewModel = AppViewModel(
+            skipAsyncBootstrap: true,
+            exporter: exporter,
+            audioNormalizationService: normalizationService,
+            initialDetectedVendorTargets: DetectedVendorTargets(
+                rekordboxLibraryDirectory: nil,
+                rekordboxSettingsPath: nil,
+                seratoDatabasePath: nil,
+                seratoCratesRoot: cratesRoot.path
+            )
+        )
+        viewModel.selectedExportTarget = .seratoCrate
+        let track = makeTrack(path: TrackPathNormalizer.normalizedAbsolutePath(trackURL), title: "Needs Normalize Serato")
+        viewModel.playlistTracks = [track]
+
+        await viewModel.beginExport(to: exportURL)
+
+        #expect(await waitUntil(timeoutNanoseconds: 2_000_000_000) {
+            fileManager.fileExists(atPath: exportURL.path)
+        })
+        #expect(viewModel.exportMessage.contains("Serato crate export complete"))
+        #expect(viewModel.exportMessage.contains(exportURL.path))
+    }
+
+    @Test func appViewModelNormalizesOnlySuggestedTracksAndTracksSuggestedProgress() async throws {
+        let directory = try makeTemporaryDirectory()
+        let lowURL = directory.appendingPathComponent("Low Suggested.wav")
+        let mediumURL = directory.appendingPathComponent("Medium Suggested.wav")
+        try writeTestWAV(to: lowURL)
+        try writeTestWAV(to: mediumURL)
+
+        let lowTrack = makeTrack(path: TrackPathNormalizer.normalizedAbsolutePath(lowURL), title: "Low Suggested")
+        let mediumTrack = makeTrack(path: TrackPathNormalizer.normalizedAbsolutePath(mediumURL), title: "Medium Suggested")
+        let recorder = NormalizationExecutionRecorder()
+
+        let worker = PathAwareStubNormalizationWorker(
+            inspectByPath: [
+                lowTrack.filePath: WorkerNormalizationInspectionResponse(
+                    state: .needsNormalize,
+                    peakAmplitude: 0.95,
+                    formatName: "WAV",
+                    subtype: "PCM_16",
+                    endian: "FILE",
+                    sampleRate: 22_050,
+                    channelCount: 1,
+                    frameCount: 22_050,
+                    hasMetadata: false,
+                    isLossy: false,
+                    detailMessage: nil
+                ),
+                mediumTrack.filePath: WorkerNormalizationInspectionResponse(
+                    state: .needsNormalize,
+                    peakAmplitude: 0.85,
+                    formatName: "WAV",
+                    subtype: "PCM_16",
+                    endian: "FILE",
+                    sampleRate: 22_050,
+                    channelCount: 1,
+                    frameCount: 22_050,
+                    hasMetadata: false,
+                    isLossy: false,
+                    detailMessage: nil
+                )
+            ],
+            normalizeHandler: { inputPath, outputPath in
+                await recorder.normalizationStarted(for: inputPath)
+                try await Task.sleep(nanoseconds: 80_000_000)
+                try FileManager.default.copyItem(atPath: inputPath, toPath: outputPath)
+                await recorder.normalizationFinished(for: inputPath)
+                return WorkerNormalizationResultResponse(
+                    state: .ready,
+                    originalPeakAmplitude: inputPath == mediumTrack.filePath ? 0.85 : 0.95,
+                    normalizedPeakAmplitude: 1.0,
+                    appliedGain: 2.0,
+                    didNormalize: true,
+                    outputPath: outputPath,
+                    formatName: "WAV",
+                    subtype: "PCM_16",
+                    endian: "FILE",
+                    sampleRate: 22_050,
+                    channelCount: 1,
+                    frameCount: 22_050,
+                    hasMetadata: false,
+                    isLossy: false,
+                    detailMessage: nil
+                )
+            }
+        )
+
+        let normalizationService = AudioNormalizationService(
+            worker: worker,
+            fileManager: .default,
+            trackRefresher: { url in
+                await recorder.recordRefresh(for: url.path)
+                return url.path == mediumTrack.filePath ? mediumTrack : lowTrack
+            }
+        )
+
+        let viewModel = AppViewModel(
+            skipAsyncBootstrap: true,
+            audioNormalizationService: normalizationService
+        )
+        viewModel.playlistTracks = [lowTrack, mediumTrack]
+
+        viewModel.normalizePlaylistQueue()
+
+        #expect(await waitUntil(timeoutNanoseconds: 1_000_000_000) {
+            viewModel.playlistQueueNormalizationProgress?.phase == .normalizingSuggestedTracks
+        })
+        #expect(viewModel.playlistQueueNormalizationProgress?.totalSuggestedTrackCount == 1)
+        #expect(viewModel.playlistSuggestedNormalizationTrackCount == 1)
+        #expect(viewModel.normalizePlaylistQueueButtonTitle == "Normalize Suggested")
+
+        #expect(await waitUntil(timeoutNanoseconds: 2_000_000_000) {
+            !viewModel.isNormalizingPlaylistQueue
+        })
+        #expect(viewModel.playlistQueueNormalizationProgress == nil)
+        #expect(viewModel.exportMessage.contains("Normalized 1 suggested track"))
+        let snapshot = await recorder.snapshot()
+        #expect(snapshot.maxConcurrentNormalizations == 1)
+        #expect(snapshot.refreshedPaths == [mediumTrack.filePath])
     }
 }
 
@@ -2631,6 +2809,21 @@ private actor NormalizationExecutionRecorder {
     func snapshot() -> (maxConcurrentNormalizations: Int, refreshedPaths: [String]) {
         (maxConcurrentNormalizations, refreshedPaths)
     }
+}
+
+private func waitUntil(
+    timeoutNanoseconds: UInt64 = 1_000_000_000,
+    pollIntervalNanoseconds: UInt64 = 10_000_000,
+    condition: @escaping @MainActor () -> Bool
+) async -> Bool {
+    let deadline = ContinuousClock.now + .nanoseconds(Int64(timeoutNanoseconds))
+    while ContinuousClock.now < deadline {
+        if await condition() {
+            return true
+        }
+        try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+    }
+    return await condition()
 }
 
 private struct StubNormalizationWorker: AudioNormalizationWorkering {

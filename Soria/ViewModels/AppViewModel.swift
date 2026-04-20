@@ -204,7 +204,7 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var normalizingPlaylistTrackIDs: Set<UUID> = []
     @Published private(set) var isInspectingPlaylistNormalization = false
     @Published private(set) var isNormalizingPlaylistQueue = false
-    @Published var exportNormalizationConfirmationState: ExportNormalizationConfirmationState?
+    @Published private(set) var playlistQueueNormalizationProgress: PlaylistQueueNormalizationProgress?
     @Published var weights = RecommendationWeights() {
         didSet {
             guard weights != oldValue else { return }
@@ -316,6 +316,8 @@ final class AppViewModel: ObservableObject {
     private var lastInteractiveSeekNormalizedPosition: Double?
     private var isDispatchingInteractiveSeek = false
     private var recommendationGenerationStub: RecommendationGenerationStub?
+    private var playlistQueueNormalizationSuggestedTrackIDs: Set<UUID> = []
+    private var playlistQueueNormalizationCompletedTrackIDs: Set<UUID> = []
     private let workerTimeoutSec = PythonWorkerClient.defaultWorkerTimeoutSec
     private let analysisWatchdogDelaySec =
         max(Double(ProcessInfo.processInfo.environment["SORIA_ANALYSIS_WATCHDOG_SEC"] ?? "") ?? 12, 5)
@@ -357,7 +359,8 @@ final class AppViewModel: ObservableObject {
         libraryPreviewInteractiveSeekDispatchIntervalSec: Double = 0.03,
         libraryPreviewWaveformBackfillDelaySec: Double = 0.35,
         exporter: PlaylistExportService? = nil,
-        audioNormalizationService: AudioNormalizationService? = nil
+        audioNormalizationService: AudioNormalizationService? = nil,
+        initialDetectedVendorTargets: DetectedVendorTargets? = nil
     ) {
         AppPaths.ensureDirectories()
         let processInfo = ProcessInfo.processInfo
@@ -373,6 +376,7 @@ final class AppViewModel: ObservableObject {
         self.libraryPreviewPlayer = libraryPreviewPlayer ?? (uiTestLibraryState == nil
             ? LibraryPreviewPlayer()
             : UITestLibraryPreviewPlayer())
+        self.detectedVendorTargets = initialDetectedVendorTargets ?? DetectedVendorTargets()
 
         if processArguments.contains(Self.uiTestMixAssistantArgument) {
             selectedSection = .mixAssistant
@@ -416,7 +420,9 @@ final class AppViewModel: ObservableObject {
         }
 
         persistFolderFallbackSource()
-        refreshDetectedVendorTargets()
+        if initialDetectedVendorTargets == nil {
+            refreshDetectedVendorTargets()
+        }
 
         if let uiTestLibraryState {
             applyUITestLibraryState(uiTestLibraryState)
@@ -483,19 +489,27 @@ final class AppViewModel: ObservableObject {
     }
 
     var canNormalizePlaylistQueue: Bool {
-        !playlistTracks.isEmpty && !isNormalizingPlaylistQueue
+        guard !playlistTracks.isEmpty, !isNormalizingPlaylistQueue else { return false }
+        if playlistSuggestedNormalizationTrackCount > 0 {
+            return true
+        }
+        return playlistTracks.contains { playlistNormalizationInspection(for: $0) == nil }
     }
 
     var canClearPlaylistQueue: Bool {
         !playlistTracks.isEmpty && !isNormalizingPlaylistQueue
     }
 
-    var exportNormalizationWarningSummaryText: String {
-        guard let state = exportNormalizationConfirmationState else { return "" }
-        if state.warnings.count == 1 {
-            return state.warnings[0]
+    var normalizePlaylistQueueButtonTitle: String {
+        "Normalize Suggested"
+    }
+
+    var playlistSuggestedNormalizationTrackCount: Int {
+        playlistTracks.reduce(into: 0) { partialResult, track in
+            if playlistNormalizationInspection(for: track)?.shouldNormalizeInQueue == true {
+                partialResult += 1
+            }
         }
-        return state.warnings.joined(separator: "\n")
     }
 
     func playlistNormalizationInspection(for track: Track) -> TrackNormalizationInspection? {
@@ -3811,11 +3825,11 @@ final class AppViewModel: ObservableObject {
 
         playlistNormalizationInspectionTask?.cancel()
         playlistQueueNormalizationTask?.cancel()
-        exportNormalizationConfirmationState = nil
         exportWarnings = []
         exportDestinationDescription = ""
-        exportMessage = "Normalizing playlist queue..."
+        exportMessage = "Reviewing suggested playlist normalization..."
         isNormalizingPlaylistQueue = true
+        beginReviewingPlaylistQueueNormalization(queuedTrackCount: playlistTracks.count)
 
         let queueSnapshot = playlistTracks
         playlistQueueNormalizationTask = Task { [weak self] in
@@ -3824,9 +3838,21 @@ final class AppViewModel: ObservableObject {
 
             let initialInspections = await viewModel.refreshPlaylistNormalizationInspections(force: true)
             viewModel.applyPlaylistNormalizationInspections(initialInspections)
+            let suggestedTracks = queueSnapshot.filter { track in
+                initialInspections[track.id]?.shouldNormalizeInQueue == true
+            }
+            viewModel.beginNormalizingSuggestedPlaylistTracks(suggestedTracks)
+
+            guard !suggestedTracks.isEmpty else {
+                viewModel.clearPlaylistQueueNormalizationRuntimeState(resetProgress: true)
+                viewModel.exportMessage = "No suggested tracks required normalization."
+                viewModel.exportWarnings = []
+                viewModel.exportDestinationDescription = ""
+                return
+            }
 
             let result = await viewModel.audioNormalizationService.normalizeQueuedTracks(
-                queueSnapshot,
+                suggestedTracks,
                 preparedInspections: initialInspections,
                 maxConcurrent: 2
             ) { track, state in
@@ -3836,16 +3862,13 @@ final class AppViewModel: ObservableObject {
             }
 
             if !result.updatedTracksByID.isEmpty {
+                viewModel.transitionPlaylistQueueNormalizationToRefreshing()
                 await viewModel.refreshTracks()
             }
 
             viewModel.replacePlaylistQueueTracks(using: result.updatedTracksByID)
             viewModel.applyPlaylistNormalizationInspections(result.inspectionsByTrackID)
-            viewModel.normalizingPlaylistTrackIDs.removeAll()
-            viewModel.playlistNormalizationInspectingTrackIDs.removeAll()
-            viewModel.isInspectingPlaylistNormalization = false
-            viewModel.isNormalizingPlaylistQueue = false
-            viewModel.playlistQueueNormalizationTask = nil
+            viewModel.clearPlaylistQueueNormalizationRuntimeState(resetProgress: true)
 
             viewModel.exportMessage = viewModel.playlistQueueNormalizationMessage(
                 normalizedCount: result.normalizedCount,
@@ -3885,47 +3908,22 @@ final class AppViewModel: ObservableObject {
 
         exportWarnings = []
         exportDestinationDescription = ""
-        exportNormalizationConfirmationState = nil
-        exportMessage = "Reviewing queue normalization before export..."
+        exportMessage = "Preparing export..."
         playlistNormalizationInspectionTask?.cancel()
         playlistNormalizationInspectionTask = nil
 
         let playlistName = url.deletingPathExtension().lastPathComponent
-        let outputDirectory = selectedExportTarget.requiresExplicitOutputDirectory ? url.deletingLastPathComponent() : nil
-        let inspections = await refreshPlaylistNormalizationInspections(force: true)
-        let normalizationWarnings = exportNormalizationWarnings(for: playlistTracks, inspections: inspections)
-
-        if !normalizationWarnings.isEmpty {
-            exportNormalizationConfirmationState = ExportNormalizationConfirmationState(
-                playlistName: playlistName,
-                outputURL: url,
-                outputDirectory: outputDirectory,
-                warnings: normalizationWarnings
-            )
-            exportMessage = "Normalization review needed before export."
+        do {
+            try validateSelectedExportDestination(url)
+        } catch {
+            exportMessage = "Export failed: \(error.localizedDescription)"
             return
         }
 
         await performExport(
             playlistName: playlistName,
-            outputDirectory: outputDirectory
+            outputURL: url
         )
-    }
-
-    func continuePendingExportAfterNormalizationWarning() {
-        guard let state = exportNormalizationConfirmationState else { return }
-        exportNormalizationConfirmationState = nil
-
-        Task {
-            await performExport(
-                playlistName: state.playlistName,
-                outputDirectory: state.outputDirectory
-            )
-        }
-    }
-
-    func cancelPendingExportNormalizationWarning() {
-        exportNormalizationConfirmationState = nil
     }
 
     private func configuredExportSavePanel() -> NSSavePanel {
@@ -3956,15 +3954,21 @@ final class AppViewModel: ObservableObject {
 
     private func performExport(
         playlistName: String,
-        outputDirectory: URL?
+        outputURL: URL
     ) async {
+        let scopedURLs = beginSecurityScopedAccess(for: outputURL)
+        defer {
+            endSecurityScopedAccess(scopedURLs)
+        }
+
         do {
             let result = try exporter.export(
                 playlistName: playlistName,
                 tracks: playlistTracks,
                 target: selectedExportTarget,
-                outputDirectory: outputDirectory,
-                librarySources: librarySources
+                outputURL: outputURL,
+                librarySources: librarySources,
+                detectedVendorTargets: detectedVendorTargets
             )
             exportDestinationDescription = result.destinationDescription
             exportWarnings = result.warnings
@@ -3977,9 +3981,42 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func handlePlaylistQueueChanged() {
-        exportNormalizationConfirmationState = nil
+    private func validateSelectedExportDestination(_ outputURL: URL) throws {
+        guard selectedExportTarget == .seratoCrate else { return }
+        guard let cratesRootPath = detectedVendorTargets.seratoCratesRoot else {
+            throw PlaylistExportError.seratoCratesRootUnavailable
+        }
 
+        let expectedDirectory = URL(fileURLWithPath: cratesRootPath, isDirectory: true)
+            .appendingPathComponent("Subcrates", isDirectory: true)
+            .standardizedFileURL
+        let selectedDirectory = outputURL.standardizedFileURL.deletingLastPathComponent().standardizedFileURL
+        guard selectedDirectory.path == expectedDirectory.path else {
+            throw PlaylistExportError.invalidSeratoCrateDestination(expectedDirectory: expectedDirectory.path)
+        }
+    }
+
+    private func beginSecurityScopedAccess(for outputURL: URL) -> [URL] {
+        let candidateURLs = [outputURL.standardizedFileURL, outputURL.standardizedFileURL.deletingLastPathComponent()]
+        var startedURLs: [URL] = []
+        var seenPaths = Set<String>()
+
+        for url in candidateURLs where seenPaths.insert(url.path).inserted {
+            if url.startAccessingSecurityScopedResource() {
+                startedURLs.append(url)
+            }
+        }
+
+        return startedURLs
+    }
+
+    private func endSecurityScopedAccess(_ scopedURLs: [URL]) {
+        for url in scopedURLs.reversed() {
+            url.stopAccessingSecurityScopedResource()
+        }
+    }
+
+    private func handlePlaylistQueueChanged() {
         let trackByID = Dictionary(uniqueKeysWithValues: playlistTracks.map { ($0.id, $0) })
         playlistNormalizationInspectionsByTrackID = playlistNormalizationInspectionsByTrackID.filter { trackID, inspection in
             guard let track = trackByID[trackID] else { return false }
@@ -3994,10 +4031,12 @@ final class AppViewModel: ObservableObject {
             playlistNormalizationInspectingTrackIDs.removeAll()
             normalizingPlaylistTrackIDs.removeAll()
             isInspectingPlaylistNormalization = false
+            clearPlaylistQueueNormalizationRuntimeState(resetProgress: true)
             return
         }
 
         guard !isNormalizingPlaylistQueue else { return }
+        playlistQueueNormalizationProgress = nil
         if selectedSection == .exports {
             schedulePlaylistNormalizationInspection(force: false)
         }
@@ -4077,6 +4116,74 @@ final class AppViewModel: ObservableObject {
         default:
             normalizingPlaylistTrackIDs.remove(track.id)
         }
+
+        guard playlistQueueNormalizationSuggestedTrackIDs.contains(track.id) else { return }
+        guard let progress = playlistQueueNormalizationProgress else { return }
+        guard progress.phase == .normalizingSuggestedTracks else { return }
+
+        if state != .normalizing {
+            playlistQueueNormalizationCompletedTrackIDs.insert(track.id)
+        }
+
+        playlistQueueNormalizationProgress = PlaylistQueueNormalizationProgress(
+            phase: .normalizingSuggestedTracks,
+            queuedTrackCount: progress.queuedTrackCount,
+            totalSuggestedTrackCount: progress.totalSuggestedTrackCount,
+            completedSuggestedTrackCount: playlistQueueNormalizationCompletedTrackIDs.count,
+            activeSuggestedTrackCount: normalizingPlaylistTrackIDs.intersection(playlistQueueNormalizationSuggestedTrackIDs).count,
+            currentTrackTitle: track.title
+        )
+    }
+
+    private func beginReviewingPlaylistQueueNormalization(queuedTrackCount: Int) {
+        playlistQueueNormalizationSuggestedTrackIDs = []
+        playlistQueueNormalizationCompletedTrackIDs = []
+        playlistQueueNormalizationProgress = PlaylistQueueNormalizationProgress(
+            phase: .reviewingSuggestedTracks,
+            queuedTrackCount: queuedTrackCount,
+            totalSuggestedTrackCount: 0,
+            completedSuggestedTrackCount: 0,
+            activeSuggestedTrackCount: 0,
+            currentTrackTitle: nil
+        )
+    }
+
+    private func beginNormalizingSuggestedPlaylistTracks(_ tracks: [Track]) {
+        playlistQueueNormalizationSuggestedTrackIDs = Set(tracks.map(\.id))
+        playlistQueueNormalizationCompletedTrackIDs = []
+        playlistQueueNormalizationProgress = PlaylistQueueNormalizationProgress(
+            phase: .normalizingSuggestedTracks,
+            queuedTrackCount: playlistTracks.count,
+            totalSuggestedTrackCount: tracks.count,
+            completedSuggestedTrackCount: 0,
+            activeSuggestedTrackCount: 0,
+            currentTrackTitle: tracks.first?.title
+        )
+    }
+
+    private func transitionPlaylistQueueNormalizationToRefreshing() {
+        guard let progress = playlistQueueNormalizationProgress else { return }
+        playlistQueueNormalizationProgress = PlaylistQueueNormalizationProgress(
+            phase: .refreshingNormalizedTracks,
+            queuedTrackCount: progress.queuedTrackCount,
+            totalSuggestedTrackCount: max(progress.totalSuggestedTrackCount, playlistQueueNormalizationCompletedTrackIDs.count),
+            completedSuggestedTrackCount: playlistQueueNormalizationCompletedTrackIDs.count,
+            activeSuggestedTrackCount: 0,
+            currentTrackTitle: nil
+        )
+    }
+
+    private func clearPlaylistQueueNormalizationRuntimeState(resetProgress: Bool) {
+        normalizingPlaylistTrackIDs.removeAll()
+        playlistNormalizationInspectingTrackIDs.removeAll()
+        isInspectingPlaylistNormalization = false
+        isNormalizingPlaylistQueue = false
+        playlistQueueNormalizationTask = nil
+        playlistQueueNormalizationSuggestedTrackIDs = []
+        playlistQueueNormalizationCompletedTrackIDs = []
+        if resetProgress {
+            playlistQueueNormalizationProgress = nil
+        }
     }
 
     private func replacePlaylistQueueTracks(using preferredTracksByID: [UUID: Track]) {
@@ -4099,67 +4206,29 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func exportNormalizationWarnings(
-        for queueTracks: [Track],
-        inspections: [UUID: TrackNormalizationInspection]
-    ) -> [String] {
-        queueTracks.compactMap { track in
-            guard let inspection = inspections[track.id], inspection.matches(track) else {
-                return "Normalization status for \(track.fileName) could not be confirmed."
-            }
-
-            guard inspection.needsExportAttention else {
-                return nil
-            }
-
-            switch inspection.effectiveQueueState {
-            case .needsNormalize:
-                if let needTier = inspection.needTier {
-                    let priorityLabel = needTier == .high ? "high-priority" : "queue"
-                    if let peakAmplitude = inspection.peakAmplitude {
-                        let peakLabel = inspection.isLossy ? "decoded peak" : "sample peak"
-                        return "\(track.fileName) still needs \(priorityLabel) normalization (\(peakLabel) \(String(format: "%.4f", peakAmplitude)))."
-                    }
-                    return "\(track.fileName) still needs \(priorityLabel) normalization."
-                }
-                if let peakAmplitude = inspection.peakAmplitude {
-                    let peakLabel = inspection.isLossy ? "decoded peak" : "sample peak"
-                    return "\(track.fileName) still needs normalization (\(peakLabel) \(String(format: "%.4f", peakAmplitude)))."
-                }
-                return "\(track.fileName) still needs normalization."
-            case .unsupported:
-                return "\(track.fileName) uses an unsupported normalization path. \(inspection.detailMessage ?? "")".trimmingCharacters(in: .whitespacesAndNewlines)
-            case .failed:
-                return "\(track.fileName) could not be inspected safely. \(inspection.detailMessage ?? "")".trimmingCharacters(in: .whitespacesAndNewlines)
-            case .ready, .normalizing, .silent:
-                return nil
-            }
-        }
-    }
-
     private func playlistQueueNormalizationMessage(
         normalizedCount: Int,
         skippedLowPriorityCount: Int
     ) -> String {
         switch (normalizedCount, skippedLowPriorityCount) {
         case (0, 0):
-            return "Playlist queue did not require normalization."
+            return "No suggested tracks required normalization."
         case (0, 1):
-            return "Skipped 1 low-priority track. Playlist queue did not require automatic normalization."
+            return "Skipped 1 low-priority track. No suggested tracks required normalization."
         case (0, _):
-            return "Skipped \(skippedLowPriorityCount) low-priority tracks. Playlist queue did not require automatic normalization."
+            return "Skipped \(skippedLowPriorityCount) low-priority tracks. No suggested tracks required normalization."
         case (1, 0):
-            return "Normalized 1 track in the playlist queue."
+            return "Normalized 1 suggested track in the playlist queue."
         case (1, 1):
-            return "Normalized 1 track and skipped 1 low-priority track in the playlist queue."
+            return "Normalized 1 suggested track and skipped 1 low-priority track in the playlist queue."
         case (1, _):
-            return "Normalized 1 track and skipped \(skippedLowPriorityCount) low-priority tracks in the playlist queue."
+            return "Normalized 1 suggested track and skipped \(skippedLowPriorityCount) low-priority tracks in the playlist queue."
         case (_, 0):
-            return "Normalized \(normalizedCount) tracks in the playlist queue."
+            return "Normalized \(normalizedCount) suggested tracks in the playlist queue."
         case (_, 1):
-            return "Normalized \(normalizedCount) tracks and skipped 1 low-priority track in the playlist queue."
+            return "Normalized \(normalizedCount) suggested tracks and skipped 1 low-priority track in the playlist queue."
         default:
-            return "Normalized \(normalizedCount) tracks and skipped \(skippedLowPriorityCount) low-priority tracks in the playlist queue."
+            return "Normalized \(normalizedCount) suggested tracks and skipped \(skippedLowPriorityCount) low-priority tracks in the playlist queue."
         }
     }
 
