@@ -21,17 +21,18 @@ struct SoriaTests {
         #expect(loaded == "ui-test-key")
     }
 
-    @Test func appSettingsPreferBundledWorkerRuntimeForProtectedLegacyPath() {
-        let bundledPath = "/tmp/Soria.app/Contents/Resources/analysis-worker/.venv/bin/python"
-        let legacyPath = "\(NSHomeDirectory())/Documents/BluePenguin/Soriga/Soria/analysis-worker/.venv/bin/python"
+    @Test func appSettingsPreferDetectedProjectRuntimeOverStoredBundlePath() {
+        let bundledPath = "/tmp/Current.app/Contents/Resources/analysis-worker/.venv/bin/python"
+        let staleBundlePath = "/tmp/Old.app/Contents/Resources/analysis-worker/.venv/bin/python"
+        let detectedProjectPath = "\(NSHomeDirectory())/Documents/BluePenguin/Soriga/Soria/analysis-worker/.venv/bin/python"
 
         let resolved = AppSettingsStore.resolvedWorkerRuntimePath(
-            storedValue: legacyPath,
+            storedValue: staleBundlePath,
             bundledPath: bundledPath,
-            detectedProjectPath: legacyPath
+            detectedProjectPath: detectedProjectPath
         )
 
-        #expect(resolved == bundledPath)
+        #expect(resolved == detectedProjectPath)
     }
 
     @Test func appSettingsKeepCustomWorkerRuntimeOutsideProtectedFolders() throws {
@@ -51,6 +52,19 @@ struct SoriaTests {
         #expect(resolved == customFile.path)
     }
 
+    @Test func appSettingsFallbackToCurrentBundleWhenProjectRuntimeIsUnavailable() {
+        let staleBundlePath = "/tmp/Old.app/Contents/Resources/analysis-worker/main.py"
+        let currentBundlePath = "/tmp/Current.app/Contents/Resources/analysis-worker/main.py"
+
+        let resolved = AppSettingsStore.resolvedWorkerRuntimePath(
+            storedValue: staleBundlePath,
+            bundledPath: currentBundlePath,
+            detectedProjectPath: nil
+        )
+
+        #expect(resolved == currentBundlePath)
+    }
+
     @Test func bundleAnalysisWorkerBuildPhaseAlwaysRuns() throws {
         let projectFile = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -68,6 +82,7 @@ struct SoriaTests {
 
         let block = String(contents[start.lowerBound..<end.upperBound])
         #expect(block.contains("alwaysOutOfDate = 1;"))
+        #expect(!block.contains("analysis-worker/.venv/pyvenv.cfg"))
     }
 
     @Test func recommendationRankingPrefersCloserBPMAndKey() {
@@ -1991,6 +2006,659 @@ struct SoriaTests {
 
         #expect(scannedTracks.count == 1)
         #expect(scannedTracks.first?.filePath == normalizedPath)
+    }
+
+    @Test func libraryScannerRefreshTrackClearsAnalysisAndWaveformCacheForChangedFile() async throws {
+        let directory = try makeTemporaryDirectory()
+        let trackURL = directory.appendingPathComponent("Refresh Track.wav")
+        try writeTestWAV(to: trackURL, frequency: 330)
+
+        let normalizedPath = TrackPathNormalizer.normalizedAbsolutePath(trackURL)
+        let originalModified = try #require(
+            FileManager.default.attributesOfItem(atPath: trackURL.path)[.modificationDate] as? Date
+        )
+
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let database = try LibraryDatabase(databaseURL: databaseURL)
+        let invalidatedTracks = InvalidatedTracksRecorder()
+        let scanner = LibraryScannerService(database: database) { track in
+            await invalidatedTracks.record(track.id)
+        }
+
+        let track = Track(
+            id: UUID(),
+            filePath: normalizedPath,
+            fileName: trackURL.lastPathComponent,
+            title: "Before Normalize",
+            artist: "Soria",
+            album: "",
+            genre: "",
+            duration: 42,
+            sampleRate: 22_050,
+            bpm: 123,
+            musicalKey: "8A",
+            modifiedTime: originalModified,
+            contentHash: FileHashingService.contentHash(for: trackURL),
+            analyzedAt: Date(timeIntervalSince1970: 999),
+            embeddingProfileID: "profile",
+            embeddingPipelineID: EmbeddingPipeline.audioSegmentsV1.id,
+            embeddingUpdatedAt: Date(timeIntervalSince1970: 999),
+            hasSeratoMetadata: false,
+            hasRekordboxMetadata: false,
+            bpmSource: .soriaAnalysis,
+            keySource: .soriaAnalysis,
+            lastSeenInLocalScanAt: Date(timeIntervalSince1970: 500)
+        )
+        try database.upsertTrack(track)
+        try database.replaceSegments(
+            trackID: track.id,
+            segments: [],
+            analysisSummary: makeSummary(trackID: track.id)
+        )
+        try database.replaceWaveformCache(
+            trackID: track.id,
+            waveformEnvelope: TrackWaveformEnvelope(
+                durationSec: 42,
+                upperPeaks: [0.4, 0.2],
+                lowerPeaks: [-0.4, -0.2]
+            )
+        )
+
+        try writeTestWAV(to: trackURL, frequency: 660)
+        try FileManager.default.setAttributes(
+            [.modificationDate: originalModified.addingTimeInterval(30)],
+            ofItemAtPath: trackURL.path
+        )
+
+        let refreshed = try await scanner.refreshTrack(at: trackURL)
+
+        #expect(refreshed.id == track.id)
+        #expect(refreshed.analyzedAt == nil)
+        #expect(refreshed.embeddingProfileID == nil)
+        #expect(refreshed.embeddingPipelineID == nil)
+        #expect(refreshed.embeddingUpdatedAt == nil)
+        #expect(refreshed.bpm == nil)
+        #expect(refreshed.musicalKey == nil)
+        #expect(refreshed.bpmSource == nil)
+        #expect(refreshed.keySource == nil)
+        #expect(try database.fetchAnalysisSummary(trackID: track.id) == nil)
+        #expect((try database.fetchSegments(trackID: track.id)).isEmpty)
+        #expect(try database.fetchWaveformCache(trackID: track.id) == nil)
+        #expect(await invalidatedTracks.snapshot() == [track.id])
+    }
+
+    @Test func audioNormalizationServiceKeepsBackupWhenTrashMoveFails() async throws {
+        let directory = try makeTemporaryDirectory()
+        let trackURL = directory.appendingPathComponent("Normalize Me.wav")
+        try writeTestWAV(to: trackURL)
+
+        let originalTrack = makeTrack(path: TrackPathNormalizer.normalizedAbsolutePath(trackURL), title: "Normalize Me")
+        let updatedTrack = Track(
+            id: originalTrack.id,
+            filePath: originalTrack.filePath,
+            fileName: originalTrack.fileName,
+            title: originalTrack.title,
+            artist: originalTrack.artist,
+            album: originalTrack.album,
+            genre: originalTrack.genre,
+            duration: originalTrack.duration,
+            sampleRate: originalTrack.sampleRate,
+            bpm: originalTrack.bpm,
+            musicalKey: originalTrack.musicalKey,
+            modifiedTime: Date().addingTimeInterval(10),
+            contentHash: "normalized-hash",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingPipelineID: nil,
+            embeddingUpdatedAt: nil,
+            hasSeratoMetadata: originalTrack.hasSeratoMetadata,
+            hasRekordboxMetadata: originalTrack.hasRekordboxMetadata,
+            bpmSource: originalTrack.bpmSource,
+            keySource: originalTrack.keySource,
+            lastSeenInLocalScanAt: originalTrack.lastSeenInLocalScanAt
+        )
+
+        let worker = StubNormalizationWorker(
+            inspectionResult: WorkerNormalizationInspectionResponse(
+                state: .needsNormalize,
+                peakAmplitude: 0.25,
+                formatName: "WAV",
+                subtype: "PCM_16",
+                endian: "FILE",
+                sampleRate: 22_050,
+                channelCount: 1,
+                frameCount: 22_050,
+                hasMetadata: false,
+                isLossy: false,
+                detailMessage: nil
+            ),
+            normalizeHandler: { inputPath, outputPath in
+                try FileManager.default.copyItem(atPath: inputPath, toPath: outputPath)
+                return WorkerNormalizationResultResponse(
+                    state: .ready,
+                    originalPeakAmplitude: 0.25,
+                    normalizedPeakAmplitude: 1.0,
+                    appliedGain: 4.0,
+                    didNormalize: true,
+                    outputPath: outputPath,
+                    formatName: "WAV",
+                    subtype: "PCM_16",
+                    endian: "FILE",
+                    sampleRate: 22_050,
+                    channelCount: 1,
+                    frameCount: 22_050,
+                    hasMetadata: false,
+                    isLossy: false,
+                    detailMessage: nil
+                )
+            }
+        )
+
+        let service = AudioNormalizationService(
+            worker: worker,
+            fileManager: .default,
+            trackRefresher: { _ in updatedTrack },
+            trashBackupOperation: { _, _ in
+                throw NSError(domain: "SoriaTests", code: 7, userInfo: [NSLocalizedDescriptionKey: "Trash unavailable"])
+            }
+        )
+
+        let result = await service.normalizeQueuedTracks([originalTrack])
+        let warnings = result.warnings
+
+        #expect(result.updatedTracksByID[originalTrack.id]?.contentHash == "normalized-hash")
+        #expect(warnings.count == 1)
+        #expect(warnings.first?.contains("Backup kept at") == true)
+        let directoryContents = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        #expect(directoryContents.contains(where: { $0.contains("Normalize Me-soria-backup-") }))
+    }
+
+    @Test func normalizationInspectionDerivesQueueNeedTiers() {
+        let track = makeTrack(path: "/music/tiered.wav", title: "Tiered")
+
+        let legacyReadyInspection = TrackNormalizationInspection(
+            trackID: track.id,
+            signature: TrackNormalizationSignature.make(for: track),
+            state: .ready,
+            peakAmplitude: 0.9781,
+            formatName: "MP3",
+            subtype: "MPEG_LAYER_III",
+            endian: "FILE",
+            sampleRate: 44_100,
+            channelCount: 2,
+            frameCount: 44_100,
+            hasMetadata: false,
+            isLossy: true,
+            detailMessage: nil
+        )
+        let lowInspection = TrackNormalizationInspection(
+            trackID: track.id,
+            signature: TrackNormalizationSignature.make(for: track),
+            state: .needsNormalize,
+            peakAmplitude: 0.95,
+            formatName: "WAV",
+            subtype: "PCM_16",
+            endian: "FILE",
+            sampleRate: 44_100,
+            channelCount: 2,
+            frameCount: 44_100,
+            hasMetadata: false,
+            isLossy: false,
+            detailMessage: nil
+        )
+        let mediumInspection = TrackNormalizationInspection(
+            trackID: track.id,
+            signature: TrackNormalizationSignature.make(for: track),
+            state: .needsNormalize,
+            peakAmplitude: 0.85,
+            formatName: "WAV",
+            subtype: "PCM_16",
+            endian: "FILE",
+            sampleRate: 44_100,
+            channelCount: 2,
+            frameCount: 44_100,
+            hasMetadata: false,
+            isLossy: false,
+            detailMessage: nil
+        )
+        let highInspection = TrackNormalizationInspection(
+            trackID: track.id,
+            signature: TrackNormalizationSignature.make(for: track),
+            state: .needsNormalize,
+            peakAmplitude: 0.75,
+            formatName: "WAV",
+            subtype: "PCM_16",
+            endian: "FILE",
+            sampleRate: 44_100,
+            channelCount: 2,
+            frameCount: 44_100,
+            hasMetadata: false,
+            isLossy: false,
+            detailMessage: nil
+        )
+        let floatPCMInspection = TrackNormalizationInspection(
+            trackID: track.id,
+            signature: TrackNormalizationSignature.make(for: track),
+            state: .ready,
+            peakAmplitude: 1.2,
+            formatName: "WAV",
+            subtype: "FLOAT",
+            endian: "FILE",
+            sampleRate: 44_100,
+            channelCount: 2,
+            frameCount: 44_100,
+            hasMetadata: false,
+            isLossy: false,
+            detailMessage: nil
+        )
+        let supraUnityInspection = TrackNormalizationInspection(
+            trackID: track.id,
+            signature: TrackNormalizationSignature.make(for: track),
+            state: .needsNormalize,
+            peakAmplitude: 1.021,
+            formatName: "MP3",
+            subtype: "MPEG_LAYER_III",
+            endian: "FILE",
+            sampleRate: 44_100,
+            channelCount: 2,
+            frameCount: 44_100,
+            hasMetadata: false,
+            isLossy: true,
+            detailMessage: nil
+        )
+
+        #expect(legacyReadyInspection.effectiveQueueState == .needsNormalize)
+        #expect(legacyReadyInspection.needTier == .low)
+        #expect(legacyReadyInspection.shouldNormalizeInQueue == false)
+        #expect(legacyReadyInspection.needsExportAttention == false)
+        #expect(legacyReadyInspection.peakMeasurementLabel == "Decoded Peak")
+        #expect(legacyReadyInspection.peakMeasurementExplanation == nil)
+
+        #expect(lowInspection.needTier == .low)
+        #expect(lowInspection.shouldNormalizeInQueue == false)
+        #expect(lowInspection.needsExportAttention == false)
+        #expect(lowInspection.peakMeasurementLabel == "Sample Peak")
+        #expect(lowInspection.peakMeasurementExplanation == nil)
+
+        #expect(mediumInspection.needTier == .medium)
+        #expect(mediumInspection.shouldNormalizeInQueue == true)
+        #expect(mediumInspection.needsExportAttention == true)
+
+        #expect(highInspection.needTier == .high)
+        #expect(highInspection.shouldNormalizeInQueue == true)
+        #expect(highInspection.needsExportAttention == true)
+
+        #expect(floatPCMInspection.effectiveQueueState == .ready)
+        #expect(floatPCMInspection.peakMeasurementLabel == "Sample Peak")
+        #expect(floatPCMInspection.peakMeasurementExplanation == "Float PCM can store sample peaks outside +/-1.0.")
+
+        #expect(supraUnityInspection.effectiveQueueState == .ready)
+        #expect(supraUnityInspection.needTier == nil)
+        #expect(supraUnityInspection.shouldNormalizeInQueue == false)
+        #expect(supraUnityInspection.needsExportAttention == false)
+        #expect(supraUnityInspection.peakMeasurementLabel == "Decoded Peak")
+        #expect(supraUnityInspection.peakMeasurementExplanation == "Lossy decoding can reconstruct sample peaks above 1.0.")
+    }
+
+    @Test func audioNormalizationServiceSkipsLowPriorityQueueTracks() async throws {
+        let directory = try makeTemporaryDirectory()
+        let trackURL = directory.appendingPathComponent("Low Priority.wav")
+        try writeTestWAV(to: trackURL)
+
+        let track = makeTrack(path: TrackPathNormalizer.normalizedAbsolutePath(trackURL), title: "Low Priority")
+        let invocationCounter = NormalizationInvocationCounter()
+
+        let worker = StubNormalizationWorker(
+            inspectionResult: WorkerNormalizationInspectionResponse(
+                state: .needsNormalize,
+                peakAmplitude: 0.95,
+                formatName: "WAV",
+                subtype: "PCM_16",
+                endian: "FILE",
+                sampleRate: 22_050,
+                channelCount: 1,
+                frameCount: 22_050,
+                hasMetadata: false,
+                isLossy: false,
+                detailMessage: nil
+            ),
+            normalizeHandler: { _, _ in
+                await invocationCounter.recordInvocation()
+                Issue.record("Low-priority queue tracks should not be normalized.")
+                throw NSError(domain: "SoriaTests", code: 11)
+            }
+        )
+
+        let service = AudioNormalizationService(
+            worker: worker,
+            fileManager: .default,
+            trackRefresher: { _ in
+                Issue.record("Low-priority queue tracks should not refresh.")
+                throw NSError(domain: "SoriaTests", code: 12)
+            }
+        )
+
+        let result = await service.normalizeQueuedTracks([track])
+
+        #expect(result.normalizedCount == 0)
+        #expect(result.skippedLowPriorityCount == 1)
+        #expect(result.updatedTracksByID.isEmpty)
+        #expect(result.inspectionsByTrackID[track.id]?.needTier == .low)
+        #expect(result.inspectionsByTrackID[track.id]?.shouldNormalizeInQueue == false)
+        #expect(await invocationCounter.count == 0)
+    }
+
+    @Test func audioNormalizationServiceNormalizesEligibleTracksInParallelAndRefreshesSequentially() async throws {
+        let directory = try makeTemporaryDirectory()
+        let firstURL = directory.appendingPathComponent("Medium.wav")
+        let secondURL = directory.appendingPathComponent("High.wav")
+        try writeTestWAV(to: firstURL)
+        try writeTestWAV(to: secondURL)
+
+        let firstTrack = makeTrack(path: TrackPathNormalizer.normalizedAbsolutePath(firstURL), title: "Medium")
+        let secondTrack = makeTrack(path: TrackPathNormalizer.normalizedAbsolutePath(secondURL), title: "High")
+        let recorder = NormalizationExecutionRecorder()
+
+        let refreshedTracksByPath = [
+            firstTrack.filePath: Track(
+                id: firstTrack.id,
+                filePath: firstTrack.filePath,
+                fileName: firstTrack.fileName,
+                title: firstTrack.title,
+                artist: firstTrack.artist,
+                album: firstTrack.album,
+                genre: firstTrack.genre,
+                duration: firstTrack.duration,
+                sampleRate: firstTrack.sampleRate,
+                bpm: firstTrack.bpm,
+                musicalKey: firstTrack.musicalKey,
+                modifiedTime: Date().addingTimeInterval(5),
+                contentHash: "medium-normalized",
+                analyzedAt: nil,
+                embeddingProfileID: nil,
+                embeddingPipelineID: nil,
+                embeddingUpdatedAt: nil,
+                hasSeratoMetadata: false,
+                hasRekordboxMetadata: false,
+                bpmSource: nil,
+                keySource: nil,
+                lastSeenInLocalScanAt: nil
+            ),
+            secondTrack.filePath: Track(
+                id: secondTrack.id,
+                filePath: secondTrack.filePath,
+                fileName: secondTrack.fileName,
+                title: secondTrack.title,
+                artist: secondTrack.artist,
+                album: secondTrack.album,
+                genre: secondTrack.genre,
+                duration: secondTrack.duration,
+                sampleRate: secondTrack.sampleRate,
+                bpm: secondTrack.bpm,
+                musicalKey: secondTrack.musicalKey,
+                modifiedTime: Date().addingTimeInterval(10),
+                contentHash: "high-normalized",
+                analyzedAt: nil,
+                embeddingProfileID: nil,
+                embeddingPipelineID: nil,
+                embeddingUpdatedAt: nil,
+                hasSeratoMetadata: false,
+                hasRekordboxMetadata: false,
+                bpmSource: nil,
+                keySource: nil,
+                lastSeenInLocalScanAt: nil
+            )
+        ]
+
+        let inspectionByPath = [
+            firstTrack.filePath: WorkerNormalizationInspectionResponse(
+                state: .needsNormalize,
+                peakAmplitude: 0.85,
+                formatName: "WAV",
+                subtype: "PCM_16",
+                endian: "FILE",
+                sampleRate: 22_050,
+                channelCount: 1,
+                frameCount: 22_050,
+                hasMetadata: false,
+                isLossy: false,
+                detailMessage: nil
+            ),
+            secondTrack.filePath: WorkerNormalizationInspectionResponse(
+                state: .needsNormalize,
+                peakAmplitude: 0.75,
+                formatName: "WAV",
+                subtype: "PCM_16",
+                endian: "FILE",
+                sampleRate: 22_050,
+                channelCount: 1,
+                frameCount: 22_050,
+                hasMetadata: false,
+                isLossy: false,
+                detailMessage: nil
+            )
+        ]
+
+        let worker = PathAwareStubNormalizationWorker(
+            inspectByPath: inspectionByPath,
+            normalizeHandler: { inputPath, outputPath in
+                await recorder.normalizationStarted(for: inputPath)
+                try await Task.sleep(nanoseconds: 60_000_000)
+                try FileManager.default.copyItem(atPath: inputPath, toPath: outputPath)
+                await recorder.normalizationFinished(for: inputPath)
+                return WorkerNormalizationResultResponse(
+                    state: .ready,
+                    originalPeakAmplitude: inspectionByPath[inputPath]?.peakAmplitude,
+                    normalizedPeakAmplitude: 1.0,
+                    appliedGain: 2.0,
+                    didNormalize: true,
+                    outputPath: outputPath,
+                    formatName: "WAV",
+                    subtype: "PCM_16",
+                    endian: "FILE",
+                    sampleRate: 22_050,
+                    channelCount: 1,
+                    frameCount: 22_050,
+                    hasMetadata: false,
+                    isLossy: false,
+                    detailMessage: nil
+                )
+            }
+        )
+
+        let service = AudioNormalizationService(
+            worker: worker,
+            fileManager: .default,
+            trackRefresher: { url in
+                await recorder.recordRefresh(for: url.path)
+                guard let refreshed = refreshedTracksByPath[url.path] else {
+                    throw NSError(domain: "SoriaTests", code: 13, userInfo: [NSLocalizedDescriptionKey: "Missing refreshed track"])
+                }
+                return refreshed
+            }
+        )
+
+        let result = await service.normalizeQueuedTracks([firstTrack, secondTrack], maxConcurrent: 2)
+        let snapshot = await recorder.snapshot()
+
+        #expect(result.normalizedCount == 2)
+        #expect(result.skippedLowPriorityCount == 0)
+        #expect(snapshot.maxConcurrentNormalizations == 2)
+        #expect(snapshot.refreshedPaths == [firstTrack.filePath, secondTrack.filePath])
+        #expect(result.updatedTracksByID[firstTrack.id]?.contentHash == "medium-normalized")
+        #expect(result.updatedTracksByID[secondTrack.id]?.contentHash == "high-normalized")
+    }
+
+    @Test func appViewModelPromptsBeforeExportWhenQueueNeedsNormalization() async throws {
+        let directory = try makeTemporaryDirectory()
+        let trackURL = directory.appendingPathComponent("Needs Normalize.wav")
+        try writeTestWAV(to: trackURL)
+
+        let worker = StubNormalizationWorker(
+            inspectionResult: WorkerNormalizationInspectionResponse(
+                state: .needsNormalize,
+                peakAmplitude: 0.42,
+                formatName: "WAV",
+                subtype: "PCM_16",
+                endian: "FILE",
+                sampleRate: 22_050,
+                channelCount: 1,
+                frameCount: 22_050,
+                hasMetadata: false,
+                isLossy: false,
+                detailMessage: nil
+            ),
+            normalizeHandler: { _, _ in
+                Issue.record("Normalization should not run during export review.")
+                throw NSError(domain: "SoriaTests", code: 9)
+            }
+        )
+        let normalizationService = AudioNormalizationService(
+            worker: worker,
+            fileManager: .default,
+            trackRefresher: { _ in
+                Issue.record("Track refresh should not run during export review.")
+                throw NSError(domain: "SoriaTests", code: 10)
+            }
+        )
+
+        let viewModel = AppViewModel(
+            skipAsyncBootstrap: true,
+            audioNormalizationService: normalizationService
+        )
+        let track = makeTrack(path: TrackPathNormalizer.normalizedAbsolutePath(trackURL), title: "Needs Normalize")
+        viewModel.playlistTracks = [track]
+
+        let exportURL = directory.appendingPathComponent("Test Playlist.m3u8")
+        await viewModel.beginExport(to: exportURL)
+
+        #expect(viewModel.exportNormalizationConfirmationState?.playlistName == "Test Playlist")
+        #expect(viewModel.exportNormalizationConfirmationState?.warnings.count == 1)
+        #expect(viewModel.exportNormalizationConfirmationState?.warnings.first?.contains(track.fileName) == true)
+    }
+
+    @Test func appViewModelAllowsExportWhenQueueOnlyHasLowPriorityNormalization() async throws {
+        let directory = try makeTemporaryDirectory()
+        let trackURL = directory.appendingPathComponent("Low Priority Export.wav")
+        try writeTestWAV(to: trackURL)
+
+        let worker = StubNormalizationWorker(
+            inspectionResult: WorkerNormalizationInspectionResponse(
+                state: .needsNormalize,
+                peakAmplitude: 0.95,
+                formatName: "WAV",
+                subtype: "PCM_16",
+                endian: "FILE",
+                sampleRate: 22_050,
+                channelCount: 1,
+                frameCount: 22_050,
+                hasMetadata: false,
+                isLossy: false,
+                detailMessage: nil
+            ),
+            normalizeHandler: { _, _ in
+                Issue.record("Low-priority export review should not normalize the queue.")
+                throw NSError(domain: "SoriaTests", code: 14)
+            }
+        )
+        let normalizationService = AudioNormalizationService(
+            worker: worker,
+            fileManager: .default,
+            trackRefresher: { _ in
+                Issue.record("Export review should not refresh tracks.")
+                throw NSError(domain: "SoriaTests", code: 15)
+            }
+        )
+
+        let viewModel = AppViewModel(
+            skipAsyncBootstrap: true,
+            audioNormalizationService: normalizationService
+        )
+        let track = makeTrack(path: TrackPathNormalizer.normalizedAbsolutePath(trackURL), title: "Low Priority Export")
+        viewModel.playlistTracks = [track]
+
+        let exportURL = directory.appendingPathComponent("Low Priority Playlist.m3u8")
+        await viewModel.beginExport(to: exportURL)
+
+        #expect(viewModel.exportNormalizationConfirmationState == nil)
+        #expect(viewModel.exportWarnings.allSatisfy { !$0.localizedCaseInsensitiveContains("normalize") })
+        #expect(viewModel.exportMessage.contains("export complete"))
+    }
+}
+
+private actor InvalidatedTracksRecorder {
+    private var trackIDs: [UUID] = []
+
+    func record(_ trackID: UUID) {
+        trackIDs.append(trackID)
+    }
+
+    func snapshot() -> [UUID] {
+        trackIDs
+    }
+}
+
+private actor NormalizationInvocationCounter {
+    private var invocations = 0
+
+    func recordInvocation() {
+        invocations += 1
+    }
+
+    var count: Int {
+        invocations
+    }
+}
+
+private actor NormalizationExecutionRecorder {
+    private var activeNormalizations = 0
+    private(set) var maxConcurrentNormalizations = 0
+    private(set) var refreshedPaths: [String] = []
+
+    func normalizationStarted(for path: String) {
+        activeNormalizations += 1
+        maxConcurrentNormalizations = max(maxConcurrentNormalizations, activeNormalizations)
+    }
+
+    func normalizationFinished(for _: String) {
+        activeNormalizations = max(activeNormalizations - 1, 0)
+    }
+
+    func recordRefresh(for path: String) {
+        refreshedPaths.append(path)
+    }
+
+    func snapshot() -> (maxConcurrentNormalizations: Int, refreshedPaths: [String]) {
+        (maxConcurrentNormalizations, refreshedPaths)
+    }
+}
+
+private struct StubNormalizationWorker: AudioNormalizationWorkering {
+    let inspectionResult: WorkerNormalizationInspectionResponse
+    let normalizeHandler: @Sendable (String, String) async throws -> WorkerNormalizationResultResponse
+
+    func inspectAudioNormalization(filePath: String) async throws -> WorkerNormalizationInspectionResponse {
+        inspectionResult
+    }
+
+    func normalizeAudioFile(filePath: String, outputPath: String) async throws -> WorkerNormalizationResultResponse {
+        try await normalizeHandler(filePath, outputPath)
+    }
+}
+
+private struct PathAwareStubNormalizationWorker: AudioNormalizationWorkering {
+    let inspectByPath: [String: WorkerNormalizationInspectionResponse]
+    let normalizeHandler: @Sendable (String, String) async throws -> WorkerNormalizationResultResponse
+
+    func inspectAudioNormalization(filePath: String) async throws -> WorkerNormalizationInspectionResponse {
+        guard let response = inspectByPath[filePath] else {
+            throw NSError(domain: "SoriaTests", code: 16, userInfo: [NSLocalizedDescriptionKey: "Missing inspection for \(filePath)"])
+        }
+        return response
+    }
+
+    func normalizeAudioFile(filePath: String, outputPath: String) async throws -> WorkerNormalizationResultResponse {
+        try await normalizeHandler(filePath, outputPath)
     }
 }
 

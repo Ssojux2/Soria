@@ -114,6 +114,9 @@ final class AppViewModel: ObservableObject {
             }
             if selectedSection != oldValue {
                 stopLibraryPreview()
+                if selectedSection == .exports {
+                    schedulePlaylistNormalizationInspection(force: false)
+                }
             }
         }
     }
@@ -196,6 +199,12 @@ final class AppViewModel: ObservableObject {
     @Published var exportMessage: String = ""
     @Published var exportWarnings: [String] = []
     @Published var exportDestinationDescription: String = ""
+    @Published private(set) var playlistNormalizationInspectionsByTrackID: [UUID: TrackNormalizationInspection] = [:]
+    @Published private(set) var playlistNormalizationInspectingTrackIDs: Set<UUID> = []
+    @Published private(set) var normalizingPlaylistTrackIDs: Set<UUID> = []
+    @Published private(set) var isInspectingPlaylistNormalization = false
+    @Published private(set) var isNormalizingPlaylistQueue = false
+    @Published var exportNormalizationConfirmationState: ExportNormalizationConfirmationState?
     @Published var weights = RecommendationWeights() {
         didSet {
             guard weights != oldValue else { return }
@@ -223,7 +232,12 @@ final class AppViewModel: ObservableObject {
             )
         }
     }
-    @Published var playlistTracks: [Track] = []
+    @Published var playlistTracks: [Track] = [] {
+        didSet {
+            guard playlistTracks != oldValue else { return }
+            handlePlaylistQueueChanged()
+        }
+    }
     @Published var selectedExportTarget: ExportTarget = .rekordboxPlaylistM3U8
     @Published var analysisQueueProgressText: String = ""
     @Published var analysisStateByTrackID: [UUID: TrackAnalysisState] = [:]
@@ -268,7 +282,8 @@ final class AppViewModel: ObservableObject {
 
     private let database: LibraryDatabase
     private let recommendationEngine = RecommendationEngine()
-    private let exporter = PlaylistExportService()
+    private let exporter: PlaylistExportService
+    private let injectedAudioNormalizationService: AudioNormalizationService?
     private let externalMetadataImporter = ExternalMetadataService()
     private let externalVisualizationResolver = ExternalVisualizationResolver()
     private let libraryPreviewPlayer: LibraryPreviewControlling
@@ -279,6 +294,8 @@ final class AppViewModel: ObservableObject {
     private var librarySyncDismissTask: Task<Void, Never>?
     private var workerHealthTask: Task<Void, Never>?
     private var validationTask: Task<Void, Never>?
+    private var playlistNormalizationInspectionTask: Task<Void, Never>?
+    private var playlistQueueNormalizationTask: Task<Void, Never>?
     private var previewPreparationTask: Task<Void, Error>?
     private var previewPreparationURL: URL?
     private var previewTransportTask: Task<Void, Never>?
@@ -320,6 +337,15 @@ final class AppViewModel: ObservableObject {
     private lazy var scanner: LibraryScannerService = LibraryScannerService(database: database) { [weak self] track in
         await self?.invalidateTrackVectors(for: track)
     }
+    private lazy var audioNormalizationService: AudioNormalizationService = {
+        injectedAudioNormalizationService
+            ?? AudioNormalizationService(worker: worker) { [weak self] url in
+                guard let self else {
+                    throw CancellationError()
+                }
+                return try await self.scanner.refreshTrack(at: url)
+            }
+    }()
     private lazy var librarySyncService: DJLibrarySyncService = DJLibrarySyncService(database: database) { [weak self] track in
         await self?.invalidateTrackVectors(for: track)
     }
@@ -329,7 +355,9 @@ final class AppViewModel: ObservableObject {
         libraryPreviewPlayer: LibraryPreviewControlling? = nil,
         libraryPreviewWarmReleaseDelaySec: Double = 0.35,
         libraryPreviewInteractiveSeekDispatchIntervalSec: Double = 0.03,
-        libraryPreviewWaveformBackfillDelaySec: Double = 0.35
+        libraryPreviewWaveformBackfillDelaySec: Double = 0.35,
+        exporter: PlaylistExportService? = nil,
+        audioNormalizationService: AudioNormalizationService? = nil
     ) {
         AppPaths.ensureDirectories()
         let processInfo = ProcessInfo.processInfo
@@ -340,6 +368,8 @@ final class AppViewModel: ObservableObject {
         self.libraryPreviewWarmReleaseDelaySec = max(libraryPreviewWarmReleaseDelaySec, 0)
         self.libraryPreviewInteractiveSeekDispatchIntervalSec = max(libraryPreviewInteractiveSeekDispatchIntervalSec, 0)
         self.libraryPreviewWaveformBackfillDelaySec = max(libraryPreviewWaveformBackfillDelaySec, 0)
+        self.exporter = exporter ?? PlaylistExportService()
+        self.injectedAudioNormalizationService = audioNormalizationService
         self.libraryPreviewPlayer = libraryPreviewPlayer ?? (uiTestLibraryState == nil
             ? LibraryPreviewPlayer()
             : UITestLibraryPreviewPlayer())
@@ -445,6 +475,115 @@ final class AppViewModel: ObservableObject {
                 return "Detected Serato crate root: \(cratesRoot)"
             }
             return "No writable _Serato_ root was detected for direct crate export."
+        }
+    }
+
+    var canExportPlaylist: Bool {
+        !playlistTracks.isEmpty && !isNormalizingPlaylistQueue && isSelectedExportTargetAvailable
+    }
+
+    var canNormalizePlaylistQueue: Bool {
+        !playlistTracks.isEmpty && !isNormalizingPlaylistQueue
+    }
+
+    var canClearPlaylistQueue: Bool {
+        !playlistTracks.isEmpty && !isNormalizingPlaylistQueue
+    }
+
+    var exportNormalizationWarningSummaryText: String {
+        guard let state = exportNormalizationConfirmationState else { return "" }
+        if state.warnings.count == 1 {
+            return state.warnings[0]
+        }
+        return state.warnings.joined(separator: "\n")
+    }
+
+    func playlistNormalizationInspection(for track: Track) -> TrackNormalizationInspection? {
+        guard let inspection = playlistNormalizationInspectionsByTrackID[track.id], inspection.matches(track) else {
+            return nil
+        }
+        return inspection
+    }
+
+    func playlistNormalizationState(for track: Track) -> TrackNormalizationState? {
+        if normalizingPlaylistTrackIDs.contains(track.id) {
+            return .normalizing
+        }
+        return playlistNormalizationInspection(for: track)?.effectiveQueueState
+    }
+
+    func playlistNormalizationNeedTier(for track: Track) -> TrackNormalizationNeedTier? {
+        playlistNormalizationInspection(for: track)?.needTier
+    }
+
+    func playlistNormalizationStatusText(for track: Track) -> String {
+        if normalizingPlaylistTrackIDs.contains(track.id) {
+            return TrackNormalizationState.normalizing.displayName
+        }
+        if playlistNormalizationInspectingTrackIDs.contains(track.id) && playlistNormalizationInspection(for: track) == nil {
+            return "Checking..."
+        }
+        guard let inspection = playlistNormalizationInspection(for: track) else {
+            return "Checking..."
+        }
+        return playlistNormalizationStatusText(for: inspection)
+    }
+
+    func playlistNormalizationDetailText(for track: Track) -> String? {
+        if normalizingPlaylistTrackIDs.contains(track.id) {
+            return "Applying peak normalization safely."
+        }
+        if playlistNormalizationInspectingTrackIDs.contains(track.id), playlistNormalizationInspection(for: track) == nil {
+            return "Scanning absolute sample peak."
+        }
+        guard let inspection = playlistNormalizationInspection(for: track) else { return nil }
+
+        var detailParts: [String] = []
+        if let peakAmplitude = inspection.peakAmplitude {
+            detailParts.append("\(inspection.peakMeasurementLabel) \(String(format: "%.4f", peakAmplitude))")
+        }
+        if let needTier = inspection.needTier {
+            detailParts.append(playlistNormalizationPriorityMessage(for: needTier))
+        } else if let peakMeasurementExplanation = inspection.peakMeasurementExplanation {
+            detailParts.append(peakMeasurementExplanation)
+        } else if inspection.state != inspection.effectiveQueueState {
+            switch inspection.effectiveQueueState {
+            case .ready:
+                detailParts.append("Absolute peak already meets or exceeds target.")
+            case .needsNormalize:
+                detailParts.append("Absolute peak is below target.")
+            case .normalizing, .silent, .unsupported, .failed:
+                break
+            }
+        }
+        if let formatName = inspection.formatName, !formatName.isEmpty {
+            if let subtype = inspection.subtype, !subtype.isEmpty {
+                detailParts.append("\(formatName)/\(subtype)")
+            } else {
+                detailParts.append(formatName)
+            }
+        }
+        if let detailMessage = inspection.detailMessage, !detailMessage.isEmpty {
+            detailParts.append(detailMessage)
+        }
+        return detailParts.isEmpty ? nil : detailParts.joined(separator: " • ")
+    }
+
+    private func playlistNormalizationStatusText(for inspection: TrackNormalizationInspection) -> String {
+        guard inspection.effectiveQueueState == .needsNormalize, let needTier = inspection.needTier else {
+            return inspection.effectiveQueueState.displayName
+        }
+        return needTier.displayName
+    }
+
+    private func playlistNormalizationPriorityMessage(for needTier: TrackNormalizationNeedTier) -> String {
+        switch needTier {
+        case .low:
+            return "Low priority: skip queue normalization."
+        case .medium:
+            return "Medium priority: normalize in the queue."
+        case .high:
+            return "High priority: normalize in the queue."
         }
     }
 
@@ -3608,7 +3747,7 @@ final class AppViewModel: ObservableObject {
                     message: "Finalizing the playlist queue from curated matches."
                 )
 
-                playlistTracks = orderedTracks
+                finalizeBuiltPlaylistQueue(orderedTracks)
                 _ = try persistRecommendationSession(
                     kind: .playlistPath,
                     queryText: input.state.trimmedQueryText,
@@ -3667,8 +3806,58 @@ final class AppViewModel: ObservableObject {
         playlistTracks.removeAll()
     }
 
+    func normalizePlaylistQueue() {
+        guard canNormalizePlaylistQueue else { return }
+
+        playlistNormalizationInspectionTask?.cancel()
+        playlistQueueNormalizationTask?.cancel()
+        exportNormalizationConfirmationState = nil
+        exportWarnings = []
+        exportDestinationDescription = ""
+        exportMessage = "Normalizing playlist queue..."
+        isNormalizingPlaylistQueue = true
+
+        let queueSnapshot = playlistTracks
+        playlistQueueNormalizationTask = Task { [weak self] in
+            guard let self else { return }
+            let viewModel = self
+
+            let initialInspections = await viewModel.refreshPlaylistNormalizationInspections(force: true)
+            viewModel.applyPlaylistNormalizationInspections(initialInspections)
+
+            let result = await viewModel.audioNormalizationService.normalizeQueuedTracks(
+                queueSnapshot,
+                preparedInspections: initialInspections,
+                maxConcurrent: 2
+            ) { track, state in
+                await MainActor.run {
+                    viewModel.updatePlaylistNormalizationProgress(for: track, state: state)
+                }
+            }
+
+            if !result.updatedTracksByID.isEmpty {
+                await viewModel.refreshTracks()
+            }
+
+            viewModel.replacePlaylistQueueTracks(using: result.updatedTracksByID)
+            viewModel.applyPlaylistNormalizationInspections(result.inspectionsByTrackID)
+            viewModel.normalizingPlaylistTrackIDs.removeAll()
+            viewModel.playlistNormalizationInspectingTrackIDs.removeAll()
+            viewModel.isInspectingPlaylistNormalization = false
+            viewModel.isNormalizingPlaylistQueue = false
+            viewModel.playlistQueueNormalizationTask = nil
+
+            viewModel.exportMessage = viewModel.playlistQueueNormalizationMessage(
+                normalizedCount: result.normalizedCount,
+                skippedLowPriorityCount: result.skippedLowPriorityCount
+            )
+            viewModel.exportWarnings = result.warnings
+        }
+    }
+
     func exportPlaylist() {
         guard !playlistTracks.isEmpty else { return }
+        guard !isNormalizingPlaylistQueue else { return }
         guard isSelectedExportTargetAvailable else {
             exportMessage = "Export failed: \(selectedExportTargetStatusText)"
             exportWarnings = []
@@ -3679,31 +3868,64 @@ final class AppViewModel: ObservableObject {
         let panel = configuredExportSavePanel()
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
+        Task {
+            await beginExport(to: url)
+        }
+    }
+
+    func beginExport(to url: URL) async {
+        guard !playlistTracks.isEmpty else { return }
+        guard !isNormalizingPlaylistQueue else { return }
+        guard isSelectedExportTargetAvailable else {
+            exportMessage = "Export failed: \(selectedExportTargetStatusText)"
+            exportWarnings = []
+            exportDestinationDescription = ""
+            return
+        }
+
         exportWarnings = []
         exportDestinationDescription = ""
+        exportNormalizationConfirmationState = nil
+        exportMessage = "Reviewing queue normalization before export..."
+        playlistNormalizationInspectionTask?.cancel()
+        playlistNormalizationInspectionTask = nil
 
         let playlistName = url.deletingPathExtension().lastPathComponent
         let outputDirectory = selectedExportTarget.requiresExplicitOutputDirectory ? url.deletingLastPathComponent() : nil
+        let inspections = await refreshPlaylistNormalizationInspections(force: true)
+        let normalizationWarnings = exportNormalizationWarnings(for: playlistTracks, inspections: inspections)
+
+        if !normalizationWarnings.isEmpty {
+            exportNormalizationConfirmationState = ExportNormalizationConfirmationState(
+                playlistName: playlistName,
+                outputURL: url,
+                outputDirectory: outputDirectory,
+                warnings: normalizationWarnings
+            )
+            exportMessage = "Normalization review needed before export."
+            return
+        }
+
+        await performExport(
+            playlistName: playlistName,
+            outputDirectory: outputDirectory
+        )
+    }
+
+    func continuePendingExportAfterNormalizationWarning() {
+        guard let state = exportNormalizationConfirmationState else { return }
+        exportNormalizationConfirmationState = nil
 
         Task {
-            do {
-                let result = try exporter.export(
-                    playlistName: playlistName,
-                    tracks: playlistTracks,
-                    target: selectedExportTarget,
-                    outputDirectory: outputDirectory,
-                    librarySources: librarySources
-                )
-                exportDestinationDescription = result.destinationDescription
-                exportWarnings = result.warnings
-                exportMessage = "\(result.message): \(result.outputPaths.joined(separator: ", "))"
-                refreshDetectedVendorTargets()
-            } catch {
-                exportMessage = "Export failed: \(error.localizedDescription)"
-                exportWarnings = []
-                exportDestinationDescription = ""
-            }
+            await performExport(
+                playlistName: state.playlistName,
+                outputDirectory: state.outputDirectory
+            )
         }
+    }
+
+    func cancelPendingExportNormalizationWarning() {
+        exportNormalizationConfirmationState = nil
     }
 
     private func configuredExportSavePanel() -> NSSavePanel {
@@ -3730,6 +3952,215 @@ final class AppViewModel: ObservableObject {
         }
 
         return panel
+    }
+
+    private func performExport(
+        playlistName: String,
+        outputDirectory: URL?
+    ) async {
+        do {
+            let result = try exporter.export(
+                playlistName: playlistName,
+                tracks: playlistTracks,
+                target: selectedExportTarget,
+                outputDirectory: outputDirectory,
+                librarySources: librarySources
+            )
+            exportDestinationDescription = result.destinationDescription
+            exportWarnings = result.warnings
+            exportMessage = "\(result.message): \(result.outputPaths.joined(separator: ", "))"
+            refreshDetectedVendorTargets()
+        } catch {
+            exportMessage = "Export failed: \(error.localizedDescription)"
+            exportWarnings = []
+            exportDestinationDescription = ""
+        }
+    }
+
+    private func handlePlaylistQueueChanged() {
+        exportNormalizationConfirmationState = nil
+
+        let trackByID = Dictionary(uniqueKeysWithValues: playlistTracks.map { ($0.id, $0) })
+        playlistNormalizationInspectionsByTrackID = playlistNormalizationInspectionsByTrackID.filter { trackID, inspection in
+            guard let track = trackByID[trackID] else { return false }
+            return inspection.matches(track)
+        }
+        playlistNormalizationInspectingTrackIDs.formIntersection(Set(trackByID.keys))
+        normalizingPlaylistTrackIDs.formIntersection(Set(trackByID.keys))
+        isInspectingPlaylistNormalization = !playlistNormalizationInspectingTrackIDs.isEmpty
+
+        if playlistTracks.isEmpty {
+            playlistNormalizationInspectionTask?.cancel()
+            playlistNormalizationInspectingTrackIDs.removeAll()
+            normalizingPlaylistTrackIDs.removeAll()
+            isInspectingPlaylistNormalization = false
+            return
+        }
+
+        guard !isNormalizingPlaylistQueue else { return }
+        if selectedSection == .exports {
+            schedulePlaylistNormalizationInspection(force: false)
+        }
+    }
+
+    private func schedulePlaylistNormalizationInspection(force: Bool) {
+        guard !isNormalizingPlaylistQueue else { return }
+        guard !playlistTracks.isEmpty else {
+            playlistNormalizationInspectionTask?.cancel()
+            playlistNormalizationInspectingTrackIDs.removeAll()
+            isInspectingPlaylistNormalization = false
+            return
+        }
+
+        playlistNormalizationInspectionTask?.cancel()
+        playlistNormalizationInspectionTask = Task { [weak self] in
+            guard let self else { return }
+            _ = await self.refreshPlaylistNormalizationInspections(force: force)
+            self.playlistNormalizationInspectionTask = nil
+        }
+    }
+
+    @discardableResult
+    private func refreshPlaylistNormalizationInspections(force: Bool) async -> [UUID: TrackNormalizationInspection] {
+        let queueSnapshot = playlistTracks
+        guard !queueSnapshot.isEmpty else {
+            playlistNormalizationInspectionsByTrackID = [:]
+            playlistNormalizationInspectingTrackIDs = []
+            isInspectingPlaylistNormalization = false
+            return [:]
+        }
+
+        let tracksToInspect = queueSnapshot.filter { track in
+            force || playlistNormalizationInspection(for: track) == nil
+        }
+
+        guard !tracksToInspect.isEmpty else {
+            return Dictionary(uniqueKeysWithValues: queueSnapshot.compactMap { track in
+                playlistNormalizationInspection(for: track).map { (track.id, $0) }
+            })
+        }
+
+        let inspectingIDs = Set(tracksToInspect.map(\.id))
+        playlistNormalizationInspectingTrackIDs.formUnion(inspectingIDs)
+        isInspectingPlaylistNormalization = true
+
+        let inspected = await audioNormalizationService.inspectTracks(tracksToInspect, maxConcurrent: 2)
+
+        playlistNormalizationInspectingTrackIDs.subtract(inspectingIDs)
+        isInspectingPlaylistNormalization = !playlistNormalizationInspectingTrackIDs.isEmpty
+
+        applyPlaylistNormalizationInspections(inspected)
+        return Dictionary(uniqueKeysWithValues: playlistTracks.compactMap { track in
+            playlistNormalizationInspection(for: track).map { (track.id, $0) }
+        })
+    }
+
+    private func applyPlaylistNormalizationInspections(_ inspections: [UUID: TrackNormalizationInspection]) {
+        let trackByID = Dictionary(uniqueKeysWithValues: playlistTracks.map { ($0.id, $0) })
+        var merged: [UUID: TrackNormalizationInspection] = playlistNormalizationInspectionsByTrackID.filter { trackID, inspection in
+            guard let track = trackByID[trackID] else { return false }
+            return inspection.matches(track)
+        }
+
+        for (trackID, inspection) in inspections {
+            guard let track = trackByID[trackID], inspection.matches(track) else { continue }
+            merged[trackID] = inspection
+        }
+
+        playlistNormalizationInspectionsByTrackID = merged
+    }
+
+    private func updatePlaylistNormalizationProgress(for track: Track, state: TrackNormalizationState) {
+        switch state {
+        case .normalizing:
+            normalizingPlaylistTrackIDs.insert(track.id)
+        default:
+            normalizingPlaylistTrackIDs.remove(track.id)
+        }
+    }
+
+    private func replacePlaylistQueueTracks(using preferredTracksByID: [UUID: Track]) {
+        guard !playlistTracks.isEmpty else { return }
+
+        let latestTracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        let refreshedQueue = playlistTracks.map { track in
+            preferredTracksByID[track.id] ?? latestTracksByID[track.id] ?? track
+        }
+
+        if refreshedQueue != playlistTracks {
+            playlistTracks = refreshedQueue
+        }
+    }
+
+    func finalizeBuiltPlaylistQueue(_ orderedTracks: [Track]) {
+        playlistTracks = orderedTracks
+        if !orderedTracks.isEmpty {
+            selectedSection = .exports
+        }
+    }
+
+    private func exportNormalizationWarnings(
+        for queueTracks: [Track],
+        inspections: [UUID: TrackNormalizationInspection]
+    ) -> [String] {
+        queueTracks.compactMap { track in
+            guard let inspection = inspections[track.id], inspection.matches(track) else {
+                return "Normalization status for \(track.fileName) could not be confirmed."
+            }
+
+            guard inspection.needsExportAttention else {
+                return nil
+            }
+
+            switch inspection.effectiveQueueState {
+            case .needsNormalize:
+                if let needTier = inspection.needTier {
+                    let priorityLabel = needTier == .high ? "high-priority" : "queue"
+                    if let peakAmplitude = inspection.peakAmplitude {
+                        let peakLabel = inspection.isLossy ? "decoded peak" : "sample peak"
+                        return "\(track.fileName) still needs \(priorityLabel) normalization (\(peakLabel) \(String(format: "%.4f", peakAmplitude)))."
+                    }
+                    return "\(track.fileName) still needs \(priorityLabel) normalization."
+                }
+                if let peakAmplitude = inspection.peakAmplitude {
+                    let peakLabel = inspection.isLossy ? "decoded peak" : "sample peak"
+                    return "\(track.fileName) still needs normalization (\(peakLabel) \(String(format: "%.4f", peakAmplitude)))."
+                }
+                return "\(track.fileName) still needs normalization."
+            case .unsupported:
+                return "\(track.fileName) uses an unsupported normalization path. \(inspection.detailMessage ?? "")".trimmingCharacters(in: .whitespacesAndNewlines)
+            case .failed:
+                return "\(track.fileName) could not be inspected safely. \(inspection.detailMessage ?? "")".trimmingCharacters(in: .whitespacesAndNewlines)
+            case .ready, .normalizing, .silent:
+                return nil
+            }
+        }
+    }
+
+    private func playlistQueueNormalizationMessage(
+        normalizedCount: Int,
+        skippedLowPriorityCount: Int
+    ) -> String {
+        switch (normalizedCount, skippedLowPriorityCount) {
+        case (0, 0):
+            return "Playlist queue did not require normalization."
+        case (0, 1):
+            return "Skipped 1 low-priority track. Playlist queue did not require automatic normalization."
+        case (0, _):
+            return "Skipped \(skippedLowPriorityCount) low-priority tracks. Playlist queue did not require automatic normalization."
+        case (1, 0):
+            return "Normalized 1 track in the playlist queue."
+        case (1, 1):
+            return "Normalized 1 track and skipped 1 low-priority track in the playlist queue."
+        case (1, _):
+            return "Normalized 1 track and skipped \(skippedLowPriorityCount) low-priority tracks in the playlist queue."
+        case (_, 0):
+            return "Normalized \(normalizedCount) tracks in the playlist queue."
+        case (_, 1):
+            return "Normalized \(normalizedCount) tracks and skipped 1 low-priority track in the playlist queue."
+        default:
+            return "Normalized \(normalizedCount) tracks and skipped \(skippedLowPriorityCount) low-priority tracks in the playlist queue."
+        }
     }
 
     func loadExternalMetadata() {
@@ -3814,6 +4245,7 @@ final class AppViewModel: ObservableObject {
             try refreshMembershipFacets()
             let availableIDs = Set(tracks.map(\.id))
             analysisStateByTrackID = analysisStateByTrackID.filter { availableIDs.contains($0.key) }
+            replacePlaylistQueueTracks(using: [:])
             let reconciledSelection = resolvedSelection(for: availableIDs)
             if reconciledSelection != selectedTrackIDs {
                 DispatchQueue.main.async { [weak self] in
@@ -4925,7 +5357,7 @@ final class AppViewModel: ObservableObject {
     ) -> [String: [Double]] {
         var output: [String: [Double]] = [:]
         if !trackEmbedding.isEmpty {
-            let normalizedTrackEmbedding = normalizedVector(trackEmbedding)
+            let normalizedTrackEmbedding = Self.normalizedVector(trackEmbedding)
             if !normalizedTrackEmbedding.isEmpty {
                 output["tracks"] = normalizedTrackEmbedding
             }
@@ -4940,7 +5372,7 @@ final class AppViewModel: ObservableObject {
                 continue
             }
 
-            let normalizedSegmentVector = normalizedVector(vector)
+            let normalizedSegmentVector = Self.normalizedVector(vector)
             guard !normalizedSegmentVector.isEmpty else { continue }
             output[segment.type.rawValue] = normalizedSegmentVector
         }
@@ -5142,20 +5574,15 @@ final class AppViewModel: ObservableObject {
             trackEmbedding: referencePayload?.trackEmbedding,
             segments: referencePayload?.segments ?? []
         )
-        let exactCandidates = try scopedCandidates.compactMap { track -> VectorSearchCandidate? in
-            guard let vectorBreakdown = try exactVectorBreakdown(
-                for: track,
-                queryEmbeddings: queryResponse.queryEmbeddings,
-                vectorWeights: normalizedMixsetVectorWeights
-            ) else {
-                return nil
-            }
-            return VectorSearchCandidate(
-                track: track,
-                vectorBreakdown: vectorBreakdown,
-                matchedMemberships: membershipSnapshotsByTrackID[track.id]?.matchedPaths(scopeFilter: scopeFilter) ?? []
-            )
-        }
+        let preloadedCandidates = try preloadExactVectorCandidates(
+            from: scopedCandidates,
+            scopeFilter: scopeFilter
+        )
+        let exactCandidates = await Self.scoreExactVectorCandidates(
+            preloadedCandidates,
+            queryEmbeddings: queryResponse.queryEmbeddings,
+            scoringWeights: ExactVectorScoringWeights(normalizedMixsetVectorWeights)
+        )
         .sorted { $0.vectorBreakdown.fusedScore > $1.vectorBreakdown.fusedScore }
 
         return VectorSearchExecution(
@@ -5186,16 +5613,110 @@ final class AppViewModel: ObservableObject {
             return !vector.isEmpty
         }
 
+        return Self.exactVectorBreakdown(
+            trackEmbedding: trackEmbedding,
+            segments: segments,
+            queryEmbeddings: queryEmbeddings,
+            scoringWeights: ExactVectorScoringWeights(vectorWeights)
+        )
+    }
+
+    private func preloadExactVectorCandidates(
+        from tracks: [Track],
+        scopeFilter: LibraryScopeFilter
+    ) throws -> [ExactVectorCandidatePayload] {
+        try tracks.map { track in
+            let trackEmbedding = try database.fetchTrackEmbedding(trackID: track.id)
+            let segments = try database.fetchSegments(trackID: track.id).filter { segment in
+                guard let vector = segment.vector else { return false }
+                return !vector.isEmpty
+            }
+            let matchedMemberships = membershipSnapshotsByTrackID[track.id]?.matchedPaths(scopeFilter: scopeFilter) ?? []
+            return ExactVectorCandidatePayload(
+                track: track,
+                trackEmbedding: trackEmbedding,
+                segments: segments,
+                matchedMemberships: matchedMemberships
+            )
+        }
+    }
+
+    nonisolated private static func scoreExactVectorCandidates(
+        _ candidates: [ExactVectorCandidatePayload],
+        queryEmbeddings: [String: [Double]],
+        scoringWeights: ExactVectorScoringWeights
+    ) async -> [VectorSearchCandidate] {
+        guard !candidates.isEmpty else { return [] }
+
+        let maxConcurrent = min(4, max(ProcessInfo.processInfo.activeProcessorCount, 1))
+        var iterator = candidates.makeIterator()
+
+        return await withTaskGroup(of: VectorSearchCandidate?.self) { group in
+            for _ in 0..<min(maxConcurrent, candidates.count) {
+                guard let candidate = iterator.next() else { break }
+                group.addTask {
+                    Self.makeExactVectorSearchCandidate(
+                        from: candidate,
+                        queryEmbeddings: queryEmbeddings,
+                        scoringWeights: scoringWeights
+                    )
+                }
+            }
+
+            var output: [VectorSearchCandidate] = []
+            while let candidate = await group.next() {
+                if let candidate {
+                    output.append(candidate)
+                }
+                if let nextCandidate = iterator.next() {
+                    group.addTask {
+                        Self.makeExactVectorSearchCandidate(
+                            from: nextCandidate,
+                            queryEmbeddings: queryEmbeddings,
+                            scoringWeights: scoringWeights
+                        )
+                    }
+                }
+            }
+
+            return output
+        }
+    }
+
+    nonisolated private static func makeExactVectorSearchCandidate(
+        from payload: ExactVectorCandidatePayload,
+        queryEmbeddings: [String: [Double]],
+        scoringWeights: ExactVectorScoringWeights
+    ) -> VectorSearchCandidate? {
+        guard let vectorBreakdown = exactVectorBreakdown(
+            trackEmbedding: payload.trackEmbedding,
+            segments: payload.segments,
+            queryEmbeddings: queryEmbeddings,
+            scoringWeights: scoringWeights
+        ) else {
+            return nil
+        }
+        return VectorSearchCandidate(
+            track: payload.track,
+            vectorBreakdown: vectorBreakdown,
+            matchedMemberships: payload.matchedMemberships
+        )
+    }
+
+    nonisolated private static func exactVectorBreakdown(
+        trackEmbedding: [Double]?,
+        segments: [TrackSegment],
+        queryEmbeddings: [String: [Double]],
+        scoringWeights: ExactVectorScoringWeights
+    ) -> VectorScoreBreakdown? {
         let trackScore = similarityScore(queryEmbeddings["tracks"], trackEmbedding)
         let introScore = bestSegmentSimilarity(queryEmbeddings["intro"], type: .intro, segments: segments)
         let middleScore = bestSegmentSimilarity(queryEmbeddings["middle"], type: .middle, segments: segments)
         let outroScore = bestSegmentSimilarity(queryEmbeddings["outro"], type: .outro, segments: segments)
-        let fusedScore = vectorWeights.fusedScore(
-            trackScore: trackScore,
-            introScore: introScore,
-            middleScore: middleScore,
-            outroScore: outroScore
-        )
+        let fusedScore = scoringWeights.track * trackScore
+            + scoringWeights.intro * introScore
+            + scoringWeights.middle * middleScore
+            + scoringWeights.outro * outroScore
 
         let components = [
             ("tracks", trackScore),
@@ -5219,7 +5740,7 @@ final class AppViewModel: ObservableObject {
         )
     }
 
-    private func bestSegmentSimilarity(
+    nonisolated private static func bestSegmentSimilarity(
         _ queryEmbedding: [Double]?,
         type: TrackSegment.SegmentType,
         segments: [TrackSegment]
@@ -5227,11 +5748,11 @@ final class AppViewModel: ObservableObject {
         let matchingSegments = segments.filter { $0.type == type }
         guard !matchingSegments.isEmpty else { return 0 }
         return matchingSegments.reduce(0) { currentBest, segment in
-            max(currentBest, similarityScore(queryEmbedding, segment.vector))
+            max(currentBest, Self.similarityScore(queryEmbedding, segment.vector))
         }
     }
 
-    private func similarityScore(_ lhs: [Double]?, _ rhs: [Double]?) -> Double {
+    nonisolated private static func similarityScore(_ lhs: [Double]?, _ rhs: [Double]?) -> Double {
         guard
             let lhs, let rhs,
             !lhs.isEmpty, !rhs.isEmpty,
@@ -5250,7 +5771,7 @@ final class AppViewModel: ObservableObject {
         return 1.0 / (1.0 + sqrt(squaredDistance))
     }
 
-    private func normalizedVector(_ vector: [Double]) -> [Double] {
+    nonisolated private static func normalizedVector(_ vector: [Double]) -> [Double] {
         let magnitude = sqrt(vector.reduce(0.0) { $0 + ($1 * $1) })
         guard magnitude > 0 else { return [] }
         return vector.map { $0 / magnitude }
@@ -6454,6 +6975,27 @@ private struct SimilarityState {
     let vectorBreakdownByPath: [String: VectorScoreBreakdown]
     let candidateCountBeforeScope: Int
     let candidateCountAfterScope: Int
+}
+
+private struct ExactVectorCandidatePayload {
+    let track: Track
+    let trackEmbedding: [Double]?
+    let segments: [TrackSegment]
+    let matchedMemberships: [String]
+}
+
+private struct ExactVectorScoringWeights: Sendable {
+    let track: Double
+    let intro: Double
+    let middle: Double
+    let outro: Double
+
+    init(_ weights: MixsetVectorWeights) {
+        track = weights.track
+        intro = weights.intro
+        middle = weights.middle
+        outro = weights.outro
+    }
 }
 
 private enum RecommendationResolutionError: LocalizedError {

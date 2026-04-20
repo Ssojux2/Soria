@@ -796,6 +796,32 @@ extension SoriaTests {
     }
 
     @Test
+    @MainActor
+    func finalizingBuiltPlaylistQueueNavigatesToExportsWhenTracksExist() {
+        let viewModel = AppViewModel(skipAsyncBootstrap: true)
+        let orderedTracks = [
+            makeTrack(
+                title: "First Queue Track",
+                analyzedAt: Date(),
+                embeddingProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+                embeddingUpdatedAt: Date()
+            )
+        ]
+
+        viewModel.selectedSection = .mixAssistant
+        viewModel.finalizeBuiltPlaylistQueue(orderedTracks)
+
+        #expect(viewModel.playlistTracks.map(\.id) == orderedTracks.map(\.id))
+        #expect(viewModel.selectedSection == .exports)
+
+        viewModel.selectedSection = .mixAssistant
+        viewModel.finalizeBuiltPlaylistQueue([])
+
+        #expect(viewModel.playlistTracks.isEmpty)
+        #expect(viewModel.selectedSection == .mixAssistant)
+    }
+
+    @Test
     func hybridTrackSearchPayloadCarriesTextAndReferenceInputs() {
         let segment = TrackSegment(
             id: UUID(),

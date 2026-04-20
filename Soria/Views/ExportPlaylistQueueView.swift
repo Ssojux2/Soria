@@ -16,10 +16,15 @@ struct ExportPlaylistQueueView: View {
 
                 Spacer(minLength: 12)
 
+                Button("Normalize Queue") {
+                    viewModel.normalizePlaylistQueue()
+                }
+                .disabled(!viewModel.canNormalizePlaylistQueue)
+
                 Button("Clear Queue") {
                     viewModel.clearPlaylist()
                 }
-                .disabled(viewModel.playlistTracks.isEmpty)
+                .disabled(!viewModel.canClearPlaylistQueue)
             }
 
             if queueRows.isEmpty {
@@ -53,12 +58,25 @@ struct ExportPlaylistQueueView: View {
                         Text(bpmKeySummary(for: row.track))
                             .foregroundStyle(.secondary)
                     }
+                    TableColumn("Normalization") { row in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(viewModel.playlistNormalizationStatusText(for: row.track))
+                                .foregroundStyle(normalizationColor(for: row.track))
+                            if let detail = viewModel.playlistNormalizationDetailText(for: row.track) {
+                                Text(detail)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                    }
                     TableColumn("Action") { row in
                         Button("Remove") {
                             viewModel.removeFromPlaylist(row.track.id)
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(.red)
+                        .disabled(viewModel.isNormalizingPlaylistQueue)
                     }
                 }
                 .accessibilityIdentifier("exports-playlist-queue-table")
@@ -100,6 +118,33 @@ struct ExportPlaylistQueueView: View {
             values.append(musicalKey)
         }
         return values.isEmpty ? "-" : values.joined(separator: " • ")
+    }
+
+    private func normalizationColor(for track: Track) -> Color {
+        if let inspection = viewModel.playlistNormalizationInspection(for: track),
+           inspection.effectiveQueueState == .needsNormalize {
+            switch inspection.needTier {
+            case .low:
+                return .secondary
+            case .medium, .high:
+                return .orange
+            case nil:
+                break
+            }
+        }
+
+        switch viewModel.playlistNormalizationState(for: track) {
+        case .ready, .silent:
+            return .secondary
+        case .needsNormalize, .unsupported:
+            return .orange
+        case .failed:
+            return .red
+        case .normalizing:
+            return .primary
+        case nil:
+            return .secondary
+        }
     }
 }
 
