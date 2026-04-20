@@ -64,6 +64,7 @@ final class AppViewModel: ObservableObject {
     private struct PendingInteractiveSeekRequest {
         let normalizedPosition: Double
         let autoplay: Bool
+        let seekKind: LibraryPreviewSeekKind
     }
 
     private enum CommittedPreviewAction {
@@ -145,7 +146,7 @@ final class AppViewModel: ObservableObject {
     @Published var selectedTrackExternalMetadata: [ExternalDJMetadata] = []
     @Published var selectedTrackWaveformPreview: [Double] = []
     @Published var selectedTrackWaveformEnvelope: TrackWaveformEnvelope?
-    @Published private(set) var libraryPreviewState = LibraryPreviewState.hidden
+    let libraryPreviewUIState = LibraryPreviewUIState()
     @Published var selectedRecommendationID: UUID?
     @Published var scanProgress = ScanJobProgress()
     @Published var libraryRoots: [String] = LibraryRootsStore.loadRoots().map(TrackPathNormalizer.normalizedAbsolutePath)
@@ -303,6 +304,7 @@ final class AppViewModel: ObservableObject {
         max(Double(ProcessInfo.processInfo.environment["SORIA_ANALYSIS_WATCHDOG_SEC"] ?? "") ?? 12, 5)
     private let libraryPreviewWarmReleaseDelaySec: Double
     private let libraryPreviewInteractiveSeekDispatchIntervalSec: Double
+    private let libraryPreviewWaveformBackfillDelaySec: Double
     private let libraryPreviewInteractiveSeekMinimumDelta = 0.01
     private let libraryPreviewInteractiveSeekImmediateDelta = 0.08
     private lazy var worker: PythonWorkerClient = PythonWorkerClient(
@@ -326,7 +328,8 @@ final class AppViewModel: ObservableObject {
         skipAsyncBootstrap: Bool = false,
         libraryPreviewPlayer: LibraryPreviewControlling? = nil,
         libraryPreviewWarmReleaseDelaySec: Double = 0.35,
-        libraryPreviewInteractiveSeekDispatchIntervalSec: Double = 0.03
+        libraryPreviewInteractiveSeekDispatchIntervalSec: Double = 0.03,
+        libraryPreviewWaveformBackfillDelaySec: Double = 0.35
     ) {
         AppPaths.ensureDirectories()
         let processInfo = ProcessInfo.processInfo
@@ -336,6 +339,7 @@ final class AppViewModel: ObservableObject {
         let forceInitialSetupPrompt = processArguments.contains(Self.uiTestForceInitialSetupArgument)
         self.libraryPreviewWarmReleaseDelaySec = max(libraryPreviewWarmReleaseDelaySec, 0)
         self.libraryPreviewInteractiveSeekDispatchIntervalSec = max(libraryPreviewInteractiveSeekDispatchIntervalSec, 0)
+        self.libraryPreviewWaveformBackfillDelaySec = max(libraryPreviewWaveformBackfillDelaySec, 0)
         self.libraryPreviewPlayer = libraryPreviewPlayer ?? (uiTestLibraryState == nil
             ? LibraryPreviewPlayer()
             : UITestLibraryPreviewPlayer())
@@ -410,6 +414,11 @@ final class AppViewModel: ObservableObject {
 
     var selectedTrack: Track? {
         selectedTracks.first
+    }
+
+    var libraryPreviewState: LibraryPreviewState {
+        get { libraryPreviewUIState.snapshot }
+        set { libraryPreviewUIState.apply(newValue) }
     }
 
     var isSelectedExportTargetAvailable: Bool {
@@ -2588,11 +2597,13 @@ final class AppViewModel: ObservableObject {
         if libraryPreviewState.isPlaying {
             invalidatePendingPreviewActions()
             libraryPreviewPlayer.pause()
-            libraryPreviewState.isPlaying = false
-            libraryPreviewState.progress = progressForLibraryPreview(
-                currentTimeSec: libraryPreviewState.currentTimeSec,
-                totalDurationSec: libraryPreviewState.totalDurationSec
-            )
+            mutateLibraryPreviewState { state in
+                state.isPlaying = false
+                state.progress = progressForLibraryPreview(
+                    currentTimeSec: state.currentTimeSec,
+                    totalDurationSec: state.totalDurationSec
+                )
+            }
             return
         }
 
@@ -2604,13 +2615,15 @@ final class AppViewModel: ObservableObject {
             )
             : libraryPreviewState.defaultStartSec
 
-        libraryPreviewState.currentTimeSec = startTime
-        libraryPreviewState.isPlaying = true
-        libraryPreviewState.progress = progressForLibraryPreview(
-            currentTimeSec: startTime,
-            totalDurationSec: libraryPreviewState.totalDurationSec
-        )
-        libraryPreviewState.message = ""
+        mutateLibraryPreviewState { state in
+            state.currentTimeSec = startTime
+            state.isPlaying = true
+            state.progress = progressForLibraryPreview(
+                currentTimeSec: startTime,
+                totalDurationSec: state.totalDurationSec
+            )
+            state.message = ""
+        }
 
         commitPreviewAction(
             .play(trackID: track.id, url: previewURL, fromTime: startTime)
@@ -2643,13 +2656,15 @@ final class AppViewModel: ObservableObject {
             max(libraryPreviewState.totalDurationSec, 0)
         )
 
-        libraryPreviewState.currentTimeSec = resolvedTimeSec
-        libraryPreviewState.isPlaying = autoplay
-        libraryPreviewState.progress = progressForLibraryPreview(
-            currentTimeSec: libraryPreviewState.currentTimeSec,
-            totalDurationSec: libraryPreviewState.totalDurationSec
-        )
-        libraryPreviewState.message = ""
+        mutateLibraryPreviewState { state in
+            state.currentTimeSec = resolvedTimeSec
+            state.isPlaying = autoplay
+            state.progress = progressForLibraryPreview(
+                currentTimeSec: state.currentTimeSec,
+                totalDurationSec: state.totalDurationSec
+            )
+            state.message = ""
+        }
 
         commitPreviewAction(
             .seek(
@@ -2662,13 +2677,17 @@ final class AppViewModel: ObservableObject {
         )
     }
 
-    func seekLibraryPreview(normalizedPosition: Double, autoplay: Bool = true) {
+    func seekLibraryPreview(
+        normalizedPosition: Double,
+        autoplay: Bool = true,
+        seekKind: LibraryPreviewSeekKind = .waveformTap
+    ) {
         guard libraryPreviewState.totalDurationSec > 0 else { return }
         let clamped = min(max(normalizedPosition, 0), 1)
         seekLibraryPreview(
             to: libraryPreviewState.totalDurationSec * clamped,
             autoplay: autoplay,
-            seekKind: .waveformScrub
+            seekKind: seekKind
         )
     }
 
@@ -2684,12 +2703,14 @@ final class AppViewModel: ObservableObject {
             cancelPendingInteractiveSeekDispatch()
             dispatchInteractiveSeek(
                 normalizedPosition: clampedPosition,
-                autoplay: true
+                autoplay: true,
+                seekKind: .waveformTap
             )
         case .dragChanged:
             queueInteractiveSeek(
                 normalizedPosition: clampedPosition,
-                autoplay: true
+                autoplay: true,
+                seekKind: .waveformScrub
             )
         case .mouseUp:
             debugLibraryPreviewInput(
@@ -2704,9 +2725,11 @@ final class AppViewModel: ObservableObject {
         let releaseTrack = trackForLibraryPreview(trackID: libraryPreviewState.trackID)
         libraryPreviewPlayer.stop()
         guard libraryPreviewState.trackID != nil else { return }
-        libraryPreviewState.isPlaying = false
-        libraryPreviewState.currentTimeSec = 0
-        libraryPreviewState.progress = 0
+        mutateLibraryPreviewState { state in
+            state.isPlaying = false
+            state.currentTimeSec = 0
+            state.progress = 0
+        }
         lastInteractiveSeekNormalizedPosition = nil
         scheduleLibraryPreviewRelease(for: releaseTrack)
     }
@@ -2716,7 +2739,7 @@ final class AppViewModel: ObservableObject {
             cancelPreviewPreparationIfNeeded()
             invalidatePendingPreviewActions()
             cancelWaveformBackfill()
-            libraryPreviewState = .hidden
+            commitLibraryPreviewState(.hidden)
             return
         }
 
@@ -2757,7 +2780,8 @@ final class AppViewModel: ObservableObject {
             startPreviewPreparationIfNeeded(trackID: track.id, url: url)
         }
 
-        libraryPreviewState = LibraryPreviewState(
+        commitLibraryPreviewState(
+            LibraryPreviewState(
             trackID: track.id,
             isAvailable: availabilityMessage == nil,
             isPrepared: isPrepared,
@@ -2771,6 +2795,7 @@ final class AppViewModel: ObservableObject {
                 totalDurationSec: totalDurationSec
             ),
             message: availabilityMessage ?? ""
+            )
         )
     }
 
@@ -4295,18 +4320,20 @@ final class AppViewModel: ObservableObject {
         let resolvedTotalDurationSec = preferredTotalDurationSec > 0
             ? preferredTotalDurationSec
             : (playbackState.totalDurationSec > 0 ? playbackState.totalDurationSec : libraryPreviewState.totalDurationSec)
-        libraryPreviewState.isPrepared = playbackState.isPrepared
-        libraryPreviewState.isWarm = playbackState.isWarm
-        libraryPreviewState.isPlaying = playbackState.isPlaying
-        libraryPreviewState.totalDurationSec = max(resolvedTotalDurationSec, 0)
-        libraryPreviewState.currentTimeSec = min(
+        var nextState = libraryPreviewState
+        nextState.isPrepared = playbackState.isPrepared
+        nextState.isWarm = playbackState.isWarm
+        nextState.isPlaying = playbackState.isPlaying
+        nextState.totalDurationSec = max(resolvedTotalDurationSec, 0)
+        nextState.currentTimeSec = min(
             max(playbackState.currentTimeSec, 0),
-            max(libraryPreviewState.totalDurationSec, 0)
+            max(nextState.totalDurationSec, 0)
         )
-        libraryPreviewState.progress = progressForLibraryPreview(
-            currentTimeSec: libraryPreviewState.currentTimeSec,
-            totalDurationSec: libraryPreviewState.totalDurationSec
+        nextState.progress = progressForLibraryPreview(
+            currentTimeSec: nextState.currentTimeSec,
+            totalDurationSec: nextState.totalDurationSec
         )
+        commitLibraryPreviewState(nextState, delivery: .throttledPlayback)
     }
 
     private func applyLibraryPreviewError(_ error: Error) {
@@ -4316,13 +4343,31 @@ final class AppViewModel: ObservableObject {
         committedPreviewRequestID &+= 1
         pendingPreviewAction = nil
         let resolvedMessage = libraryPreviewMessage(for: error)
-        libraryPreviewState.isAvailable = false
-        libraryPreviewState.isPrepared = false
-        libraryPreviewState.isWarm = false
-        libraryPreviewState.isPlaying = false
-        libraryPreviewState.currentTimeSec = 0
-        libraryPreviewState.progress = 0
-        libraryPreviewState.message = resolvedMessage
+        mutateLibraryPreviewState { state in
+            state.isAvailable = false
+            state.isPrepared = false
+            state.isWarm = false
+            state.isPlaying = false
+            state.currentTimeSec = 0
+            state.progress = 0
+            state.message = resolvedMessage
+        }
+    }
+
+    private func commitLibraryPreviewState(
+        _ nextState: LibraryPreviewState,
+        delivery: LibraryPreviewUIState.Delivery = .immediate
+    ) {
+        libraryPreviewUIState.apply(nextState, delivery: delivery)
+    }
+
+    private func mutateLibraryPreviewState(
+        delivery: LibraryPreviewUIState.Delivery = .immediate,
+        _ mutate: (inout LibraryPreviewState) -> Void
+    ) {
+        var nextState = libraryPreviewState
+        mutate(&nextState)
+        commitLibraryPreviewState(nextState, delivery: delivery)
     }
 
     private func cancelPendingInteractiveSeekDispatch() {
@@ -4559,14 +4604,19 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func queueInteractiveSeek(normalizedPosition: Double, autoplay: Bool) {
+    private func queueInteractiveSeek(
+        normalizedPosition: Double,
+        autoplay: Bool,
+        seekKind: LibraryPreviewSeekKind
+    ) {
         let deltaFromLastDispatch = abs(normalizedPosition - (lastInteractiveSeekNormalizedPosition ?? normalizedPosition))
         guard deltaFromLastDispatch >= libraryPreviewInteractiveSeekMinimumDelta else { return }
 
         let now = ProcessInfo.processInfo.systemUptime
         pendingInteractiveSeekRequest = PendingInteractiveSeekRequest(
             normalizedPosition: normalizedPosition,
-            autoplay: autoplay
+            autoplay: autoplay,
+            seekKind: seekKind
         )
 
         let elapsedSinceLastDispatch = now - (lastInteractiveSeekDispatchTime ?? 0)
@@ -4594,13 +4644,22 @@ final class AppViewModel: ObservableObject {
         pendingInteractiveSeekRequest = nil
         dispatchInteractiveSeek(
             normalizedPosition: request.normalizedPosition,
-            autoplay: request.autoplay
+            autoplay: request.autoplay,
+            seekKind: request.seekKind
         )
     }
 
-    private func dispatchInteractiveSeek(normalizedPosition: Double, autoplay: Bool) {
+    private func dispatchInteractiveSeek(
+        normalizedPosition: Double,
+        autoplay: Bool,
+        seekKind: LibraryPreviewSeekKind
+    ) {
         isDispatchingInteractiveSeek = true
-        seekLibraryPreview(normalizedPosition: normalizedPosition, autoplay: autoplay)
+        seekLibraryPreview(
+            normalizedPosition: normalizedPosition,
+            autoplay: autoplay,
+            seekKind: seekKind
+        )
         isDispatchingInteractiveSeek = false
         lastInteractiveSeekDispatchTime = ProcessInfo.processInfo.systemUptime
         lastInteractiveSeekNormalizedPosition = normalizedPosition
@@ -4707,9 +4766,14 @@ final class AppViewModel: ObservableObject {
         }
 
         let trackID = track.id
-        waveformBackfillTask = Task { [weak self] in
+        waveformBackfillTask = Task(priority: .utility) { [weak self] in
             guard let self else { return }
             do {
+                if self.libraryPreviewWaveformBackfillDelaySec > 0 {
+                    try await Task.sleep(
+                        nanoseconds: UInt64((self.libraryPreviewWaveformBackfillDelaySec * 1_000_000_000).rounded())
+                    )
+                }
                 let waveformEnvelope = try await worker.extractWaveformEnvelope(
                     filePath: track.filePath,
                     track: track,

@@ -535,7 +535,7 @@ def test_analyze_does_not_mutate_vector_store(monkeypatch: pytest.MonkeyPatch) -
                 "upperPeaks": [0.1, 0.2],
                 "lowerPeaks": [-0.1, -0.2],
                 "binCount": 2,
-                "sourceVersion": "soria.waveform.envelope.v1",
+                "sourceVersion": "soria.waveform.envelope.v2",
             },
         }
 

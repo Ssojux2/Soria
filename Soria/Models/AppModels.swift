@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 enum SidebarSection: String, CaseIterable, Identifiable {
@@ -299,6 +300,87 @@ struct LibraryPreviewState: Equatable {
         progress: 0,
         message: ""
     )
+}
+
+@MainActor
+final class LibraryPreviewUIState: ObservableObject {
+    enum Delivery {
+        case immediate
+        case throttledPlayback
+    }
+
+    @Published private(set) var renderedState = LibraryPreviewState.hidden
+    private(set) var snapshot = LibraryPreviewState.hidden
+
+    private let minimumPlaybackRenderIntervalSec: TimeInterval
+    private let immediatePlaybackProgressDelta: Double
+    private var lastPlaybackRenderTimestamp: TimeInterval?
+
+    init(
+        minimumPlaybackRenderIntervalSec: TimeInterval = 1.0 / 12.0,
+        immediatePlaybackProgressDelta: Double = 0.045
+    ) {
+        self.minimumPlaybackRenderIntervalSec = max(minimumPlaybackRenderIntervalSec, 0)
+        self.immediatePlaybackProgressDelta = max(immediatePlaybackProgressDelta, 0)
+    }
+
+    func apply(_ newState: LibraryPreviewState, delivery: Delivery = .immediate) {
+        let previousSnapshot = snapshot
+        snapshot = newState
+
+        guard shouldRender(newState, previousSnapshot: previousSnapshot, delivery: delivery) else {
+            return
+        }
+
+        if renderedState != newState {
+            renderedState = newState
+        }
+        if delivery == .throttledPlayback {
+            lastPlaybackRenderTimestamp = ProcessInfo.processInfo.systemUptime
+        } else {
+            lastPlaybackRenderTimestamp = nil
+        }
+    }
+
+    private func shouldRender(
+        _ newState: LibraryPreviewState,
+        previousSnapshot: LibraryPreviewState,
+        delivery: Delivery
+    ) -> Bool {
+        switch delivery {
+        case .immediate:
+            return true
+        case .throttledPlayback:
+            if renderedState.trackID != newState.trackID ||
+                renderedState.isAvailable != newState.isAvailable ||
+                renderedState.isPrepared != newState.isPrepared ||
+                renderedState.isWarm != newState.isWarm ||
+                renderedState.isPlaying != newState.isPlaying ||
+                renderedState.totalDurationSec != newState.totalDurationSec ||
+                renderedState.defaultStartSec != newState.defaultStartSec ||
+                renderedState.message != newState.message
+            {
+                return true
+            }
+            if !newState.isPlaying {
+                return true
+            }
+
+            let progressDelta = abs(newState.progress - renderedState.progress)
+            if progressDelta >= immediatePlaybackProgressDelta {
+                return true
+            }
+
+            let now = ProcessInfo.processInfo.systemUptime
+            let elapsed = now - (lastPlaybackRenderTimestamp ?? 0)
+            if lastPlaybackRenderTimestamp == nil || elapsed >= minimumPlaybackRenderIntervalSec {
+                return true
+            }
+
+            // Keep local seek commits responsive even if playback ticks are throttled.
+            return abs(newState.currentTimeSec - previousSnapshot.currentTimeSec) > 0.35
+        }
+    }
 }
 
 struct LibraryTrackSortComparator: SortComparator {

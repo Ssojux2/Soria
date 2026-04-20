@@ -40,44 +40,13 @@ ALL_VECTOR_PROFILE_IDS = tuple(EMBEDDING_PROFILES.keys()) + LEGACY_VECTOR_PROFIL
 def main() -> int:
     try:
         _disable_telemetry_noise()
+        if _persistent_mode_enabled():
+            return _run_persistent_loop()
+
         payload = json.loads(sys.stdin.read() or "{}")
-        cache_dir = payload.get("options", {}).get("cacheDirectory") or str(Path.home() / ".soria-cache")
-        _configure_logging(cache_dir)
-
-        command = payload.get("command")
-        if command == "validate_embedding_profile":
-            _print_json(handle_validate_embedding_profile(payload))
-            return 0
-        if command == "analyze":
-            _print_json(handle_analyze(payload))
-            return 0
-        if command == "extract_waveform_envelope":
-            _print_json(handle_extract_waveform_envelope(payload))
-            return 0
-        if command in {"embed_audio_segments", "embed_descriptors"}:
-            _print_json(handle_embed_audio_segments(payload))
-            return 0
-        if command == "build_query_embeddings":
-            _print_json(handle_build_query_embeddings(payload))
-            return 0
-        if command == "search_tracks":
-            _print_json(handle_search_tracks(payload))
-            return 0
-        if command == "upsert_track_vectors":
-            _print_json(handle_upsert_track_vectors(payload))
-            return 0
-        if command == "delete_track_vectors":
-            _print_json(handle_delete_track_vectors(payload))
-            return 0
-        if command == "rebuild_vector_index":
-            _print_json(handle_rebuild_vector_index(payload))
-            return 0
-        if command == "healthcheck":
-            _print_json(handle_healthcheck(payload))
-            return 0
-
-        _print_json({"error": f"Unsupported command: {command}"})
-        return 2
+        response, exit_code = _dispatch_payload(payload)
+        _print_json(response)
+        return exit_code
     except BrokenPipeError:
         return 0
     except Exception as exc:
@@ -85,6 +54,56 @@ def main() -> int:
         if _print_json({"error": str(exc)}):
             return 1
         return 0
+
+
+def _persistent_mode_enabled() -> bool:
+    return "--persistent" in sys.argv[1:] or os.environ.get("SORIA_WORKER_PERSISTENT") == "1"
+
+
+def _run_persistent_loop() -> int:
+    for raw_line in sys.stdin:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+            response, _ = _dispatch_payload(payload)
+        except Exception as exc:
+            LOGGER.exception("Persistent worker command failed")
+            response = {"error": str(exc)}
+
+        if not _print_json(response):
+            return 0
+    return 0
+
+
+def _dispatch_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    cache_dir = payload.get("options", {}).get("cacheDirectory") or str(Path.home() / ".soria-cache")
+    _configure_logging(cache_dir)
+
+    command = payload.get("command")
+    if command == "validate_embedding_profile":
+        return handle_validate_embedding_profile(payload), 0
+    if command == "analyze":
+        return handle_analyze(payload), 0
+    if command == "extract_waveform_envelope":
+        return handle_extract_waveform_envelope(payload), 0
+    if command in {"embed_audio_segments", "embed_descriptors"}:
+        return handle_embed_audio_segments(payload), 0
+    if command == "build_query_embeddings":
+        return handle_build_query_embeddings(payload), 0
+    if command == "search_tracks":
+        return handle_search_tracks(payload), 0
+    if command == "upsert_track_vectors":
+        return handle_upsert_track_vectors(payload), 0
+    if command == "delete_track_vectors":
+        return handle_delete_track_vectors(payload), 0
+    if command == "rebuild_vector_index":
+        return handle_rebuild_vector_index(payload), 0
+    if command == "healthcheck":
+        return handle_healthcheck(payload), 0
+
+    return {"error": f"Unsupported command: {command}"}, 2
 
 
 def handle_validate_embedding_profile(payload: dict[str, Any]) -> dict[str, Any]:
@@ -876,6 +895,7 @@ def _load_vector_store():
 def _print_json(payload: dict[str, Any]) -> bool:
     try:
         sys.stdout.write(json.dumps(payload, ensure_ascii=False))
+        sys.stdout.write("\n")
         sys.stdout.flush()
         return True
     except BrokenPipeError:

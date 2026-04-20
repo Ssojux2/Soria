@@ -194,7 +194,7 @@ struct LibraryPreviewTests {
         #expect(await waitUntil { previewPlayer.totalSeekInvocationCount == 1 })
         #expect(previewPlayer.lastObservedSeekRequest?.time == 120)
         #expect(previewPlayer.lastObservedSeekRequest?.autoplay == true)
-        #expect(previewPlayer.lastObservedSeekRequest?.kind == .waveformScrub)
+        #expect(previewPlayer.lastObservedSeekRequest?.kind == .waveformTap)
         #expect(viewModel.libraryPreviewState.currentTimeSec == 120)
         #expect(viewModel.libraryPreviewState.isPlaying)
         #expect(viewModel.libraryPreviewState.progress == 0.5)
@@ -239,7 +239,7 @@ struct LibraryPreviewTests {
         #expect(await waitUntil { previewPlayer.totalSeekInvocationCount == 1 })
         #expect(previewPlayer.totalSeekInvocationCount == 1)
         #expect(previewPlayer.lastObservedSeekRequest?.time == 180)
-        #expect(previewPlayer.lastObservedSeekRequest?.kind == .waveformScrub)
+        #expect(previewPlayer.lastObservedSeekRequest?.kind == .waveformTap)
         #expect(viewModel.libraryPreviewState.currentTimeSec == 180)
         #expect(viewModel.libraryPreviewState.progress == 0.75)
         #expect(viewModel.libraryPreviewState.isPlaying)
@@ -261,6 +261,7 @@ struct LibraryPreviewTests {
         viewModel.handleLibraryPreviewInteraction(normalizedPosition: 0.5, phase: .mouseDown)
         #expect(await waitUntil { previewPlayer.totalSeekInvocationCount == 1 })
         #expect(previewPlayer.lastObservedSeekRequest?.time == 120)
+        #expect(previewPlayer.lastObservedSeekRequest?.kind == .waveformTap)
         #expect(viewModel.libraryPreviewState.currentTimeSec == 120)
 
         viewModel.handleLibraryPreviewInteraction(normalizedPosition: 0.5, phase: .mouseUp)
@@ -292,7 +293,7 @@ struct LibraryPreviewTests {
     }
 
     @Test
-    func previewPressIntentTrackerCommitsOnlyInsideActiveWindow() {
+    func previewPressIntentTrackerCommitsRegardlessOfWindowFocus() {
         var tracker = PreviewPressIntentTracker()
         let bounds = CGRect(x: 0, y: 0, width: 120, height: 40)
         let point = CGPoint(x: 20, y: 20)
@@ -301,7 +302,7 @@ struct LibraryPreviewTests {
         #expect(tracker.commitIfPossible(within: bounds, isWindowActive: true) == .commit(point))
 
         tracker.arm(at: point)
-        #expect(tracker.commitIfPossible(within: bounds, isWindowActive: false) == .cancel)
+        #expect(tracker.commitIfPossible(within: bounds, isWindowActive: false) == .commit(point))
     }
 
     @Test
@@ -314,6 +315,58 @@ struct LibraryPreviewTests {
             tracker.move(to: CGPoint(x: 26, y: 20), within: bounds) == .beginDrag(CGPoint(x: 26, y: 20))
         )
         #expect(tracker.commitIfPossible(within: bounds, isWindowActive: true) == .none)
+    }
+
+    @Test
+    func waveformLayoutUsesInsetContentRectForHitMapping() {
+        let layout = LibraryPreviewWaveformLayout(totalWidth: 200, totalHeight: 52, totalDurationSec: 240)
+
+        #expect(abs(layout.contentRect.minX - 0) < 0.001)
+        #expect(abs(layout.contentRect.width - 200) < 0.001)
+        #expect(abs(layout.interactionRect.minX - 0) < 0.001)
+        #expect(abs(layout.normalizedPosition(for: 0) - 0) < 0.0001)
+        #expect(abs(layout.normalizedPosition(for: 8) - 0.04) < 0.0001)
+        #expect(abs(layout.normalizedPosition(for: 100) - 0.5) < 0.0001)
+        #expect(abs(layout.normalizedPosition(for: 200) - 1) < 0.0001)
+        #expect(abs(layout.xPosition(for: 120) - 100) < 0.0001)
+    }
+
+    @Test
+    func waveformLayoutUsesNarrowCueTapRects() {
+        let layout = LibraryPreviewWaveformLayout(totalWidth: 240, totalHeight: 52, totalDurationSec: 240)
+        let source = TrackCuePresentation.WaveformCueSource(
+            source: .serato,
+            kindLabel: "Hot Cue",
+            indexLabel: "Slot 1",
+            timeText: "0:30.000",
+            noteText: nil,
+            sourceTag: nil
+        )
+        let pointCue = TrackCuePresentation.WaveformCueGroup(
+            kind: .hotcue,
+            startSec: 30,
+            endSec: nil,
+            color: nil,
+            sources: [source]
+        )
+        let loopCue = TrackCuePresentation.WaveformCueGroup(
+            kind: .loop,
+            startSec: 64,
+            endSec: 72,
+            color: nil,
+            sources: [source]
+        )
+
+        let pointRect = layout.cueHitRect(for: pointCue, cueLineWidth: 3)
+        let loopRect = layout.cueHitRect(for: loopCue, cueLineWidth: 2)
+
+        #expect(pointRect.height < layout.totalHeight)
+        #expect(loopRect.height < layout.totalHeight)
+        #expect(pointRect.minY > 0)
+        #expect(loopRect.minY > 0)
+        #expect(loopRect.maxX > pointRect.minX)
+        #expect(loopRect.minX >= layout.interactionRect.minX)
+        #expect(loopRect.maxX <= layout.interactionRect.maxX)
     }
 
     @Test
@@ -338,10 +391,48 @@ struct LibraryPreviewTests {
         viewModel.handleLibraryPreviewInteraction(normalizedPosition: 0.75, phase: .dragChanged)
         viewModel.handleLibraryPreviewInteraction(normalizedPosition: 0.75, phase: .mouseUp)
 
-        #expect(await waitUntil { previewPlayer.totalSeekInvocationCount == 1 })
-        #expect(previewPlayer.totalSeekInvocationCount == 1)
+        #expect(await waitUntil { previewPlayer.totalSeekInvocationCount == 2 })
+        #expect(previewPlayer.totalSeekInvocationCount == 2)
         #expect(previewPlayer.lastObservedSeekRequest?.time == 180)
+        #expect(previewPlayer.lastObservedSeekRequest?.kind == .waveformScrub)
         #expect(viewModel.libraryPreviewState.currentTimeSec == 180)
+    }
+
+    @Test
+    func libraryPreviewUIStateThrottlesRenderedPlaybackTicks() {
+        let uiState = LibraryPreviewUIState(
+            minimumPlaybackRenderIntervalSec: 60,
+            immediatePlaybackProgressDelta: 1
+        )
+        let initialState = LibraryPreviewState(
+            trackID: UUID(),
+            isAvailable: true,
+            isPrepared: true,
+            isWarm: true,
+            isPlaying: true,
+            currentTimeSec: 12,
+            totalDurationSec: 240,
+            defaultStartSec: 0,
+            progress: 0.05,
+            message: ""
+        )
+        uiState.apply(initialState)
+
+        var nextState = initialState
+        nextState.currentTimeSec = 14
+        nextState.progress = 14 / 240
+        uiState.apply(nextState, delivery: .throttledPlayback)
+        #expect(uiState.snapshot.currentTimeSec == 14)
+        #expect(uiState.renderedState.currentTimeSec == 14)
+
+        var throttledState = nextState
+        throttledState.currentTimeSec = 15
+        throttledState.progress = 15 / 240
+        uiState.apply(throttledState, delivery: .throttledPlayback)
+
+        #expect(uiState.snapshot.currentTimeSec == 15)
+        #expect(uiState.renderedState.currentTimeSec == 14)
+        #expect(uiState.renderedState.progress == nextState.progress)
     }
 
     @Test
@@ -500,6 +591,28 @@ struct LibraryPreviewTests {
         #expect(backend.loadedURLs.count == 1)
         #expect(backend.pauseCount == 1)
         #expect(backend.playTimes.count == 2)
+    }
+
+    @Test
+    func libraryPreviewPlayerPauseInvalidatesInFlightPlay() async throws {
+        let backend = DelayedPreviewBackendStub(durationSec: 120, playDelayNanoseconds: 150_000_000)
+        let player = LibraryPreviewPlayer(backend: backend)
+        let url = try makeTempAudioFile()
+        var states: [LibraryPreviewPlaybackState] = []
+        player.onPlaybackStateChange = { states.append($0) }
+
+        let playTask = Task {
+            try await player.play(url: url, fromTime: 4)
+        }
+
+        try await Task.sleep(nanoseconds: 30_000_000)
+        player.pause()
+        try await playTask.value
+
+        #expect(states.last?.isPlaying == false)
+        #expect(states.last?.currentTimeSec == 0)
+        #expect(backend.playTimes == [4])
+        #expect(backend.pauseCount == 1)
     }
 
     @Test
@@ -1023,6 +1136,50 @@ private final class PreviewBackendStub: LibraryPreviewPlayerBackend {
     func emitEnded() {
         onPlaybackEnded?()
     }
+}
+
+@MainActor
+private final class DelayedPreviewBackendStub: LibraryPreviewPlayerBackend {
+    var onDurationUpdate: ((TimeInterval) -> Void)?
+    var onTimeUpdate: ((TimeInterval) -> Void)?
+    var onPlaybackEnded: (() -> Void)?
+    var loadedURLs: [URL] = []
+    var playTimes: [TimeInterval] = []
+    var pauseCount = 0
+
+    private let durationSec: TimeInterval
+    private let playDelayNanoseconds: UInt64
+
+    init(durationSec: TimeInterval, playDelayNanoseconds: UInt64) {
+        self.durationSec = durationSec
+        self.playDelayNanoseconds = playDelayNanoseconds
+    }
+
+    func load(url: URL) async throws -> TimeInterval {
+        loadedURLs.append(url.standardizedFileURL)
+        onDurationUpdate?(durationSec)
+        return durationSec
+    }
+
+    func play(from time: TimeInterval) async throws {
+        playTimes.append(time)
+        if playDelayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: playDelayNanoseconds)
+        }
+    }
+
+    func seek(to time: TimeInterval, autoplay: Bool, kind: LibraryPreviewSeekKind) async throws {
+        let _ = time
+        let _ = autoplay
+        let _ = kind
+    }
+
+    func pause() {
+        pauseCount += 1
+    }
+
+    func stop() {}
+    func discardPreparedItem() {}
 }
 
 @MainActor

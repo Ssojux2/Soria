@@ -3,6 +3,7 @@ import Foundation
 
 enum LibraryPreviewSeekKind: Equatable {
     case playbackResume
+    case waveformTap
     case waveformScrub
     case cuePoint
     case reset
@@ -90,6 +91,7 @@ final class LibraryPreviewPlayer: LibraryPreviewControlling {
     private var isPlaying = false
     private var isPrepared = false
     private var isWarm = false
+    private var playbackOperationGeneration: UInt64 = 0
 
     convenience init() {
         self.init(backend: AdaptiveLibraryPreviewBackend())
@@ -146,7 +148,9 @@ final class LibraryPreviewPlayer: LibraryPreviewControlling {
     }
 
     func play(url: URL, fromTime: TimeInterval) async throws {
+        let generation = beginPlaybackOperation()
         try await prepare(url: url)
+        guard isCurrentPlaybackOperation(generation) else { return }
         let targetTime = clampedTime(for: fromTime)
 
         do {
@@ -158,6 +162,7 @@ final class LibraryPreviewPlayer: LibraryPreviewControlling {
                 "Preview unavailable. \(error.localizedDescription)"
             )
         }
+        guard isCurrentPlaybackOperation(generation) else { return }
 
         currentTimeSec = targetTime
         isPlaying = true
@@ -167,6 +172,7 @@ final class LibraryPreviewPlayer: LibraryPreviewControlling {
     }
 
     func seek(to time: TimeInterval, autoplay: Bool, kind: LibraryPreviewSeekKind) async throws {
+        let generation = beginPlaybackOperation()
         guard isWarm, currentURL != nil else {
             throw LibraryPreviewPlayerError.invalidSeek
         }
@@ -181,6 +187,7 @@ final class LibraryPreviewPlayer: LibraryPreviewControlling {
                 "Preview unavailable. \(error.localizedDescription)"
             )
         }
+        guard isCurrentPlaybackOperation(generation) else { return }
 
         currentTimeSec = targetTime
         isPlaying = autoplay
@@ -190,6 +197,7 @@ final class LibraryPreviewPlayer: LibraryPreviewControlling {
     }
 
     func playPrepared(url: URL, fromTime: TimeInterval) throws -> Bool {
+        _ = beginPlaybackOperation()
         let standardizedURL = url.standardizedFileURL
         guard currentURL == standardizedURL, isWarm else { return false }
 
@@ -214,6 +222,7 @@ final class LibraryPreviewPlayer: LibraryPreviewControlling {
     }
 
     func seekPrepared(url: URL, to time: TimeInterval, autoplay: Bool, kind: LibraryPreviewSeekKind) throws -> Bool {
+        _ = beginPlaybackOperation()
         let standardizedURL = url.standardizedFileURL
         guard currentURL == standardizedURL, isWarm else { return false }
 
@@ -240,13 +249,15 @@ final class LibraryPreviewPlayer: LibraryPreviewControlling {
     }
 
     func pause() {
+        invalidatePlaybackOperations()
+        isPlaying = false
         guard isWarm else { return }
         backend.pause()
-        isPlaying = false
         emitStateIfPossible()
     }
 
     func stop() {
+        invalidatePlaybackOperations()
         guard currentURL != nil || isWarm || isPrepared else {
             isPlaying = false
             currentTimeSec = 0
@@ -255,8 +266,8 @@ final class LibraryPreviewPlayer: LibraryPreviewControlling {
             isWarm = false
             return
         }
-        backend.stop()
         isPlaying = false
+        backend.stop()
         currentTimeSec = 0
         isPrepared = currentURL != nil
         isWarm = currentURL != nil
@@ -270,8 +281,9 @@ final class LibraryPreviewPlayer: LibraryPreviewControlling {
         }
 
         let previousURL = currentURL
-        backend.discardPreparedItem()
+        invalidatePlaybackOperations()
         isPlaying = false
+        backend.discardPreparedItem()
         currentTimeSec = 0
         totalDurationSec = 0
         isPrepared = false
@@ -336,6 +348,19 @@ final class LibraryPreviewPlayer: LibraryPreviewControlling {
 #if DEBUG
         AppLogger.shared.info("Library preview player | \(message)")
 #endif
+    }
+
+    private func beginPlaybackOperation() -> UInt64 {
+        playbackOperationGeneration &+= 1
+        return playbackOperationGeneration
+    }
+
+    private func invalidatePlaybackOperations() {
+        playbackOperationGeneration &+= 1
+    }
+
+    private func isCurrentPlaybackOperation(_ generation: UInt64) -> Bool {
+        generation == playbackOperationGeneration
     }
 }
 
@@ -1049,6 +1074,7 @@ final class AVFoundationLibraryPreviewBackend: LibraryPreviewPlayerBackend {
     private var lastTransportRequestTimestamp: TimeInterval?
 
     private let playbackResumeSeekTolerance = CMTime(seconds: 0.04, preferredTimescale: 600)
+    private let waveformTapSeekTolerance = CMTime(seconds: 0.08, preferredTimescale: 600)
     private let waveformScrubSeekTolerance = CMTime(seconds: 0.32, preferredTimescale: 600)
     private let cueSeekTolerance = CMTime(seconds: 0.01, preferredTimescale: 600)
     private let resetSeekTolerance = CMTime(seconds: 0.08, preferredTimescale: 600)
@@ -1399,6 +1425,8 @@ final class AVFoundationLibraryPreviewBackend: LibraryPreviewPlayerBackend {
         switch kind {
         case .playbackResume:
             return playbackResumeSeekTolerance
+        case .waveformTap:
+            return waveformTapSeekTolerance
         case .waveformScrub:
             return waveformScrubSeekTolerance
         case .cuePoint:
@@ -1414,6 +1442,8 @@ private extension LibraryPreviewSeekKind {
         switch self {
         case .playbackResume:
             return "playbackResume"
+        case .waveformTap:
+            return "waveformTap"
         case .waveformScrub:
             return "waveformScrub"
         case .cuePoint:

@@ -101,7 +101,7 @@ enum WorkerTrackSearchMode: String, Codable, Equatable {
     case hybrid
 }
 
-final class PythonWorkerClient {
+nonisolated final class PythonWorkerClient {
     typealias WorkerProgressHandler = @Sendable (WorkerProgressEvent) -> Void
 
     struct WorkerConfig {
@@ -114,6 +114,7 @@ final class PythonWorkerClient {
     static let workerProgressPrefix = "SORIA_PROGRESS "
     static let defaultWorkerTimeoutSec =
         Double(ProcessInfo.processInfo.environment["SORIA_WORKER_TIMEOUT_SEC"] ?? "") ?? 120
+    private static let persistentWaveformWorkerSession = PersistentWaveformWorkerSession()
 
     private let configProvider: () -> WorkerConfig
 
@@ -149,11 +150,36 @@ final class PythonWorkerClient {
             trackMetadata: trackMetadata(for: track, externalMetadata: externalMetadata),
             options: workerOptions()
         )
-        let response: WorkerWaveformEnvelopeResponse = try await runGeneric(
-            payload: payload,
-            progress: progress,
-            commandName: payload.command
-        )
+        let response: WorkerWaveformEnvelopeResponse
+        if progress == nil {
+            do {
+                response = try await Self.persistentWaveformWorkerSession.run(
+                    config: configProvider(),
+                    payload: payload,
+                    commandName: payload.command
+                )
+            } catch is CancellationError {
+                throw WorkerError.cancelled
+            } catch {
+                if Task.isCancelled {
+                    throw WorkerError.cancelled
+                }
+                AppLogger.shared.info(
+                    "Persistent waveform worker fallback engaged: \(Self.failureSummary(for: payload.command, error: error))"
+                )
+                response = try await runGeneric(
+                    payload: payload,
+                    progress: progress,
+                    commandName: payload.command
+                )
+            }
+        } else {
+            response = try await runGeneric(
+                payload: payload,
+                progress: progress,
+                commandName: payload.command
+            )
+        }
         return response.waveformEnvelope
     }
 
@@ -806,11 +832,11 @@ final class PythonWorkerClient {
         }
     }
 
-    private static func elapsedMilliseconds(since date: Date) -> Int {
+    fileprivate static func elapsedMilliseconds(since date: Date) -> Int {
         max(Int(Date().timeIntervalSince(date) * 1000), 0)
     }
 
-    private static func workerCommandLogLine(
+    fileprivate static func workerCommandLogLine(
         level: String,
         commandName: String,
         elapsedMs: Int,
@@ -987,11 +1013,11 @@ private struct WorkerRebuildVectorIndexPayload: Codable {
     let options: WorkerOptionsPayload
 }
 
-private struct WorkerErrorResponse: Codable {
+nonisolated private struct WorkerErrorResponse: Codable {
     let error: String
 }
 
-final class WorkerStderrRouter {
+nonisolated final class WorkerStderrRouter {
     private var buffer = Data()
     private let decoder = JSONDecoder()
     private let progress: PythonWorkerClient.WorkerProgressHandler?
@@ -1121,6 +1147,431 @@ private final class WorkerProcessController: @unchecked Sendable {
                 kill(runningProcess.processIdentifier, SIGKILL)
             }
         }
+    }
+}
+
+nonisolated private final class PersistentWaveformWorkerSession: @unchecked Sendable {
+    private struct ConfigSignature: Equatable {
+        let pythonExecutable: String
+        let workerScriptPath: String
+    }
+
+    private let lock = NSLock()
+    private let stderrLock = NSLock()
+    private let requestQueue = DispatchQueue(label: "soria.worker.persistent-waveform.queue", qos: .utility)
+    private let stdoutLineSemaphore = DispatchSemaphore(value: 0)
+
+    private var configSignature: ConfigSignature?
+    private var process: Process?
+    private var inputHandle: FileHandle?
+    private var generation: UInt64 = 0
+    private var stdoutBuffer = Data()
+    private var stdoutReachedEOF = false
+    private var stderrRouter = WorkerStderrRouter(progress: nil)
+
+    func run<T: Encodable, U: Decodable>(
+        config: PythonWorkerClient.WorkerConfig,
+        payload: T,
+        commandName: String
+    ) async throws -> U {
+        let payloadData = try JSONEncoder().encode(payload)
+        try Task.checkCancellation()
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                requestQueue.async {
+                    do {
+                        let result: U = try self.runBlocking(
+                            config: config,
+                            payloadData: payloadData,
+                            commandName: commandName
+                        )
+                        continuation.resume(returning: result)
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        } onCancel: {
+            self.cancelInFlightRequest()
+        }
+    }
+
+    private func runBlocking<U: Decodable>(
+        config: PythonWorkerClient.WorkerConfig,
+        payloadData: Data,
+        commandName: String
+    ) throws -> U {
+        let startedAt = Date()
+        let processID = try ensureProcess(config: config, payloadBytes: payloadData.count, commandName: commandName)
+
+        do {
+            try writePayload(payloadData)
+            let outputData = try readResponseLine(timeoutSec: PythonWorkerClient.defaultWorkerTimeoutSec)
+            let stderrText = currentStderrText()
+
+            if let parsedError = try? JSONDecoder().decode(WorkerErrorResponse.self, from: outputData), !parsedError.error.isEmpty {
+                AppLogger.shared.error(
+                    PythonWorkerClient.workerCommandLogLine(
+                        level: "worker_error_payload",
+                        commandName: commandName,
+                        elapsedMs: PythonWorkerClient.elapsedMilliseconds(since: startedAt),
+                        processID: processID,
+                        payloadBytes: payloadData.count,
+                        stdoutBytes: outputData.count,
+                        stderrText: parsedError.error,
+                        extra: ["mode": "persistent"]
+                    )
+                )
+                throw WorkerError.executionFailed(parsedError.error)
+            }
+
+            do {
+                let decoded = try JSONDecoder().decode(U.self, from: outputData)
+                AppLogger.shared.info(
+                    PythonWorkerClient.workerCommandLogLine(
+                        level: "completed",
+                        commandName: commandName,
+                        elapsedMs: PythonWorkerClient.elapsedMilliseconds(since: startedAt),
+                        processID: processID,
+                        payloadBytes: payloadData.count,
+                        stdoutBytes: outputData.count,
+                        stderrText: stderrText,
+                        extra: ["mode": "persistent"]
+                    )
+                )
+                return decoded
+            } catch {
+                let text = String(data: outputData, encoding: .utf8) ?? ""
+                let payloadPreview = PythonWorkerClient.diagnosticPreview(text)
+                let errorPayload = [
+                    payloadPreview.isEmpty ? nil : "Payload preview: \(payloadPreview)",
+                    stderrText.isEmpty ? nil : "Stderr: \(PythonWorkerClient.diagnosticPreview(stderrText))"
+                ]
+                    .compactMap { $0 }
+                    .joined(separator: "\n")
+                AppLogger.shared.error(
+                    PythonWorkerClient.workerCommandLogLine(
+                        level: "decode_failed",
+                        commandName: commandName,
+                        elapsedMs: PythonWorkerClient.elapsedMilliseconds(since: startedAt),
+                        processID: processID,
+                        payloadBytes: payloadData.count,
+                        stdoutBytes: outputData.count,
+                        stderrText: errorPayload,
+                        extra: ["mode": "persistent"]
+                    )
+                )
+                throw WorkerError.decodeFailed(errorPayload)
+            }
+        } catch let workerError as WorkerError {
+            throw workerError
+        } catch {
+            let stderrText = currentStderrText()
+            AppLogger.shared.error(
+                PythonWorkerClient.workerCommandLogLine(
+                    level: "execution_failed",
+                    commandName: commandName,
+                    elapsedMs: PythonWorkerClient.elapsedMilliseconds(since: startedAt),
+                    processID: processID,
+                    payloadBytes: payloadData.count,
+                    stdoutBytes: nil,
+                    stderrText: stderrText.isEmpty ? error.localizedDescription : stderrText,
+                    extra: ["mode": "persistent"]
+                )
+            )
+            throw WorkerError.executionFailed(stderrText.isEmpty ? error.localizedDescription : stderrText)
+        }
+    }
+
+    private func ensureProcess(
+        config: PythonWorkerClient.WorkerConfig,
+        payloadBytes: Int,
+        commandName: String
+    ) throws -> Int32 {
+        let signature = ConfigSignature(
+            pythonExecutable: config.pythonExecutable,
+            workerScriptPath: config.workerScriptPath
+        )
+
+        lock.lock()
+        let existingProcess = process
+        let isUsable = configSignature == signature && existingProcess?.isRunning == true && inputHandle != nil
+        let existingProcessID = existingProcess?.processIdentifier
+        lock.unlock()
+
+        if isUsable, let existingProcessID {
+            return existingProcessID
+        }
+
+        return try startProcess(config: config, signature: signature, payloadBytes: payloadBytes, commandName: commandName)
+    }
+
+    private func startProcess(
+        config: PythonWorkerClient.WorkerConfig,
+        signature: ConfigSignature,
+        payloadBytes: Int,
+        commandName: String
+    ) throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: config.pythonExecutable)
+        process.arguments = [config.workerScriptPath, "--persistent"]
+
+        var environment = PythonWorkerClient.workerEnvironment(from: ProcessInfo.processInfo.environment)
+        environment["SORIA_WORKER_PERSISTENT"] = "1"
+        process.environment = environment
+
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardInput = inputPipe
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        let oldProcess = replaceStateForNewProcess()
+        terminate(process: oldProcess)
+
+        let startedAt = Date()
+        do {
+            try process.run()
+        } catch {
+            AppLogger.shared.error(
+                PythonWorkerClient.workerCommandLogLine(
+                    level: "launch_failed",
+                    commandName: commandName,
+                    elapsedMs: PythonWorkerClient.elapsedMilliseconds(since: startedAt),
+                    processID: nil,
+                    payloadBytes: payloadBytes,
+                    stdoutBytes: nil,
+                    stderrText: error.localizedDescription,
+                    extra: [
+                        "mode": "persistent",
+                        "python": config.pythonExecutable,
+                        "script": config.workerScriptPath
+                    ]
+                )
+            )
+            throw error
+        }
+
+        lock.lock()
+        let currentGeneration = generation
+        configSignature = signature
+        self.process = process
+        inputHandle = inputPipe.fileHandleForWriting
+        stdoutBuffer.removeAll(keepingCapacity: false)
+        stdoutReachedEOF = false
+        lock.unlock()
+
+        stderrLock.lock()
+        stderrRouter = WorkerStderrRouter(progress: nil)
+        stderrLock.unlock()
+
+        let processID = process.processIdentifier
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.drainStdout(from: outputPipe.fileHandleForReading, generation: currentGeneration)
+        }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.drainStderr(from: errorPipe.fileHandleForReading, generation: currentGeneration)
+        }
+
+        AppLogger.shared.info(
+            PythonWorkerClient.workerCommandLogLine(
+                level: "started",
+                commandName: commandName,
+                elapsedMs: 0,
+                processID: processID,
+                payloadBytes: payloadBytes,
+                stdoutBytes: nil,
+                stderrText: nil,
+                extra: [
+                    "mode": "persistent",
+                    "timeoutSec": String(format: "%.0f", PythonWorkerClient.defaultWorkerTimeoutSec),
+                    "python": config.pythonExecutable,
+                    "script": config.workerScriptPath
+                ]
+            )
+        )
+
+        return processID
+    }
+
+    private func writePayload(_ payloadData: Data) throws {
+        lock.lock()
+        let handle = inputHandle
+        let generation = generation
+        let isRunning = process?.isRunning == true
+        lock.unlock()
+
+        guard isRunning, let handle else {
+            throw WorkerError.executionFailed("Persistent waveform worker is not running.")
+        }
+
+        do {
+            try handle.write(contentsOf: payloadData)
+            try handle.write(contentsOf: Data([0x0A]))
+        } catch {
+            markStdoutEOF(for: generation)
+            throw error
+        }
+    }
+
+    private func readResponseLine(timeoutSec: Double) throws -> Data {
+        let deadline = DispatchTime.now() + timeoutSec
+
+        while true {
+            if let line = popBufferedResponseLine() {
+                if line.isEmpty {
+                    continue
+                }
+                return line
+            }
+
+            if stdoutLineSemaphore.wait(timeout: deadline) == .timedOut {
+                cancelInFlightRequest()
+                throw WorkerError.timedOut(timeoutSec, detail: currentStderrText())
+            }
+
+            lock.lock()
+            let reachedEOF = stdoutReachedEOF
+            let hasBufferedData = !stdoutBuffer.isEmpty
+            lock.unlock()
+            if reachedEOF && !hasBufferedData {
+                throw WorkerError.executionFailed(currentStderrText())
+            }
+        }
+    }
+
+    private func popBufferedResponseLine() -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let newlineRange = stdoutBuffer.range(of: Data([0x0A])) else {
+            if stdoutReachedEOF, !stdoutBuffer.isEmpty {
+                let remainder = stdoutBuffer
+                stdoutBuffer.removeAll(keepingCapacity: false)
+                return remainder
+            }
+            return nil
+        }
+
+        let line = stdoutBuffer.subdata(in: 0..<newlineRange.lowerBound)
+        stdoutBuffer.removeSubrange(0...newlineRange.lowerBound)
+        return line
+    }
+
+    private func currentStderrText() -> String {
+        stderrLock.lock()
+        defer { stderrLock.unlock() }
+        return stderrRouter.plainText
+    }
+
+    private func replaceStateForNewProcess() -> Process? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        generation &+= 1
+        let oldProcess = process
+        configSignature = nil
+        process = nil
+        inputHandle = nil
+        stdoutBuffer.removeAll(keepingCapacity: false)
+        stdoutReachedEOF = true
+        stdoutLineSemaphore.signal()
+        return oldProcess
+    }
+
+    private func cancelInFlightRequest() {
+        let process = replaceStateForNewProcess()
+        terminate(process: process)
+    }
+
+    private func terminate(process: Process?) {
+        guard let process, process.isRunning else { return }
+        process.terminate()
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.75) {
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+            }
+        }
+    }
+
+    private func drainStdout(from handle: FileHandle, generation: UInt64) {
+        while true {
+            let data = handle.availableData
+            if data.isEmpty {
+                markStdoutEOF(for: generation)
+                break
+            }
+            appendStdout(data, generation: generation)
+        }
+    }
+
+    private func drainStderr(from handle: FileHandle, generation: UInt64) {
+        while true {
+            let data = handle.availableData
+            if data.isEmpty {
+                finishStderr(generation: generation)
+                break
+            }
+            appendStderr(data, generation: generation)
+        }
+    }
+
+    private func appendStdout(_ data: Data, generation: UInt64) {
+        guard !data.isEmpty else { return }
+
+        lock.lock()
+        guard generation == self.generation else {
+            lock.unlock()
+            return
+        }
+        stdoutBuffer.append(data)
+        lock.unlock()
+
+        let newlineCount = data.reduce(into: 0) { partialResult, byte in
+            if byte == 0x0A {
+                partialResult += 1
+            }
+        }
+        if newlineCount > 0 {
+            for _ in 0..<newlineCount {
+                stdoutLineSemaphore.signal()
+            }
+        }
+    }
+
+    private func markStdoutEOF(for generation: UInt64) {
+        lock.lock()
+        guard generation == self.generation else {
+            lock.unlock()
+            return
+        }
+        stdoutReachedEOF = true
+        lock.unlock()
+        stdoutLineSemaphore.signal()
+    }
+
+    private func appendStderr(_ data: Data, generation: UInt64) {
+        lock.lock()
+        let isCurrentGeneration = generation == self.generation
+        lock.unlock()
+        guard isCurrentGeneration else { return }
+
+        stderrLock.lock()
+        stderrRouter.append(data)
+        stderrLock.unlock()
+    }
+
+    private func finishStderr(generation: UInt64) {
+        lock.lock()
+        let isCurrentGeneration = generation == self.generation
+        lock.unlock()
+        guard isCurrentGeneration else { return }
+
+        stderrLock.lock()
+        stderrRouter.finish()
+        stderrLock.unlock()
     }
 }
 

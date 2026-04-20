@@ -317,68 +317,26 @@ struct LibraryView: View {
     }
 
     private var libraryPreviewStrip: some View {
-        let state = viewModel.libraryPreviewState
-        let cueGroups = TrackCuePresentation.waveformCueGroups(from: viewModel.selectedTrackExternalMetadata)
-
-        return HStack(alignment: .center, spacing: 10) {
-            ImmediateActivationButton(
-                isEnabled: state.isAvailable,
-                accessibilityIdentifier: "library-preview-toggle",
-                accessibilityLabel: state.isPlaying ? "Pause Preview" : "Play Preview",
-                accessibilityValue: state.isPlaying ? "playing" : "paused"
-            ) {
-                viewModel.handleLibraryPreviewTogglePress()
-            } label: {
-                Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 28, height: 28)
-                    .background(Color.accentColor.opacity(state.isAvailable ? 0.14 : 0.08), in: Circle())
+        LibraryPreviewStripView(
+            previewUIState: viewModel.libraryPreviewUIState,
+            waveformEnvelope: viewModel.selectedTrackWaveformEnvelope,
+            fallbackSamples: viewModel.selectedTrackWaveformPreview,
+            cueGroups: TrackCuePresentation.waveformCueGroups(from: viewModel.selectedTrackExternalMetadata),
+            onToggle: viewModel.handleLibraryPreviewTogglePress,
+            onScrub: { normalizedPosition, phase in
+                viewModel.handleLibraryPreviewInteraction(
+                    normalizedPosition: normalizedPosition,
+                    phase: phase
+                )
+            },
+            onCueSelected: { cueGroup in
+                viewModel.seekLibraryPreview(
+                    to: cueGroup.startSec,
+                    autoplay: true,
+                    seekKind: .cuePoint
+                )
             }
-
-            LibraryPreviewWaveformView(
-                waveformEnvelope: viewModel.selectedTrackWaveformEnvelope,
-                fallbackSamples: viewModel.selectedTrackWaveformPreview,
-                progress: state.progress,
-                currentTimeSec: state.currentTimeSec,
-                totalDurationSec: state.totalDurationSec,
-                cueGroups: cueGroups,
-                onScrub: { normalizedPosition, phase in
-                    viewModel.handleLibraryPreviewInteraction(
-                        normalizedPosition: normalizedPosition,
-                        phase: phase
-                    )
-                },
-                onCueSelected: { cueGroup in
-                    viewModel.seekLibraryPreview(
-                        to: cueGroup.startSec,
-                        autoplay: true,
-                        seekKind: .cuePoint
-                    )
-                }
-            )
-            .frame(maxWidth: .infinity)
-            .frame(height: 52)
-            .accessibilityIdentifier("library-preview-progress")
-
-            VStack(alignment: .trailing, spacing: 2) {
-                Text("\(previewTimeText(for: state.currentTimeSec)) / \(previewTimeText(for: state.totalDurationSec))")
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("library-preview-time")
-
-                if !state.message.isEmpty {
-                    Text(state.message)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.trailing)
-                }
-            }
-            .frame(minWidth: 160, alignment: .trailing)
-        }
-        .padding(.top, 2)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("library-preview-strip")
+        )
     }
 
     private var librarySetupPrompt: some View {
@@ -526,13 +484,6 @@ struct LibraryView: View {
         .accessibilityIdentifier("library-preparation-notice")
     }
 
-    private func previewTimeText(for seconds: Double) -> String {
-        let roundedSeconds = max(Int(seconds.rounded(.down)), 0)
-        let minutes = roundedSeconds / 60
-        let remainder = roundedSeconds % 60
-        return String(format: "%d:%02d", minutes, remainder)
-    }
-
     private var librarySelectionHeadline: String {
         switch viewModel.selectionReadiness.selectedCount {
         case 0:
@@ -660,6 +611,76 @@ struct LibraryView: View {
     }
 }
 
+private struct LibraryPreviewStripView: View {
+    @ObservedObject var previewUIState: LibraryPreviewUIState
+    let waveformEnvelope: TrackWaveformEnvelope?
+    let fallbackSamples: [Double]
+    let cueGroups: [TrackCuePresentation.WaveformCueGroup]
+    let onToggle: () -> Void
+    let onScrub: (Double, LibraryPreviewInteractionPhase) -> Void
+    let onCueSelected: (TrackCuePresentation.WaveformCueGroup) -> Void
+
+    var body: some View {
+        let state = previewUIState.renderedState
+
+        HStack(alignment: .center, spacing: 10) {
+            ImmediateActivationButton(
+                isEnabled: state.isAvailable,
+                accessibilityIdentifier: "library-preview-toggle",
+                accessibilityLabel: state.isPlaying ? "Pause Preview" : "Play Preview",
+                accessibilityValue: state.isPlaying ? "playing" : "paused",
+                action: onToggle
+            ) {
+                Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 28, height: 28)
+                    .background(Color.accentColor.opacity(state.isAvailable ? 0.14 : 0.08), in: Circle())
+            }
+
+            LibraryPreviewWaveformView(
+                waveformEnvelope: waveformEnvelope,
+                fallbackSamples: fallbackSamples,
+                progress: state.progress,
+                currentTimeSec: state.currentTimeSec,
+                totalDurationSec: state.totalDurationSec,
+                cueGroups: cueGroups,
+                onScrub: onScrub,
+                onCueSelected: onCueSelected
+            )
+            .frame(maxWidth: .infinity)
+            .frame(height: 52)
+            .accessibilityIdentifier("library-preview-progress")
+            .animation(.linear(duration: 0.1), value: state.progress)
+
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("\(previewTimeText(for: state.currentTimeSec)) / \(previewTimeText(for: state.totalDurationSec))")
+                    .font(.footnote.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("library-preview-time")
+
+                if !state.message.isEmpty {
+                    Text(state.message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.trailing)
+                }
+            }
+            .frame(minWidth: 160, alignment: .trailing)
+        }
+        .padding(.top, 2)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("library-preview-strip")
+    }
+
+    private func previewTimeText(for seconds: Double) -> String {
+        let roundedSeconds = max(Int(seconds.rounded(.down)), 0)
+        let minutes = roundedSeconds / 60
+        let remainder = roundedSeconds % 60
+        return String(format: "%d:%02d", minutes, remainder)
+    }
+}
+
 enum PreviewPressIntentState: Equatable {
     case idle
     case armed(origin: CGPoint, location: CGPoint)
@@ -711,8 +732,9 @@ struct PreviewPressIntentTracker {
     }
 
     mutating func commitIfPossible(within bounds: CGRect, isWindowActive: Bool) -> PreviewPressIntentDecision {
+        let _ = isWindowActive
         guard case .armed(let origin, let location) = state else { return .none }
-        guard isWindowActive, bounds.contains(location), !movedBeyondSlop(from: origin, to: location) else {
+        guard bounds.contains(location), !movedBeyondSlop(from: origin, to: location) else {
             state = .canceled
             return .cancel
         }
@@ -756,6 +778,228 @@ private func previewInteractionDebugLog(_ message: String) {
 #endif
 }
 
+private func waveformEnvelopeSignature(_ envelope: TrackWaveformEnvelope) -> Int {
+    var hasher = Hasher()
+    hasher.combine(envelope.durationSec.bitPattern)
+    hasher.combine(envelope.binCount)
+    hasher.combine(envelope.sourceVersion)
+    for value in envelope.upperPeaks {
+        hasher.combine(value.bitPattern)
+    }
+    for value in envelope.lowerPeaks {
+        hasher.combine(value.bitPattern)
+    }
+    return hasher.finalize()
+}
+
+private func makeWaveformCGPath(
+    envelope: TrackWaveformEnvelope,
+    layout: LibraryPreviewWaveformLayout
+) -> CGPath {
+    let pointCount = min(envelope.upperPeaks.count, envelope.lowerPeaks.count)
+    guard pointCount > 1 else { return CGMutablePath() }
+
+    let centerY = layout.contentRect.midY
+    let amplitude = layout.contentRect.height * 0.45
+
+    func point(for index: Int, peak: Double) -> CGPoint {
+        let normalized = CGFloat(index) / CGFloat(max(pointCount - 1, 1))
+        let x = layout.contentRect.minX + (normalized * layout.contentRect.width)
+        let y = centerY - CGFloat(peak) * amplitude
+        return CGPoint(x: x, y: y)
+    }
+
+    let path = CGMutablePath()
+    path.move(to: point(for: 0, peak: envelope.upperPeaks[0]))
+    for index in 1..<pointCount {
+        path.addLine(to: point(for: index, peak: envelope.upperPeaks[index]))
+    }
+    for index in stride(from: pointCount - 1, through: 0, by: -1) {
+        path.addLine(to: point(for: index, peak: envelope.lowerPeaks[index]))
+    }
+    path.closeSubpath()
+    return path
+}
+
+struct LibraryPreviewWaveformLayout {
+    let totalWidth: CGFloat
+    let totalHeight: CGFloat
+    let totalDurationSec: Double
+    let horizontalInset: CGFloat
+    let verticalInset: CGFloat
+    let cueTapHeight: CGFloat
+    let cueHorizontalPadding: CGFloat
+    let pointCueMinimumWidth: CGFloat
+
+    init(
+        totalWidth: CGFloat,
+        totalHeight: CGFloat,
+        totalDurationSec: Double,
+        horizontalInset: CGFloat = 0,
+        verticalInset: CGFloat = 4,
+        cueTapHeight: CGFloat = 18,
+        cueHorizontalPadding: CGFloat = 4,
+        pointCueMinimumWidth: CGFloat = 16
+    ) {
+        self.totalWidth = totalWidth
+        self.totalHeight = totalHeight
+        self.totalDurationSec = totalDurationSec
+        self.horizontalInset = horizontalInset
+        self.verticalInset = verticalInset
+        self.cueTapHeight = cueTapHeight
+        self.cueHorizontalPadding = cueHorizontalPadding
+        self.pointCueMinimumWidth = pointCueMinimumWidth
+    }
+
+    var contentRect: CGRect {
+        let usableWidth = max(totalWidth - (horizontalInset * 2), 1)
+        let usableHeight = max(totalHeight - (verticalInset * 2), 1)
+        return CGRect(x: horizontalInset, y: verticalInset, width: usableWidth, height: usableHeight)
+    }
+
+    var interactionRect: CGRect {
+        CGRect(x: contentRect.minX, y: 0, width: contentRect.width, height: totalHeight)
+    }
+
+    func clampedInteractionX(for x: CGFloat) -> CGFloat {
+        min(max(x, interactionRect.minX), interactionRect.maxX)
+    }
+
+    func normalizedPosition(for x: CGFloat) -> Double {
+        let rect = contentRect
+        guard rect.width > 0 else { return 0 }
+        let clampedX = min(max(x, rect.minX), rect.maxX)
+        return Double((clampedX - rect.minX) / rect.width)
+    }
+
+    func xPosition(for timeSec: Double) -> CGFloat {
+        guard totalDurationSec > 0 else { return contentRect.minX }
+        let normalized = min(max(timeSec / totalDurationSec, 0), 1)
+        return contentRect.minX + (contentRect.width * CGFloat(normalized))
+    }
+
+    func cueHitRect(for cueGroup: TrackCuePresentation.WaveformCueGroup, cueLineWidth: CGFloat) -> CGRect {
+        let tapY = max(contentRect.minY - 1, 0)
+        let tapHeight = min(max(cueTapHeight, 12), totalHeight - tapY)
+
+        if cueGroup.isLoop {
+            let startX = xPosition(for: cueGroup.startSec)
+            let endX = xPosition(for: cueGroup.endSec ?? cueGroup.startSec)
+            let minX = max(min(startX, endX) - cueHorizontalPadding, interactionRect.minX)
+            let maxX = min(max(startX, endX) + cueHorizontalPadding, interactionRect.maxX)
+            return CGRect(x: minX, y: tapY, width: max(maxX - minX, pointCueMinimumWidth), height: tapHeight)
+        }
+
+        let centerX = xPosition(for: cueGroup.startSec)
+        let hitWidth = max(cueLineWidth + (cueHorizontalPadding * 2), pointCueMinimumWidth)
+        let minX = max(centerX - (hitWidth / 2), interactionRect.minX)
+        let maxX = min(centerX + (hitWidth / 2), interactionRect.maxX)
+        return CGRect(x: minX, y: tapY, width: max(maxX - minX, pointCueMinimumWidth), height: tapHeight)
+    }
+}
+
+private struct LibraryPreviewWaveformBackgroundView: NSViewRepresentable {
+    let envelope: TrackWaveformEnvelope
+    let layout: LibraryPreviewWaveformLayout
+    let progressWidth: CGFloat
+
+    func makeNSView(context: Context) -> LibraryPreviewWaveformBackgroundNSView {
+        LibraryPreviewWaveformBackgroundNSView()
+    }
+
+    func updateNSView(_ nsView: LibraryPreviewWaveformBackgroundNSView, context: Context) {
+        nsView.update(
+            envelope: envelope,
+            layout: layout,
+            progressWidth: progressWidth
+        )
+    }
+}
+
+private final class LibraryPreviewWaveformBackgroundNSView: NSView {
+    private let backgroundLayer = CAGradientLayer()
+    private let progressTintLayer = CALayer()
+    private let inactiveWaveformLayer = CAShapeLayer()
+    private let activeWaveformLayer = CAShapeLayer()
+    private let activeWaveformMaskLayer = CALayer()
+
+    private var lastEnvelopeSignature: Int?
+    private var lastSize: CGSize = .zero
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 10
+        layer?.masksToBounds = true
+        configureLayers()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        backgroundLayer.frame = bounds
+        inactiveWaveformLayer.frame = bounds
+        activeWaveformLayer.frame = bounds
+    }
+
+    func update(
+        envelope: TrackWaveformEnvelope,
+        layout: LibraryPreviewWaveformLayout,
+        progressWidth: CGFloat
+    ) {
+        let size = CGSize(width: layout.totalWidth, height: layout.totalHeight)
+        let envelopeSignature = waveformEnvelopeSignature(envelope)
+        if envelopeSignature != lastEnvelopeSignature || size != lastSize {
+            let path = makeWaveformCGPath(envelope: envelope, layout: layout)
+            inactiveWaveformLayer.path = path
+            activeWaveformLayer.path = path
+            lastEnvelopeSignature = envelopeSignature
+            lastSize = size
+        }
+
+        let contentMinX = layout.contentRect.minX
+        progressTintLayer.frame = CGRect(
+            x: contentMinX,
+            y: 0,
+            width: max(progressWidth, 0),
+            height: layout.totalHeight
+        )
+        activeWaveformMaskLayer.frame = CGRect(
+            x: 0,
+            y: 0,
+            width: max(contentMinX + progressWidth, 0),
+            height: layout.totalHeight
+        )
+    }
+
+    private func configureLayers() {
+        backgroundLayer.colors = [
+            NSColor.secondaryLabelColor.withAlphaComponent(0.16).cgColor,
+            NSColor.secondaryLabelColor.withAlphaComponent(0.09).cgColor,
+        ]
+        backgroundLayer.startPoint = CGPoint(x: 0.5, y: 1.0)
+        backgroundLayer.endPoint = CGPoint(x: 0.5, y: 0.0)
+        layer?.addSublayer(backgroundLayer)
+
+        progressTintLayer.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.12).cgColor
+        layer?.addSublayer(progressTintLayer)
+
+        inactiveWaveformLayer.fillColor = NSColor.secondaryLabelColor.withAlphaComponent(0.24).cgColor
+        inactiveWaveformLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        layer?.addSublayer(inactiveWaveformLayer)
+
+        activeWaveformMaskLayer.backgroundColor = NSColor.white.cgColor
+        activeWaveformLayer.fillColor = NSColor.controlAccentColor.withAlphaComponent(0.92).cgColor
+        activeWaveformLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        activeWaveformLayer.mask = activeWaveformMaskLayer
+        layer?.addSublayer(activeWaveformLayer)
+    }
+}
+
 private struct LibraryPreviewWaveformView: View {
     let waveformEnvelope: TrackWaveformEnvelope?
     let fallbackSamples: [Double]
@@ -784,28 +1028,33 @@ private struct LibraryPreviewWaveformView: View {
         GeometryReader { proxy in
             let width = max(proxy.size.width, 1)
             let height = max(proxy.size.height, 1)
-            let progressWidth = width * CGFloat(min(max(progress, 0), 1))
+            let layout = LibraryPreviewWaveformLayout(
+                totalWidth: width,
+                totalHeight: height,
+                totalDurationSec: totalDurationSec
+            )
+            let progressWidth = layout.contentRect.width * CGFloat(min(max(progress, 0), 1))
             let activeLocationX = pressLocationX ?? hoverLocationX
-            let cueHitRects = cueExclusionRects(totalWidth: width, height: height)
+            let cueHitRects = cueExclusionRects(layout: layout)
 
             ZStack(alignment: .leading) {
-                waveformBackground(width: width, height: height, progressWidth: progressWidth)
+                waveformBackground(layout: layout, height: height, progressWidth: progressWidth)
                     .allowsHitTesting(false)
 
                 waveformInteractionLayer(
-                    width: width,
+                    layout: layout,
                     height: height,
                     cueExclusionRects: cueHitRects
                 )
 
-                cueOverlay(width: width, height: height)
+                cueOverlay(layout: layout, height: height)
                     .zIndex(2)
 
                 if totalDurationSec > 0 {
                     Rectangle()
                         .fill(Color.white.opacity(0.95))
                         .frame(width: 2, height: height - 8)
-                        .offset(x: max(playheadX(for: width) - 1, 0), y: 4)
+                        .offset(x: max(playheadX(layout: layout) - 1, 0), y: 4)
                         .shadow(color: Color.black.opacity(0.18), radius: 1, x: 0, y: 0)
                         .allowsHitTesting(false)
                 }
@@ -820,9 +1069,9 @@ private struct LibraryPreviewWaveformView: View {
 
                 if let activeLocationX {
                     scrubBadge(
-                        width: width,
+                        layout: layout,
                         locationX: activeLocationX,
-                        normalizedPosition: normalizedPosition(for: activeLocationX, width: width)
+                        normalizedPosition: layout.normalizedPosition(for: activeLocationX)
                     )
                     .allowsHitTesting(false)
                 }
@@ -842,7 +1091,11 @@ private struct LibraryPreviewWaveformView: View {
     }
 
     @ViewBuilder
-    private func waveformBackground(width: CGFloat, height: CGFloat, progressWidth: CGFloat) -> some View {
+    private func waveformBackground(
+        layout: LibraryPreviewWaveformLayout,
+        height: CGFloat,
+        progressWidth: CGFloat
+    ) -> some View {
         RoundedRectangle(cornerRadius: 10)
             .fill(
                 LinearGradient(
@@ -856,20 +1109,11 @@ private struct LibraryPreviewWaveformView: View {
             )
 
         if let resolvedEnvelope {
-            waveformPath(envelope: resolvedEnvelope, width: width, height: height)
-                .fill(Color.secondary.opacity(0.24))
-
-            Rectangle()
-                .fill(Color.accentColor.opacity(0.12))
-                .frame(width: progressWidth)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-
-            waveformPath(envelope: resolvedEnvelope, width: width, height: height)
-                .fill(Color.accentColor.opacity(0.92))
-                .mask(alignment: .leading) {
-                    Rectangle()
-                        .frame(width: progressWidth)
-                }
+            LibraryPreviewWaveformBackgroundView(
+                envelope: resolvedEnvelope,
+                layout: layout,
+                progressWidth: progressWidth
+            )
         } else {
             Capsule()
                 .fill(Color.secondary.opacity(0.28))
@@ -880,7 +1124,7 @@ private struct LibraryPreviewWaveformView: View {
     }
 
     private func waveformInteractionLayer(
-        width: CGFloat,
+        layout: LibraryPreviewWaveformLayout,
         height: CGFloat,
         cueExclusionRects: [CGRect]
     ) -> some View {
@@ -889,16 +1133,17 @@ private struct LibraryPreviewWaveformView: View {
             .contentShape(RoundedRectangle(cornerRadius: 10))
             .overlay {
                 PreviewWaveformInteractionOverlay(
+                    interactionRect: layout.interactionRect,
                     cueExclusionRects: cueExclusionRects,
                     onHoverChanged: { locationX in
                         if let locationX {
-                            hoverLocationX = max(min(locationX, width), 0)
+                            hoverLocationX = layout.clampedInteractionX(for: locationX)
                         } else if pressLocationX == nil {
                             hoverLocationX = nil
                         }
                     },
                     onInteraction: { phase, locationX in
-                        let clampedX = max(min(locationX, width), 0)
+                        let clampedX = layout.clampedInteractionX(for: locationX)
                         switch phase {
                         case .mouseDown:
                             pressLocationX = clampedX
@@ -912,74 +1157,84 @@ private struct LibraryPreviewWaveformView: View {
                         }
 
                         onScrub(
-                            normalizedPosition(for: clampedX, width: width),
+                            layout.normalizedPosition(for: clampedX),
                             phase
                         )
                     }
                 )
             }
-            .frame(width: width, height: height)
+            .frame(width: layout.totalWidth, height: height)
     }
 
     @ViewBuilder
-    private func cueOverlay(width: CGFloat, height: CGFloat) -> some View {
+    private func cueOverlay(layout: LibraryPreviewWaveformLayout, height: CGFloat) -> some View {
         ZStack(alignment: .leading) {
             ForEach(Array(cueGroups.enumerated()), id: \.offset) { entry in
                 let cueGroup = entry.element
-                let hitRect = cueHitRect(for: cueGroup, totalWidth: width, height: height)
+                let hitRect = cueHitRect(for: cueGroup, layout: layout)
                 if cueGroup.isLoop {
-                    Button {
-                        onCueSelected(cueGroup)
-                    } label: {
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(cueColor(for: cueGroup).opacity(0.24))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .stroke(cueColor(for: cueGroup).opacity(0.68), lineWidth: 1)
-                            )
-                            .frame(
-                                width: loopWidth(for: cueGroup, totalWidth: width),
-                                height: max(height - 14, 10)
-                            )
-                            .padding(.leading, 8)
-                            .padding(.top, 7)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    }
-                    .buttonStyle(.plain)
-                    .frame(width: hitRect.width, height: hitRect.height, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .accessibilityIdentifier("library-preview-cue-\(entry.offset)")
-                    .help(cueGroup.tooltipText)
-                    .offset(x: hitRect.minX, y: 0)
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(cueColor(for: cueGroup).opacity(0.24))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(cueColor(for: cueGroup).opacity(0.68), lineWidth: 1)
+                        )
+                        .frame(
+                            width: loopWidth(for: cueGroup, layout: layout),
+                            height: max(height - 14, 10)
+                        )
+                        .offset(x: layout.xPosition(for: cueGroup.startSec), y: 7)
+                        .allowsHitTesting(false)
+
+                    cueTapButton(for: cueGroup, index: entry.offset, hitRect: hitRect)
                 } else {
-                    Button {
-                        onCueSelected(cueGroup)
-                    } label: {
-                        VStack(spacing: 3) {
-                            Capsule()
-                                .fill(cueColor(for: cueGroup))
-                                .frame(width: 8, height: 8)
-                            Rectangle()
-                                .fill(cueColor(for: cueGroup).opacity(0.85))
-                                .frame(width: cueLineWidth(for: cueGroup), height: max(height - 18, 10))
-                        }
-                        .padding(.top, 5)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    VStack(spacing: 3) {
+                        Capsule()
+                            .fill(cueColor(for: cueGroup))
+                            .frame(width: 8, height: 8)
+                        Rectangle()
+                            .fill(cueColor(for: cueGroup).opacity(0.85))
+                            .frame(width: cueLineWidth(for: cueGroup), height: max(height - 18, 10))
                     }
-                    .buttonStyle(.plain)
-                    .frame(width: hitRect.width, height: hitRect.height, alignment: .top)
-                    .contentShape(Rectangle())
-                    .accessibilityIdentifier("library-preview-cue-\(entry.offset)")
-                    .help(cueGroup.tooltipText)
-                    .offset(x: hitRect.minX, y: 0)
+                    .frame(width: 12, height: max(height - 10, 10), alignment: .top)
+                    .offset(x: layout.xPosition(for: cueGroup.startSec) - 6, y: 5)
+                    .allowsHitTesting(false)
+
+                    cueTapButton(for: cueGroup, index: entry.offset, hitRect: hitRect)
                 }
             }
         }
     }
 
     @ViewBuilder
-    private func scrubBadge(width: CGFloat, locationX: CGFloat, normalizedPosition: Double) -> some View {
-        let xPosition = min(max(locationX, 34), max(width - 34, 34))
+    private func cueTapButton(
+        for cueGroup: TrackCuePresentation.WaveformCueGroup,
+        index: Int,
+        hitRect: CGRect
+    ) -> some View {
+        Button {
+            onCueSelected(cueGroup)
+        } label: {
+            Color.clear
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .frame(width: hitRect.width, height: hitRect.height)
+        .accessibilityIdentifier("library-preview-cue-\(index)")
+        .help(cueGroup.tooltipText)
+        .offset(x: hitRect.minX, y: hitRect.minY)
+    }
+
+    @ViewBuilder
+    private func scrubBadge(
+        layout: LibraryPreviewWaveformLayout,
+        locationX: CGFloat,
+        normalizedPosition: Double
+    ) -> some View {
+        let xPosition = min(
+            max(locationX, layout.contentRect.minX + 26),
+            max(layout.contentRect.maxX - 26, layout.contentRect.minX + 26)
+        )
 
         Text(TrackCuePresentation.timeText(for: totalDurationSec * normalizedPosition))
             .font(.caption.monospacedDigit())
@@ -990,78 +1245,27 @@ private struct LibraryPreviewWaveformView: View {
             .offset(x: xPosition - 30, y: 4)
     }
 
-    private func waveformPath(envelope: TrackWaveformEnvelope, width: CGFloat, height: CGFloat) -> Path {
-        let pointCount = min(envelope.upperPeaks.count, envelope.lowerPeaks.count)
-        guard pointCount > 1 else { return Path() }
-
-        let centerY = height / 2
-        let amplitude = height * 0.42
-
-        func point(for index: Int, peak: Double) -> CGPoint {
-            let x = CGFloat(index) / CGFloat(max(pointCount - 1, 1)) * width
-            let y = centerY - CGFloat(peak) * amplitude
-            return CGPoint(x: x, y: y)
-        }
-
-        var path = Path()
-        path.move(to: point(for: 0, peak: envelope.upperPeaks[0]))
-        for index in 1..<pointCount {
-            path.addLine(to: point(for: index, peak: envelope.upperPeaks[index]))
-        }
-        for index in stride(from: pointCount - 1, through: 0, by: -1) {
-            path.addLine(to: point(for: index, peak: envelope.lowerPeaks[index]))
-        }
-        path.closeSubpath()
-        return path
-    }
-
-    private func normalizedPosition(for x: CGFloat, width: CGFloat) -> Double {
-        guard width > 0 else { return 0 }
-        return Double(min(max(x / width, 0), 1))
-    }
-
-    private func playheadX(for totalWidth: CGFloat) -> CGFloat {
+    private func playheadX(layout: LibraryPreviewWaveformLayout) -> CGFloat {
         guard totalDurationSec > 0 else { return 0 }
-        return xPosition(for: currentTimeSec, totalWidth: totalWidth)
+        return layout.xPosition(for: currentTimeSec)
     }
 
-    private func xPosition(for timeSec: Double, totalWidth: CGFloat) -> CGFloat {
-        guard totalDurationSec > 0 else { return 0 }
-        let normalized = min(max(timeSec / totalDurationSec, 0), 1)
-        return totalWidth * CGFloat(normalized)
-    }
-
-    private func loopWidth(for cueGroup: TrackCuePresentation.WaveformCueGroup, totalWidth: CGFloat) -> CGFloat {
+    private func loopWidth(for cueGroup: TrackCuePresentation.WaveformCueGroup, layout: LibraryPreviewWaveformLayout) -> CGFloat {
         guard let endSec = cueGroup.endSec else { return 6 }
-        let startX = xPosition(for: cueGroup.startSec, totalWidth: totalWidth)
-        let endX = xPosition(for: endSec, totalWidth: totalWidth)
+        let startX = layout.xPosition(for: cueGroup.startSec)
+        let endX = layout.xPosition(for: endSec)
         return max(endX - startX, 6)
     }
 
-    private func cueExclusionRects(totalWidth: CGFloat, height: CGFloat) -> [CGRect] {
-        cueGroups.map { cueHitRect(for: $0, totalWidth: totalWidth, height: height) }
+    private func cueExclusionRects(layout: LibraryPreviewWaveformLayout) -> [CGRect] {
+        cueGroups.map { cueHitRect(for: $0, layout: layout) }
     }
 
     private func cueHitRect(
         for cueGroup: TrackCuePresentation.WaveformCueGroup,
-        totalWidth: CGFloat,
-        height: CGFloat
+        layout: LibraryPreviewWaveformLayout
     ) -> CGRect {
-        let fullHeight = max(height, 1)
-        if cueGroup.isLoop {
-            let startX = xPosition(for: cueGroup.startSec, totalWidth: totalWidth)
-            let visualWidth = loopWidth(for: cueGroup, totalWidth: totalWidth)
-            let paddingX: CGFloat = 8
-            let minX = max(startX - paddingX, 0)
-            let maxX = min(startX + visualWidth + paddingX, totalWidth)
-            return CGRect(x: minX, y: 0, width: max(maxX - minX, 16), height: fullHeight)
-        }
-
-        let centerX = xPosition(for: cueGroup.startSec, totalWidth: totalWidth)
-        let hitWidth = max(cueLineWidth(for: cueGroup) + 16, 22)
-        let minX = max(centerX - (hitWidth / 2), 0)
-        let maxX = min(centerX + (hitWidth / 2), totalWidth)
-        return CGRect(x: minX, y: 0, width: max(maxX - minX, 16), height: fullHeight)
+        layout.cueHitRect(for: cueGroup, cueLineWidth: cueLineWidth(for: cueGroup))
     }
 
     private func cueColor(for cueGroup: TrackCuePresentation.WaveformCueGroup) -> Color {
@@ -1147,84 +1351,43 @@ private struct ImmediatePressOverlay: NSViewRepresentable {
 }
 
 private final class ImmediatePressView: NSView {
-    private let commitDelaySec: TimeInterval = 0.01
     var isEnabled = true
     weak var coordinator: ImmediatePressOverlay.Coordinator?
-    private var pressTracker = PreviewPressIntentTracker()
-    private var pendingCommitWorkItem: DispatchWorkItem?
 
     override var isFlipped: Bool { true }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        false
+        true
     }
 
     override func mouseDown(with event: NSEvent) {
         guard isEnabled else { return }
         let point = convert(event.locationInWindow, from: nil)
-        pressTracker.arm(at: point)
-        previewInteractionDebugLog("toggle mouseDown | armed")
-        scheduleCommitIfNeeded()
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        switch pressTracker.move(to: point, within: bounds) {
-        case .cancel, .beginDrag:
-            cancelPendingCommit()
-            previewInteractionDebugLog("toggle canceled by drag/outside")
-        case .none, .commit, .drag, .end:
-            break
+        guard bounds.contains(point) else {
+            previewInteractionDebugLog("toggle mouseDown | ignored outside")
+            return
         }
+        previewInteractionDebugLog("toggle mouseDown | committed")
+        coordinator?.onPress()
     }
 
     override func mouseUp(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if case .commit = pressTracker.commitIfPossible(within: bounds, isWindowActive: window?.isKeyWindow == true) {
-            previewInteractionDebugLog("toggle committed on mouseUp")
-            coordinator?.onPress()
-        }
-        cancelPendingCommit()
-        if case .end = pressTracker.end(at: point) {
+        if bounds.contains(point) {
             previewInteractionDebugLog("toggle mouseUp")
         }
-    }
-
-    private func scheduleCommitIfNeeded() {
-        cancelPendingCommit()
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.commitIfPossible()
-        }
-        pendingCommitWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + commitDelaySec, execute: workItem)
-    }
-
-    private func commitIfPossible() {
-        switch pressTracker.commitIfPossible(within: bounds, isWindowActive: window?.isKeyWindow == true) {
-        case .commit:
-            previewInteractionDebugLog("toggle committed")
-            coordinator?.onPress()
-        case .cancel:
-            previewInteractionDebugLog("toggle canceled before commit")
-        case .none, .beginDrag, .drag, .end:
-            break
-        }
-        pendingCommitWorkItem = nil
-    }
-
-    private func cancelPendingCommit() {
-        pendingCommitWorkItem?.cancel()
-        pendingCommitWorkItem = nil
     }
 }
 
 private struct PreviewWaveformInteractionOverlay: NSViewRepresentable {
+    let interactionRect: CGRect
     let cueExclusionRects: [CGRect]
     let onHoverChanged: (CGFloat?) -> Void
     let onInteraction: (LibraryPreviewInteractionPhase, CGFloat) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
+            interactionRect: interactionRect,
             cueExclusionRects: cueExclusionRects,
             onHoverChanged: onHoverChanged,
             onInteraction: onInteraction
@@ -1239,21 +1402,25 @@ private struct PreviewWaveformInteractionOverlay: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: PreviewWaveformInteractionView, context: Context) {
+        context.coordinator.interactionRect = interactionRect
         context.coordinator.cueExclusionRects = cueExclusionRects
         context.coordinator.onHoverChanged = onHoverChanged
         context.coordinator.onInteraction = onInteraction
     }
 
     final class Coordinator {
+        var interactionRect: CGRect
         var cueExclusionRects: [CGRect]
         var onHoverChanged: (CGFloat?) -> Void
         var onInteraction: (LibraryPreviewInteractionPhase, CGFloat) -> Void
 
         init(
+            interactionRect: CGRect,
             cueExclusionRects: [CGRect],
             onHoverChanged: @escaping (CGFloat?) -> Void,
             onInteraction: @escaping (LibraryPreviewInteractionPhase, CGFloat) -> Void
         ) {
+            self.interactionRect = interactionRect
             self.cueExclusionRects = cueExclusionRects
             self.onHoverChanged = onHoverChanged
             self.onInteraction = onInteraction
@@ -1262,17 +1429,15 @@ private struct PreviewWaveformInteractionOverlay: NSViewRepresentable {
 }
 
 private final class PreviewWaveformInteractionView: NSView {
-    private let commitDelaySec: TimeInterval = 0.01
     weak var coordinator: PreviewWaveformInteractionOverlay.Coordinator?
     private var trackingAreaToken: NSTrackingArea?
     private var pressTracker = PreviewPressIntentTracker()
-    private var pendingCommitWorkItem: DispatchWorkItem?
     private var isSuppressingScrubForCue = false
 
     override var isFlipped: Bool { true }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        false
+        true
     }
 
     override func updateTrackingAreas() {
@@ -1295,11 +1460,11 @@ private final class PreviewWaveformInteractionView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        coordinator?.onHoverChanged(clampedX(for: event))
+        updateHover(for: convert(event.locationInWindow, from: nil))
     }
 
     override func mouseMoved(with event: NSEvent) {
-        coordinator?.onHoverChanged(clampedX(for: event))
+        updateHover(for: convert(event.locationInWindow, from: nil))
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -1308,7 +1473,7 @@ private final class PreviewWaveformInteractionView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        coordinator?.onHoverChanged(clampedX(for: point))
+        updateHover(for: point)
         guard shouldHandleWaveformPress(at: point) else {
             isSuppressingScrubForCue = true
             previewInteractionDebugLog("waveform mouseDown | suppressed for cue")
@@ -1317,25 +1482,23 @@ private final class PreviewWaveformInteractionView: NSView {
 
         isSuppressingScrubForCue = false
         pressTracker.arm(at: point)
-        previewInteractionDebugLog("waveform mouseDown | armed")
-        scheduleCommitIfNeeded()
+        previewInteractionDebugLog("waveform mouseDown | committed")
+        coordinator?.onInteraction(.mouseDown, clampedX(for: point))
     }
 
     override func mouseDragged(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        coordinator?.onHoverChanged(clampedX(for: point))
+        updateHover(for: point)
         guard !isSuppressingScrubForCue else { return }
 
         switch pressTracker.move(to: point, within: bounds) {
         case .beginDrag(let dragPoint):
-            cancelPendingCommit()
-            previewInteractionDebugLog("waveform canceled by drag | dragging")
+            previewInteractionDebugLog("waveform drag began")
             coordinator?.onInteraction(.dragChanged, clampedX(for: dragPoint))
         case .drag(let dragPoint):
             coordinator?.onInteraction(.dragChanged, clampedX(for: dragPoint))
         case .cancel:
-            cancelPendingCommit()
-            previewInteractionDebugLog("waveform canceled by outside")
+            previewInteractionDebugLog("waveform drag canceled outside")
         case .none, .commit, .end:
             break
         }
@@ -1344,62 +1507,33 @@ private final class PreviewWaveformInteractionView: NSView {
     override func mouseUp(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         if !isSuppressingScrubForCue {
-            if case .commit(let committedPoint) = pressTracker.commitIfPossible(
-                within: bounds,
-                isWindowActive: window?.isKeyWindow == true
-            ) {
-                previewInteractionDebugLog("waveform committed on mouseUp")
-                coordinator?.onInteraction(.mouseDown, clampedX(for: committedPoint))
-            }
-            cancelPendingCommit()
-            if case .end(let endPoint) = pressTracker.end(at: point) {
-                coordinator?.onInteraction(.mouseUp, clampedX(for: endPoint))
-            }
-        } else {
-            cancelPendingCommit()
+            previewInteractionDebugLog("waveform mouseUp")
+            coordinator?.onInteraction(.mouseUp, clampedX(for: point))
+            pressTracker.reset()
         }
         isSuppressingScrubForCue = false
     }
 
-    private func clampedX(for event: NSEvent) -> CGFloat {
-        let location = convert(event.locationInWindow, from: nil)
-        return max(min(location.x, bounds.width), 0)
-    }
-
     private func clampedX(for point: CGPoint) -> CGFloat {
-        max(min(point.x, bounds.width), 0)
+        guard let coordinator else {
+            return max(min(point.x, bounds.width), 0)
+        }
+        return min(max(point.x, coordinator.interactionRect.minX), coordinator.interactionRect.maxX)
     }
 
     private func shouldHandleWaveformPress(at point: CGPoint) -> Bool {
         guard let coordinator else { return false }
+        guard coordinator.interactionRect.contains(point) else { return false }
         return !coordinator.cueExclusionRects.contains { $0.contains(point) }
     }
 
-    private func scheduleCommitIfNeeded() {
-        cancelPendingCommit()
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.commitIfPossible()
+    private func updateHover(for point: CGPoint) {
+        guard let coordinator else { return }
+        guard coordinator.interactionRect.contains(point) else {
+            coordinator.onHoverChanged(nil)
+            return
         }
-        pendingCommitWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + commitDelaySec, execute: workItem)
-    }
-
-    private func commitIfPossible() {
-        switch pressTracker.commitIfPossible(within: bounds, isWindowActive: window?.isKeyWindow == true) {
-        case .commit(let point):
-            previewInteractionDebugLog("waveform committed")
-            coordinator?.onInteraction(.mouseDown, clampedX(for: point))
-        case .cancel:
-            previewInteractionDebugLog("waveform canceled before commit")
-        case .none, .beginDrag, .drag, .end:
-            break
-        }
-        pendingCommitWorkItem = nil
-    }
-
-    private func cancelPendingCommit() {
-        pendingCommitWorkItem?.cancel()
-        pendingCommitWorkItem = nil
+        coordinator.onHoverChanged(clampedX(for: point))
     }
 }
 

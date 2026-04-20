@@ -118,7 +118,7 @@ struct TrackSegment: Identifiable, Codable, Hashable {
 
 struct TrackWaveformEnvelope: Codable, Hashable {
     static let denseBinCount = 2048
-    static let canonicalSourceVersion = "soria.waveform.envelope.v1"
+    static let canonicalSourceVersion = "soria.waveform.envelope.v2"
     static let vendorFallbackSourceVersion = "vendor.preview.envelope.v1"
     static let legacyPreviewSourceVersion = "legacy.preview.envelope.v1"
 

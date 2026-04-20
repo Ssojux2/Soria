@@ -15,6 +15,9 @@ else:
     _LIBROSA_IMPORT_ERROR = None
 
 
+WAVEFORM_SOURCE_VERSION = "soria.waveform.envelope.v2"
+
+
 @dataclass
 class SegmentFeature:
     segment_type: str
@@ -343,8 +346,7 @@ def _band_energy(stft: np.ndarray, freqs: np.ndarray, low: float, high: float) -
 def _waveform_preview(y: np.ndarray, bins: int = 256) -> list[float]:
     if y.size == 0:
         return [0.0] * bins
-    splits = np.array_split(np.abs(y), bins)
-    values = np.array([float(np.max(chunk)) if chunk.size else 0.0 for chunk in splits], dtype=np.float64)
+    values = _bucket_peak_maxima(np.abs(np.asarray(y, dtype=np.float32)), bins)
     max_value = float(np.max(values)) if values.size else 0.0
     if max_value > 0:
         values /= max_value
@@ -361,12 +363,12 @@ def _waveform_envelope(y: np.ndarray, sr: int, bins: int = 2048) -> dict[str, An
             "upperPeaks": [0.0] * safe_bins,
             "lowerPeaks": [0.0] * safe_bins,
             "binCount": safe_bins,
-            "sourceVersion": "soria.waveform.envelope.v1",
+            "sourceVersion": WAVEFORM_SOURCE_VERSION,
         }
 
-    splits = np.array_split(np.asarray(y, dtype=np.float32), safe_bins)
-    upper = np.array([float(np.max(chunk)) if chunk.size else 0.0 for chunk in splits], dtype=np.float64)
-    lower = np.array([float(np.min(chunk)) if chunk.size else 0.0 for chunk in splits], dtype=np.float64)
+    waveform = np.asarray(y, dtype=np.float32)
+    upper = _bucket_peak_maxima(waveform, safe_bins)
+    lower = _bucket_peak_minima(waveform, safe_bins)
     peak = max(
         float(np.max(np.abs(upper))) if upper.size else 0.0,
         float(np.max(np.abs(lower))) if lower.size else 0.0,
@@ -380,8 +382,46 @@ def _waveform_envelope(y: np.ndarray, sr: int, bins: int = 2048) -> dict[str, An
         "upperPeaks": [float(value) for value in upper.tolist()],
         "lowerPeaks": [float(value) for value in lower.tolist()],
         "binCount": safe_bins,
-        "sourceVersion": "soria.waveform.envelope.v1",
+        "sourceVersion": WAVEFORM_SOURCE_VERSION,
     }
+
+
+def _bucket_peak_maxima(values: np.ndarray, bins: int) -> np.ndarray:
+    safe_bins = max(int(bins), 1)
+    array = np.asarray(values, dtype=np.float32)
+    if array.size == 0:
+        return np.zeros(safe_bins, dtype=np.float64)
+
+    starts, _, nonempty = _bucket_boundaries(array.size, safe_bins)
+    reduced = np.maximum.reduceat(array, starts)[:safe_bins].astype(np.float64, copy=False)
+    reduced[~nonempty] = 0.0
+    return reduced
+
+
+def _bucket_peak_minima(values: np.ndarray, bins: int) -> np.ndarray:
+    safe_bins = max(int(bins), 1)
+    array = np.asarray(values, dtype=np.float32)
+    if array.size == 0:
+        return np.zeros(safe_bins, dtype=np.float64)
+
+    starts, _, nonempty = _bucket_boundaries(array.size, safe_bins)
+    reduced = np.minimum.reduceat(array, starts)[:safe_bins].astype(np.float64, copy=False)
+    reduced[~nonempty] = 0.0
+    return reduced
+
+
+def _bucket_boundaries(length: int, bins: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    safe_bins = max(int(bins), 1)
+    if length <= 0:
+        starts = np.zeros(safe_bins, dtype=np.int64)
+        ends = np.zeros(safe_bins, dtype=np.int64)
+        return starts, ends, np.zeros(safe_bins, dtype=bool)
+
+    edges = np.linspace(0, length, safe_bins + 1, dtype=np.int64)
+    starts = np.minimum(edges[:-1], max(length - 1, 0))
+    ends = edges[1:]
+    nonempty = ends > edges[:-1]
+    return starts, ends, nonempty
 
 
 def _descriptor_text(
