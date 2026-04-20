@@ -16,7 +16,7 @@ struct ExportPlaylistQueueView: View {
 
                 Spacer(minLength: 12)
 
-                Button("Normalize Queue") {
+                Button(viewModel.normalizePlaylistQueueButtonTitle) {
                     viewModel.normalizePlaylistQueue()
                 }
                 .disabled(!viewModel.canNormalizePlaylistQueue)
@@ -25,6 +25,38 @@ struct ExportPlaylistQueueView: View {
                     viewModel.clearPlaylist()
                 }
                 .disabled(!viewModel.canClearPlaylistQueue)
+            }
+
+            if let progress = viewModel.playlistQueueNormalizationProgress {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(progress.titleText)
+                            .font(.footnote.weight(.semibold))
+                        Spacer(minLength: 8)
+                        if let fractionCompleted = progress.fractionCompleted {
+                            Text("\(progress.completedSuggestedTrackCount)/\(progress.totalSuggestedTrackCount)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .accessibilityLabel("\(Int((fractionCompleted * 100).rounded())) percent complete")
+                        } else {
+                            Text("Preparing...")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if let fractionCompleted = progress.fractionCompleted {
+                        ProgressView(value: fractionCompleted, total: 1)
+                    } else {
+                        ProgressView()
+                    }
+
+                    Text(progress.detailText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(10)
+                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
 
             if queueRows.isEmpty {
@@ -97,14 +129,30 @@ struct ExportPlaylistQueueView: View {
 
     private var queueSummaryText: String {
         let count = viewModel.playlistTracks.count
+        let baseText: String
         switch count {
         case 0:
-            return "The export queue is currently empty."
+            baseText = "The export queue is currently empty."
         case 1:
-            return "1 track is ready for export."
+            baseText = "1 track is ready for export."
         default:
-            return "\(count) tracks are ready for export."
+            baseText = "\(count) tracks are ready for export."
         }
+
+        let suggestedCount = viewModel.playlistSuggestedNormalizationTrackCount
+        switch suggestedCount {
+        case 1:
+            return "\(baseText) 1 suggested track can be normalized in the queue."
+        case let count where count > 1:
+            return "\(baseText) \(count) suggested tracks can be normalized in the queue."
+        default:
+            break
+        }
+
+        if viewModel.isInspectingPlaylistNormalization {
+            return "\(baseText) Checking suggested normalization targets."
+        }
+        return baseText
     }
 
     private func bpmKeySummary(for track: Track) -> String {

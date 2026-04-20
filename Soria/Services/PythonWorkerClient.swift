@@ -101,6 +101,11 @@ enum WorkerTrackSearchMode: String, Codable, Equatable {
     case hybrid
 }
 
+protocol AudioNormalizationWorkering {
+    func inspectAudioNormalization(filePath: String) async throws -> WorkerNormalizationInspectionResponse
+    func normalizeAudioFile(filePath: String, outputPath: String) async throws -> WorkerNormalizationResultResponse
+}
+
 nonisolated final class PythonWorkerClient {
     typealias WorkerProgressHandler = @Sendable (WorkerProgressEvent) -> Void
 
@@ -181,6 +186,25 @@ nonisolated final class PythonWorkerClient {
             )
         }
         return response.waveformEnvelope
+    }
+
+    func inspectAudioNormalization(filePath: String) async throws -> WorkerNormalizationInspectionResponse {
+        let payload = WorkerInspectNormalizationPayload(
+            command: "inspect_audio_normalization",
+            filePath: filePath,
+            options: workerOptions()
+        )
+        return try await runGeneric(payload: payload, commandName: payload.command)
+    }
+
+    func normalizeAudioFile(filePath: String, outputPath: String) async throws -> WorkerNormalizationResultResponse {
+        let payload = WorkerNormalizeAudioFilePayload(
+            command: "normalize_audio_file",
+            filePath: filePath,
+            outputPath: outputPath,
+            options: workerOptions()
+        )
+        return try await runGeneric(payload: payload, commandName: payload.command)
     }
 
     func embedAudioSegments(
@@ -484,6 +508,14 @@ nonisolated final class PythonWorkerClient {
         progress: WorkerProgressHandler?,
         commandName: String
     ) throws -> U {
+        let startedAt = Date()
+        try validateWorkerRuntime(
+            config: config,
+            commandName: commandName,
+            payloadBytes: payloadData.count,
+            startedAt: startedAt
+        )
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: config.pythonExecutable)
         process.arguments = [config.workerScriptPath]
@@ -501,7 +533,6 @@ nonisolated final class PythonWorkerClient {
             terminationSignal.signal()
         }
 
-        let startedAt = Date()
         do {
             try process.run()
         } catch {
@@ -869,6 +900,108 @@ nonisolated final class PythonWorkerClient {
         }
         return parts.joined(separator: " | ")
     }
+
+    fileprivate static func validateWorkerRuntime(
+        config: WorkerConfig,
+        commandName: String,
+        payloadBytes: Int,
+        startedAt: Date,
+        mode: String? = nil
+    ) throws {
+        if let detail = workerRuntimeIssueMessage(for: config) {
+            var extra: [String: String] = [
+                "python": config.pythonExecutable,
+                "script": config.workerScriptPath
+            ]
+            if let mode {
+                extra["mode"] = mode
+            }
+            AppLogger.shared.error(
+                workerCommandLogLine(
+                    level: "launch_failed",
+                    commandName: commandName,
+                    elapsedMs: elapsedMilliseconds(since: startedAt),
+                    processID: nil,
+                    payloadBytes: payloadBytes,
+                    stdoutBytes: nil,
+                    stderrText: detail,
+                    extra: extra
+                )
+            )
+            throw WorkerError.executionFailed(detail)
+        }
+    }
+
+    private static func workerRuntimeIssueMessage(for config: WorkerConfig) -> String? {
+        let fileManager = FileManager.default
+        let pythonExecutable = config.pythonExecutable.trimmingCharacters(in: .whitespacesAndNewlines)
+        let workerScriptPath = config.workerScriptPath.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if workerScriptPath.isEmpty {
+            return "Python worker script path is empty."
+        }
+        if !fileManager.fileExists(atPath: workerScriptPath) {
+            return missingWorkerRuntimeMessage(
+                configuredPath: workerScriptPath,
+                expectedProjectPath: AppSettingsStore.projectWorkerScriptCandidatePath(),
+                projectRelativePath: "analysis-worker/main.py",
+                description: "worker script"
+            )
+        }
+
+        if pythonExecutable.isEmpty {
+            return "Python executable path is empty."
+        }
+        if !fileManager.fileExists(atPath: pythonExecutable) {
+            return missingWorkerRuntimeMessage(
+                configuredPath: pythonExecutable,
+                expectedProjectPath: AppSettingsStore.projectPythonExecutableCandidatePath(),
+                projectRelativePath: "analysis-worker/.venv/bin/python",
+                description: "python executable"
+            )
+        }
+        if !fileManager.isExecutableFile(atPath: pythonExecutable) {
+            return nonExecutableWorkerRuntimeMessage(
+                configuredPath: pythonExecutable,
+                expectedProjectPath: AppSettingsStore.projectPythonExecutableCandidatePath(),
+                projectRelativePath: "analysis-worker/.venv/bin/python"
+            )
+        }
+
+        return nil
+    }
+
+    private static func missingWorkerRuntimeMessage(
+        configuredPath: String,
+        expectedProjectPath: String?,
+        projectRelativePath: String,
+        description: String
+    ) -> String {
+        if matchesExpectedProjectRuntime(configuredPath, expectedProjectPath: expectedProjectPath) {
+            return "Development runs currently require the repo \(projectRelativePath) path at \(configuredPath). " +
+                "Create the repo worker runtime and install analysis-worker/requirements.txt."
+        }
+        return "Configured \(description) was not found at \(configuredPath). Update Analysis Settings or use detected defaults."
+    }
+
+    private static func nonExecutableWorkerRuntimeMessage(
+        configuredPath: String,
+        expectedProjectPath: String?,
+        projectRelativePath: String
+    ) -> String {
+        if matchesExpectedProjectRuntime(configuredPath, expectedProjectPath: expectedProjectPath) {
+            return "Development runs currently require an executable repo \(projectRelativePath) at \(configuredPath). " +
+                "Recreate analysis-worker/.venv and install analysis-worker/requirements.txt."
+        }
+        return "Configured python executable is not executable at \(configuredPath). Update Analysis Settings or use detected defaults."
+    }
+
+    private static func matchesExpectedProjectRuntime(_ configuredPath: String, expectedProjectPath: String?) -> Bool {
+        guard let expectedProjectPath else { return false }
+        let standardizedConfigured = URL(fileURLWithPath: configuredPath).standardizedFileURL.path
+        let standardizedExpected = URL(fileURLWithPath: expectedProjectPath).standardizedFileURL.path
+        return standardizedConfigured == standardizedExpected
+    }
 }
 
 struct WorkerSimilarityFilters: Codable, Equatable {
@@ -911,6 +1044,19 @@ private struct WorkerAnalyzePayload: Codable {
     let command: String
     let filePath: String
     let trackMetadata: WorkerTrackMetadataPayload
+    let options: WorkerOptionsPayload
+}
+
+private struct WorkerInspectNormalizationPayload: Codable {
+    let command: String
+    let filePath: String
+    let options: WorkerOptionsPayload
+}
+
+private struct WorkerNormalizeAudioFilePayload: Codable {
+    let command: String
+    let filePath: String
+    let outputPath: String
     let options: WorkerOptionsPayload
 }
 
@@ -1118,6 +1264,8 @@ extension WorkerError: LocalizedError {
     }
 }
 
+extension PythonWorkerClient: AudioNormalizationWorkering {}
+
 private final class WorkerProcessController: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
@@ -1313,6 +1461,15 @@ nonisolated private final class PersistentWaveformWorkerSession: @unchecked Send
         payloadBytes: Int,
         commandName: String
     ) throws -> Int32 {
+        let startedAt = Date()
+        try PythonWorkerClient.validateWorkerRuntime(
+            config: config,
+            commandName: commandName,
+            payloadBytes: payloadBytes,
+            startedAt: startedAt,
+            mode: "persistent"
+        )
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: config.pythonExecutable)
         process.arguments = [config.workerScriptPath, "--persistent"]
@@ -1331,7 +1488,6 @@ nonisolated private final class PersistentWaveformWorkerSession: @unchecked Send
         let oldProcess = replaceStateForNewProcess()
         terminate(process: oldProcess)
 
-        let startedAt = Date()
         do {
             try process.run()
         } catch {

@@ -19,6 +19,34 @@ final class LibraryScannerService {
         self.invalidateVectorIndex = invalidateVectorIndex
     }
 
+    func refreshTrack(at fileURL: URL) async throws -> Track {
+        let normalizedURL = fileURL.standardizedFileURL
+        let normalizedPath = TrackPathNormalizer.normalizedAbsolutePath(normalizedURL)
+        let fileExtension = normalizedURL.pathExtension.lowercased()
+        guard supportedExtensions.contains(fileExtension) else {
+            throw NSError(
+                domain: "LibraryScannerService",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Unsupported audio format: .\(fileExtension)"]
+            )
+        }
+
+        let attributes = try FileManager.default.attributesOfItem(atPath: normalizedURL.path)
+        let modified = Self.normalizedTimestamp((attributes[.modificationDate] as? Date) ?? .distantPast)
+        let previous = try database.fetchTrack(path: normalizedPath)
+        let contentHash = FileHashingService.contentHash(for: normalizedURL)
+
+        return try await upsertTrackRecord(
+            fileURL: normalizedURL,
+            normalizedPath: normalizedPath,
+            modified: modified,
+            contentHash: contentHash,
+            previous: previous,
+            isUnchanged: previous.map { $0.modifiedTime >= modified && $0.contentHash == contentHash } ?? false,
+            lastSeenInLocalScanAt: previous?.lastSeenInLocalScanAt ?? Date()
+        )
+    }
+
     func scan(
         roots: [URL],
         onProgress: @escaping @Sendable (ScanJobProgress) -> Void
@@ -75,48 +103,15 @@ final class LibraryScannerService {
                         continue
                     }
 
-                    let metadata = await AudioMetadataReader.readMetadata(for: fileURL)
-                    var track = previous ?? Track.empty(path: normalizedPath, modifiedTime: modified, hash: hash)
-                    let fileChanged = previous != nil && !isUnchanged
-                    if fileChanged, let previous, previous.analyzedAt != nil {
-                        try database.clearAnalysis(trackID: previous.id)
-                        await invalidateVectorIndex(previous)
-                        if track.bpmSource == .soriaAnalysis {
-                            track.bpm = nil
-                            track.bpmSource = nil
-                        }
-                        if track.keySource == .soriaAnalysis {
-                            track.musicalKey = nil
-                            track.keySource = nil
-                        }
-                    }
-                    track = Track(
-                        id: track.id,
-                        filePath: normalizedPath,
-                        fileName: fileURL.lastPathComponent,
-                        title: metadata.title,
-                        artist: metadata.artist,
-                        album: metadata.album,
-                        genre: metadata.genre.isEmpty ? track.genre : metadata.genre,
-                        comment: track.comment,
-                        duration: metadata.duration,
-                        sampleRate: metadata.sampleRate,
-                        bpm: metadata.bpm,
-                        musicalKey: metadata.musicalKey,
-                        modifiedTime: modified,
+                    let track = try await upsertTrackRecord(
+                        fileURL: fileURL,
+                        normalizedPath: normalizedPath,
+                        modified: modified,
                         contentHash: hash,
-                        analyzedAt: fileChanged ? nil : track.analyzedAt,
-                        embeddingProfileID: fileChanged ? nil : track.embeddingProfileID,
-                        embeddingPipelineID: fileChanged ? nil : track.embeddingPipelineID,
-                        embeddingUpdatedAt: fileChanged ? nil : track.embeddingUpdatedAt,
-                        hasSeratoMetadata: track.hasSeratoMetadata,
-                        hasRekordboxMetadata: track.hasRekordboxMetadata,
-                        genreSource: metadata.genre.isEmpty ? track.genreSource : .audioTags,
-                        bpmSource: metadata.bpm == nil ? track.bpmSource : .audioTags,
-                        keySource: metadata.musicalKey == nil ? track.keySource : .audioTags,
+                        previous: previous,
+                        isUnchanged: isUnchanged,
                         lastSeenInLocalScanAt: scanTimestamp
                     )
-                    try database.upsertTrack(track)
                     pathIndex[normalizedPath] = track
                     hashIndex[hash, default: []].append(track)
                     progress.indexedFiles += 1
@@ -190,5 +185,61 @@ final class LibraryScannerService {
         }
 
         return files.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    private func upsertTrackRecord(
+        fileURL: URL,
+        normalizedPath: String,
+        modified: Date,
+        contentHash: String,
+        previous: Track?,
+        isUnchanged: Bool,
+        lastSeenInLocalScanAt: Date?
+    ) async throws -> Track {
+        let metadata = await AudioMetadataReader.readMetadata(for: fileURL)
+        var track = previous ?? Track.empty(path: normalizedPath, modifiedTime: modified, hash: contentHash)
+        let fileChanged = previous != nil && (!isUnchanged || previous?.contentHash != contentHash)
+
+        if fileChanged, let previous, previous.analyzedAt != nil {
+            try database.clearAnalysis(trackID: previous.id)
+            await invalidateVectorIndex(previous)
+            if track.bpmSource == .soriaAnalysis {
+                track.bpm = nil
+                track.bpmSource = nil
+            }
+            if track.keySource == .soriaAnalysis {
+                track.musicalKey = nil
+                track.keySource = nil
+            }
+        }
+
+        track = Track(
+            id: track.id,
+            filePath: normalizedPath,
+            fileName: fileURL.lastPathComponent,
+            title: metadata.title,
+            artist: metadata.artist,
+            album: metadata.album,
+            genre: metadata.genre.isEmpty ? track.genre : metadata.genre,
+            comment: track.comment,
+            duration: metadata.duration,
+            sampleRate: metadata.sampleRate,
+            bpm: metadata.bpm,
+            musicalKey: metadata.musicalKey,
+            modifiedTime: modified,
+            contentHash: contentHash,
+            analyzedAt: fileChanged ? nil : track.analyzedAt,
+            embeddingProfileID: fileChanged ? nil : track.embeddingProfileID,
+            embeddingPipelineID: fileChanged ? nil : track.embeddingPipelineID,
+            embeddingUpdatedAt: fileChanged ? nil : track.embeddingUpdatedAt,
+            hasSeratoMetadata: track.hasSeratoMetadata,
+            hasRekordboxMetadata: track.hasRekordboxMetadata,
+            genreSource: metadata.genre.isEmpty ? track.genreSource : .audioTags,
+            bpmSource: metadata.bpm == nil ? track.bpmSource : .audioTags,
+            keySource: metadata.musicalKey == nil ? track.keySource : .audioTags,
+            lastSeenInLocalScanAt: lastSeenInLocalScanAt
+        )
+        try database.upsertTrack(track)
+        return track
     }
 }

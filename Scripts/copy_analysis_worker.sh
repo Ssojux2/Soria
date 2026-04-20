@@ -12,22 +12,16 @@ fi
 mkdir -p "${DST_DIR}"
 
 RSYNC_EXCLUDES="
+  --exclude=.venv
   --exclude=.pytest_cache
   --exclude=__pycache__
   --exclude=tests
 "
 
-if [ "${SORIA_SKIP_BUNDLED_VENV_FOR_UI_TESTS:-0}" = "1" ]; then
-  RSYNC_EXCLUDES="${RSYNC_EXCLUDES}
-  --exclude=.venv
-"
-fi
+# Python virtual environments are disposable and not safe to relocate inside app bundles.
+/bin/rm -rf "${DST_DIR}/.venv"
 
 # shellcheck disable=SC2086
-/usr/bin/rsync -a --delete \
+/usr/bin/rsync -a --delete --delete-excluded \
   ${RSYNC_EXCLUDES} \
   "${SRC_DIR}/" "${DST_DIR}/"
-
-if [ -f "${DST_DIR}/.venv/bin/python" ]; then
-  /bin/chmod +x "${DST_DIR}/.venv/bin/python"
-fi

@@ -88,6 +88,10 @@ def _dispatch_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         return handle_analyze(payload), 0
     if command == "extract_waveform_envelope":
         return handle_extract_waveform_envelope(payload), 0
+    if command == "inspect_audio_normalization":
+        return handle_inspect_audio_normalization(payload), 0
+    if command == "normalize_audio_file":
+        return handle_normalize_audio_file(payload), 0
     if command in {"embed_audio_segments", "embed_descriptors"}:
         return handle_embed_audio_segments(payload), 0
     if command == "build_query_embeddings":
@@ -193,6 +197,34 @@ def handle_extract_waveform_envelope(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "waveformEnvelope": waveform_envelope,
     }
+
+
+def handle_inspect_audio_normalization(payload: dict[str, Any]) -> dict[str, Any]:
+    inspect_audio_normalization = _load_inspect_audio_normalization()
+    file_path = payload["filePath"]
+    progress = _progress_emitter(file_path)
+    progress("launching", "Launching normalization inspection worker", 0.02)
+    return _call_with_optional_keyword(
+        inspect_audio_normalization,
+        "progress_callback",
+        progress,
+        file_path=file_path,
+    )
+
+
+def handle_normalize_audio_file(payload: dict[str, Any]) -> dict[str, Any]:
+    normalize_audio_file = _load_normalize_audio_file()
+    file_path = payload["filePath"]
+    output_path = payload["outputPath"]
+    progress = _progress_emitter(file_path)
+    progress("launching", "Launching normalization worker", 0.02)
+    return _call_with_optional_keyword(
+        normalize_audio_file,
+        "progress_callback",
+        progress,
+        file_path=file_path,
+        output_path=output_path,
+    )
 
 
 def handle_embed_audio_segments(payload: dict[str, Any]) -> dict[str, Any]:
@@ -884,6 +916,18 @@ def _load_extract_waveform_envelope():
     from audio.features import extract_waveform_envelope
 
     return extract_waveform_envelope
+
+
+def _load_inspect_audio_normalization():
+    from audio.normalization import inspect_audio_normalization
+
+    return inspect_audio_normalization
+
+
+def _load_normalize_audio_file():
+    from audio.normalization import normalize_audio_file
+
+    return normalize_audio_file
 
 
 def _load_vector_store():
