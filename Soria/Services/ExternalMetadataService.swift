@@ -22,12 +22,17 @@ final class ExternalMetadataService {
     }
 
     func importRekordboxXML(from url: URL) throws -> [ExternalDJMetadata] {
+        try importRekordboxXMLRecords(from: url).map(\.metadata)
+    }
+
+    func importRekordboxXMLRecords(from url: URL) throws -> [VendorLibraryTrackRecord] {
         let parsed = try rekordboxXMLParser.parse(from: url)
         return parsed.tracks.map { track in
             let memberships = parsed.memberships(forTrackPath: track.trackPath)
             let cueCount = cueCount(from: track.cuePoints, legacy: track.cuePoints.count)
+            let fileName = URL(fileURLWithPath: track.trackPath).lastPathComponent
 
-            return ExternalDJMetadata(
+            let metadata = ExternalDJMetadata(
                 id: UUID(),
                 trackPath: track.trackPath,
                 source: .rekordbox,
@@ -46,6 +51,20 @@ final class ExternalMetadataService {
                 analysisState: nil,
                 analysisCachePath: nil,
                 syncVersion: nil
+            )
+
+            return VendorLibraryTrackRecord(
+                source: .rekordbox,
+                normalizedPath: track.trackPath,
+                fileName: fileName,
+                title: nilIfEmpty(track.title) ?? URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent,
+                artist: track.artist ?? "",
+                album: track.album ?? "",
+                genre: track.genre ?? "",
+                duration: nil,
+                bpm: track.bpm,
+                musicalKey: track.musicalKey,
+                metadata: metadata
             )
         }
     }
@@ -75,6 +94,10 @@ final class ExternalMetadataService {
     }
 
     func importSeratoCSV(from url: URL) throws -> [ExternalDJMetadata] {
+        try importSeratoCSVRecords(from: url).map(\.metadata)
+    }
+
+    func importSeratoCSVRecords(from url: URL) throws -> [VendorLibraryTrackRecord] {
         let text = try String(contentsOf: url, encoding: .utf8)
         let lines = text.split(whereSeparator: \.isNewline).map(String.init)
         guard let headerLine = lines.first else { return [] }
@@ -91,8 +114,9 @@ final class ExternalMetadataService {
             let cueCount = cueCount(from: cuePoints, legacy: parseInt(row["cue_count"]))
             let tagText = row["tags"] ?? row["genre"] ?? ""
             let playlistText = row["playlists"] ?? row["playlist_memberships"] ?? ""
+            let fileName = URL(fileURLWithPath: trackPath).lastPathComponent
 
-            return ExternalDJMetadata(
+            let metadata = ExternalDJMetadata(
                 id: UUID(),
                 trackPath: trackPath,
                 source: .serato,
@@ -111,6 +135,20 @@ final class ExternalMetadataService {
                 analysisState: nilIfEmpty(row["analysis_state"]),
                 analysisCachePath: nilIfEmpty(row["analysis_cache_path"]),
                 syncVersion: nilIfEmpty(row["sync_version"])
+            )
+
+            return VendorLibraryTrackRecord(
+                source: .serato,
+                normalizedPath: trackPath,
+                fileName: fileName,
+                title: URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent,
+                artist: "",
+                album: "",
+                genre: metadata.tags.first ?? "",
+                duration: nil,
+                bpm: metadata.bpm,
+                musicalKey: metadata.musicalKey,
+                metadata: metadata
             )
         }
     }

@@ -13,7 +13,7 @@ struct SoriaApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup {
+        Window("Soria", id: "main") {
             ContentView()
         }
     }
@@ -25,8 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag {
-            ensureMainWindowVisible()
+        guard !flag else { return false }
+        if ensureMainWindowVisible() {
+            return false
         }
         return true
     }
@@ -39,26 +40,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func ensureMainWindowVisible() {
+    @discardableResult
+    private func ensureMainWindowVisible() -> Bool {
         NSApp.activate(ignoringOtherApps: true)
 
-        if let window = NSApp.windows.first(where: { !$0.isMiniaturized }) {
+        if let window = NSApp.windows.first(where: { !$0.isMiniaturized && $0.isVisible }) ?? NSApp.windows.first {
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
             window.makeKeyAndOrderFront(nil)
-            return
+            window.orderFrontRegardless()
+            return true
         }
 
-        guard
-            let fileMenuItem = NSApp.mainMenu?.item(withTitle: "File"),
-            let newWindowItem = fileMenuItem.submenu?.items.first(where: { $0.title == "New Window" }),
-            let action = newWindowItem.action
-        else {
-            return
-        }
-
-        NSApp.sendAction(action, to: newWindowItem.target, from: newWindowItem)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            NSApp.windows.first(where: { !$0.isMiniaturized })?.makeKeyAndOrderFront(nil)
-        }
+        return false
     }
 }

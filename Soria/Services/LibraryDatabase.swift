@@ -96,16 +96,17 @@ final class LibraryDatabase {
     func upsertTrack(_ track: Track) throws {
         let sql = """
         INSERT INTO tracks (
-            id, file_path, file_name, title, artist, album, genre, duration, sample_rate, bpm, musical_key,
+            id, file_path, file_name, title, artist, album, genre, comment, duration, sample_rate, bpm, musical_key,
             modified_time, content_hash, analyzed_at, embedding_profile_id, embedding_pipeline_id, embedding_updated_at,
-            has_serato, has_rekordbox, bpm_source, key_source, last_seen_in_local_scan_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            has_serato, has_rekordbox, genre_source, bpm_source, key_source, last_seen_in_local_scan_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(file_path) DO UPDATE SET
             file_name = excluded.file_name,
             title = excluded.title,
             artist = excluded.artist,
             album = excluded.album,
             genre = excluded.genre,
+            comment = excluded.comment,
             duration = excluded.duration,
             sample_rate = excluded.sample_rate,
             bpm = excluded.bpm,
@@ -118,6 +119,7 @@ final class LibraryDatabase {
             embedding_updated_at = excluded.embedding_updated_at,
             has_serato = excluded.has_serato,
             has_rekordbox = excluded.has_rekordbox,
+            genre_source = excluded.genre_source,
             bpm_source = excluded.bpm_source,
             key_source = excluded.key_source,
             last_seen_in_local_scan_at = excluded.last_seen_in_local_scan_at;
@@ -130,21 +132,23 @@ final class LibraryDatabase {
             bind(statement, index: 5, text: track.artist)
             bind(statement, index: 6, text: track.album)
             bind(statement, index: 7, text: track.genre)
-            sqlite3_bind_double(statement, 8, track.duration)
-            sqlite3_bind_double(statement, 9, track.sampleRate)
-            bind(statement, index: 10, double: track.bpm)
-            bind(statement, index: 11, text: track.musicalKey)
-            bind(statement, index: 12, text: Self.iso8601.string(from: track.modifiedTime))
-            bind(statement, index: 13, text: track.contentHash)
-            bind(statement, index: 14, text: track.analyzedAt.map { Self.iso8601.string(from: $0) })
-            bind(statement, index: 15, text: track.embeddingProfileID)
-            bind(statement, index: 16, text: track.embeddingPipelineID)
-            bind(statement, index: 17, text: track.embeddingUpdatedAt.map { Self.iso8601.string(from: $0) })
-            sqlite3_bind_int(statement, 18, track.hasSeratoMetadata ? 1 : 0)
-            sqlite3_bind_int(statement, 19, track.hasRekordboxMetadata ? 1 : 0)
-            bind(statement, index: 20, text: track.bpmSource?.rawValue)
-            bind(statement, index: 21, text: track.keySource?.rawValue)
-            bind(statement, index: 22, text: track.lastSeenInLocalScanAt.map { Self.iso8601.string(from: $0) })
+            bind(statement, index: 8, text: track.comment)
+            sqlite3_bind_double(statement, 9, track.duration)
+            sqlite3_bind_double(statement, 10, track.sampleRate)
+            bind(statement, index: 11, double: track.bpm)
+            bind(statement, index: 12, text: track.musicalKey)
+            bind(statement, index: 13, text: Self.iso8601.string(from: track.modifiedTime))
+            bind(statement, index: 14, text: track.contentHash)
+            bind(statement, index: 15, text: track.analyzedAt.map { Self.iso8601.string(from: $0) })
+            bind(statement, index: 16, text: track.embeddingProfileID)
+            bind(statement, index: 17, text: track.embeddingPipelineID)
+            bind(statement, index: 18, text: track.embeddingUpdatedAt.map { Self.iso8601.string(from: $0) })
+            sqlite3_bind_int(statement, 19, track.hasSeratoMetadata ? 1 : 0)
+            sqlite3_bind_int(statement, 20, track.hasRekordboxMetadata ? 1 : 0)
+            bind(statement, index: 21, text: track.genreSource?.rawValue)
+            bind(statement, index: 22, text: track.bpmSource?.rawValue)
+            bind(statement, index: 23, text: track.keySource?.rawValue)
+            bind(statement, index: 24, text: track.lastSeenInLocalScanAt.map { Self.iso8601.string(from: $0) })
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 throw DatabaseError.writeFailed
             }
@@ -760,9 +764,11 @@ final class LibraryDatabase {
 
         let predicate = membershipScopePredicate(for: scopeFilter)
         let sql = """
-        SELECT DISTINCT track_id
+        SELECT DISTINCT track_memberships.track_id
         FROM track_memberships
-        WHERE \(predicate.sql);
+        INNER JOIN tracks ON tracks.id = track_memberships.track_id
+        WHERE tracks.last_seen_in_local_scan_at IS NOT NULL
+          AND (\(predicate.sql));
         """
 
         return try withStatement(sql) { statement in
@@ -852,17 +858,7 @@ final class LibraryDatabase {
         }
     }
 
-    func clearLocalScanMarks(underRoots roots: [String], excludingPaths preservedPaths: [String]) throws {
-        let normalizedRoots = Array(
-            Set(
-                roots
-                    .map(TrackPathNormalizer.normalizedAbsolutePath)
-                    .filter { !$0.isEmpty }
-            )
-        ).sorted()
-        guard !normalizedRoots.isEmpty else { return }
-
-        let rootClauses = normalizedRoots.map { _ in "file_path = ? OR file_path LIKE ?" }.joined(separator: " OR ")
+    func clearLocalScanMarks(excludingPaths preservedPaths: [String]) throws {
         let exclusionClause = preservedPaths.isEmpty
             ? ""
             : "AND file_path NOT IN (\(Array(repeating: "?", count: preservedPaths.count).joined(separator: ", ")))"
@@ -870,18 +866,11 @@ final class LibraryDatabase {
         UPDATE tracks
         SET last_seen_in_local_scan_at = NULL
         WHERE last_seen_in_local_scan_at IS NOT NULL
-          AND (\(rootClauses))
           \(exclusionClause);
         """
 
         try withStatement(sql) { statement in
             var bindIndex: Int32 = 1
-            for root in normalizedRoots {
-                bind(statement, index: bindIndex, text: root)
-                bindIndex += 1
-                bind(statement, index: bindIndex, text: "\(root)/%")
-                bindIndex += 1
-            }
             for path in preservedPaths {
                 bind(statement, index: bindIndex, text: path)
                 bindIndex += 1
@@ -890,6 +879,10 @@ final class LibraryDatabase {
                 throw DatabaseError.writeFailed
             }
         }
+    }
+
+    func refreshMembershipIndexes() throws {
+        try rebuildNormalizedMembershipTables()
     }
 
     func insertScoreSession(
@@ -1052,6 +1045,7 @@ final class LibraryDatabase {
             artist TEXT NOT NULL,
             album TEXT NOT NULL,
             genre TEXT NOT NULL,
+            comment TEXT NOT NULL DEFAULT '',
             duration REAL NOT NULL,
             sample_rate REAL NOT NULL,
             bpm REAL,
@@ -1068,6 +1062,7 @@ final class LibraryDatabase {
             embedding_profile_id TEXT,
             embedding_pipeline_id TEXT,
             embedding_updated_at TEXT,
+            genre_source TEXT,
             bpm_source TEXT,
             key_source TEXT,
             last_seen_in_local_scan_at TEXT
@@ -1205,6 +1200,12 @@ final class LibraryDatabase {
         if try !columnExists(table: "tracks", column: "embedding_updated_at") {
             try exec("ALTER TABLE tracks ADD COLUMN embedding_updated_at TEXT;")
         }
+        if try !columnExists(table: "tracks", column: "comment") {
+            try exec("ALTER TABLE tracks ADD COLUMN comment TEXT NOT NULL DEFAULT '';")
+        }
+        if try !columnExists(table: "tracks", column: "genre_source") {
+            try exec("ALTER TABLE tracks ADD COLUMN genre_source TEXT;")
+        }
         if try !columnExists(table: "tracks", column: "bpm_source") {
             try exec("ALTER TABLE tracks ADD COLUMN bpm_source TEXT;")
         }
@@ -1255,16 +1256,16 @@ final class LibraryDatabase {
             let artist = sqliteString(statement, index: 4),
             let album = sqliteString(statement, index: 5),
             let genre = sqliteString(statement, index: 6),
-            let modifiedTimeText = sqliteString(statement, index: 11),
-            let contentHash = sqliteString(statement, index: 12)
+            let modifiedTimeText = sqliteString(statement, index: 12),
+            let contentHash = sqliteString(statement, index: 13)
         else {
             return nil
         }
 
         let modifiedTime = Self.iso8601.date(from: modifiedTimeText) ?? .distantPast
-        let analyzedAt = sqliteString(statement, index: 13).flatMap { Self.iso8601.date(from: $0) }
-        let embeddingUpdatedAt = sqliteString(statement, index: 16).flatMap { Self.iso8601.date(from: $0) }
-        let lastSeenInLocalScanAt = sqliteString(statement, index: 21).flatMap { Self.iso8601.date(from: $0) }
+        let analyzedAt = sqliteString(statement, index: 14).flatMap { Self.iso8601.date(from: $0) }
+        let embeddingUpdatedAt = sqliteString(statement, index: 17).flatMap { Self.iso8601.date(from: $0) }
+        let lastSeenInLocalScanAt = sqliteString(statement, index: 23).flatMap { Self.iso8601.date(from: $0) }
         return Track(
             id: id,
             filePath: filePath,
@@ -1273,20 +1274,22 @@ final class LibraryDatabase {
             artist: artist,
             album: album,
             genre: genre,
-            duration: sqlite3_column_double(statement, 7),
-            sampleRate: sqlite3_column_double(statement, 8),
-            bpm: sqliteOptionalDouble(statement, index: 9),
-            musicalKey: sqliteString(statement, index: 10),
+            comment: sqliteString(statement, index: 7) ?? "",
+            duration: sqlite3_column_double(statement, 8),
+            sampleRate: sqlite3_column_double(statement, 9),
+            bpm: sqliteOptionalDouble(statement, index: 10),
+            musicalKey: sqliteString(statement, index: 11),
             modifiedTime: modifiedTime,
             contentHash: contentHash,
             analyzedAt: analyzedAt,
-            embeddingProfileID: sqliteString(statement, index: 14),
-            embeddingPipelineID: sqliteString(statement, index: 15),
+            embeddingProfileID: sqliteString(statement, index: 15),
+            embeddingPipelineID: sqliteString(statement, index: 16),
             embeddingUpdatedAt: embeddingUpdatedAt,
-            hasSeratoMetadata: sqlite3_column_int(statement, 17) == 1,
-            hasRekordboxMetadata: sqlite3_column_int(statement, 18) == 1,
-            bpmSource: sqliteString(statement, index: 19).flatMap(TrackMetadataSource.init(rawValue:)),
-            keySource: sqliteString(statement, index: 20).flatMap(TrackMetadataSource.init(rawValue:)),
+            hasSeratoMetadata: sqlite3_column_int(statement, 18) == 1,
+            hasRekordboxMetadata: sqlite3_column_int(statement, 19) == 1,
+            genreSource: sqliteString(statement, index: 20).flatMap(TrackMetadataSource.init(rawValue:)),
+            bpmSource: sqliteString(statement, index: 21).flatMap(TrackMetadataSource.init(rawValue:)),
+            keySource: sqliteString(statement, index: 22).flatMap(TrackMetadataSource.init(rawValue:)),
             lastSeenInLocalScanAt: lastSeenInLocalScanAt
         )
     }
@@ -1483,6 +1486,7 @@ final class LibraryDatabase {
             }
         }
 
+        guard try isLocallyScannedTrack(trackID: trackID) else { return }
         guard !membershipPaths.isEmpty else { return }
 
         let insertSQL = """
@@ -1500,6 +1504,20 @@ final class LibraryDatabase {
                     throw DatabaseError.writeFailed
                 }
             }
+        }
+    }
+
+    private func isLocallyScannedTrack(trackID: UUID) throws -> Bool {
+        let sql = """
+        SELECT 1
+        FROM tracks
+        WHERE id = ?
+          AND last_seen_in_local_scan_at IS NOT NULL
+        LIMIT 1;
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, index: 1, text: trackID.uuidString)
+            return sqlite3_step(statement) == SQLITE_ROW
         }
     }
 
@@ -1705,9 +1723,9 @@ final class LibraryDatabase {
     }
 
     private let trackSelectColumns = """
-    id, file_path, file_name, title, artist, album, genre, duration, sample_rate, bpm, musical_key,
+    id, file_path, file_name, title, artist, album, genre, comment, duration, sample_rate, bpm, musical_key,
     modified_time, content_hash, analyzed_at, embedding_profile_id, embedding_pipeline_id, embedding_updated_at,
-    has_serato, has_rekordbox, bpm_source, key_source, last_seen_in_local_scan_at
+    has_serato, has_rekordbox, genre_source, bpm_source, key_source, last_seen_in_local_scan_at
     """
 }
 

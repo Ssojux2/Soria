@@ -2268,15 +2268,18 @@ final class AppViewModel: ObservableObject {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.prompt = "Use Folder"
-        if panel.runModal() == .OK, let path = panel.url?.path {
-            addLibraryRoots([path])
+        if panel.runModal() == .OK {
+            addLibraryRoots(panel.urls.map(\.path))
         }
     }
 
     func removeLibraryRoot(_ path: String) {
         libraryRoots.removeAll(where: { $0 == path })
+        if initialSetupLibraryRoot == path {
+            initialSetupLibraryRoot = libraryRoots.first ?? ""
+        }
         persistLibraryRoots()
     }
 
@@ -2387,18 +2390,32 @@ final class AppViewModel: ObservableObject {
                     $0.kind != .folderFallback && $0.enabled && $0.resolvedPath != nil
                 }
                 let canRefreshVendorMetadata = !tracks.isEmpty
+                let autoImportedRekordboxXMLURL = enabledNativeSources.contains(where: { $0.kind == .rekordbox })
+                    ? externalMetadataImporter.detectRekordboxXMLCandidate()?.url
+                    : nil
+                let additionalImportedTracks = canRefreshVendorMetadata
+                    ? Self.rekordboxXMLRecords(from: autoImportedRekordboxXMLURL)
+                    : []
                 if !enabledNativeSources.isEmpty {
                     markLibrarySourcesSyncing(enabledNativeSources)
                 }
                 let nativeSummary = canRefreshVendorMetadata
                     ? try await Self.syncLibrariesInternal(
                         service: librarySyncService,
-                        sources: enabledNativeSources
+                        sources: enabledNativeSources,
+                        additionalImportedTracks: additionalImportedTracks
                     ) { progress in
                         Task { @MainActor [weak self, progress] in
                             self?.scanProgress = progress
                         }
                     }
+                    : nil
+                let nativeSummaryMessage = canRefreshVendorMetadata
+                    ? Self.nativeLibrarySyncStatusMessage(
+                        syncSummary: nativeSummary,
+                        autoImportedRekordboxXMLURL: autoImportedRekordboxXMLURL,
+                        autoImportedCount: additionalImportedTracks.count
+                    )
                     : "Vendor metadata refresh skipped because no scanned local tracks are available yet."
                 if !enabledNativeSources.isEmpty {
                     let now = Date()
@@ -2413,7 +2430,7 @@ final class AppViewModel: ObservableObject {
                 LibraryRootsStore.markInitialSetupCompleted()
                 initialSetupStatusMessage = [
                     "Initial library setup finished.",
-                    nativeSummary,
+                    nativeSummaryMessage,
                     fallbackSummary,
                     "Indexed \(tracks.count) tracks."
                 ]
@@ -2479,6 +2496,9 @@ final class AppViewModel: ObservableObject {
         }
 
         let sourceNames = enabledNativeSources.map(\.kind.displayName)
+        let autoImportedRekordboxXMLURL = enabledNativeSources.contains(where: { $0.kind == .rekordbox })
+            ? externalMetadataImporter.detectRekordboxXMLCandidate()?.url
+            : nil
         AppLogger.shared.info("Vendor metadata refresh started | sources=\(sourceNames.joined(separator: ","))")
         presentLibrarySyncSheet(
             title: "Refreshing Vendor Metadata",
@@ -2498,14 +2518,25 @@ final class AppViewModel: ObservableObject {
         }
 
         let service = librarySyncService
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, enabledNativeSources, service] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, enabledNativeSources, service, autoImportedRekordboxXMLURL] in
             Task {
                 do {
-                    let summary = try await Self.syncLibrariesInternal(
+                    let additionalImportedTracks = await MainActor.run {
+                        Self.rekordboxXMLRecords(from: autoImportedRekordboxXMLURL)
+                    }
+                    let syncSummary = try await Self.syncLibrariesInternal(
                         service: service,
                         sources: enabledNativeSources,
+                        additionalImportedTracks: additionalImportedTracks,
                         onProgress: progressHandler
                     )
+                    let summary = await MainActor.run {
+                        Self.nativeLibrarySyncStatusMessage(
+                            syncSummary: syncSummary,
+                            autoImportedRekordboxXMLURL: autoImportedRekordboxXMLURL,
+                            autoImportedCount: additionalImportedTracks.count
+                        )
+                    }
                     await self?.completeNativeLibrarySync(
                         summary: summary ?? "No vendor metadata sources were refreshed.",
                         sources: enabledNativeSources
@@ -6151,14 +6182,21 @@ final class AppViewModel: ObservableObject {
     }
 
     private func addLibraryRoots(_ paths: [String]) {
-        guard let firstPath = paths.first else { return }
-        libraryRoots = [TrackPathNormalizer.normalizedAbsolutePath(firstPath)]
-        LibraryRootsStore.saveRoots(libraryRoots)
+        let normalizedPaths = paths
+            .map(TrackPathNormalizer.normalizedAbsolutePath)
+            .filter { !$0.isEmpty }
+        guard !normalizedPaths.isEmpty else { return }
+
+        var updatedRoots = libraryRoots
+        for path in normalizedPaths where !updatedRoots.contains(path) {
+            updatedRoots.append(path)
+        }
+        libraryRoots = updatedRoots
+        persistLibraryRoots()
         if !libraryRoots.isEmpty {
             LibraryRootsStore.markInitialSetupCompleted()
         }
-        initialSetupLibraryRoot = libraryRoots.first ?? ""
-        persistFolderFallbackSource()
+        initialSetupLibraryRoot = normalizedPaths.last ?? libraryRoots.first ?? ""
     }
 
     private func importExternalMetadataFiles(_ urls: [URL]) async throws -> [MetadataImportSummary] {
@@ -6171,129 +6209,27 @@ final class AppViewModel: ObservableObject {
     }
 
     private func importExternalMetadataFile(_ fileURL: URL) async throws -> MetadataImportSummary {
-        let imported: [ExternalDJMetadata]
+        let importedRecords: [VendorLibraryTrackRecord]
         let source: ExternalDJMetadata.Source
         if fileURL.pathExtension.lowercased() == "xml" {
             source = .rekordbox
-            imported = try externalMetadataImporter.importRekordboxXML(from: fileURL)
+            importedRecords = try externalMetadataImporter.importRekordboxXMLRecords(from: fileURL)
             AppSettingsStore.saveLastRekordboxXMLPath(fileURL.path)
         } else {
             source = .serato
-            imported = try externalMetadataImporter.importSeratoCSV(from: fileURL)
+            importedRecords = try externalMetadataImporter.importSeratoCSVRecords(from: fileURL)
         }
 
-        let localTracks = tracks
-        guard !localTracks.isEmpty else {
-            return MetadataImportSummary(
-                source: source,
-                importedEntries: imported.count,
-                matchedLocalTracks: 0,
-                unmatchedEntries: imported.count,
-                referenceAttachmentCount: 0
-            )
-        }
-
-        let localTracksByPath = Dictionary(uniqueKeysWithValues: localTracks.map { ($0.filePath, $0) })
-        let localTracksByHash = Dictionary(
-            grouping: localTracks,
-            by: \.contentHash
-        ).compactMapValues { matches in
-            matches.sorted { lhs, rhs in
-                let lhsDate = lhs.lastSeenInLocalScanAt ?? .distantPast
-                let rhsDate = rhs.lastSeenInLocalScanAt ?? .distantPast
-                if lhsDate == rhsDate {
-                    return lhs.filePath.localizedStandardCompare(rhs.filePath) == .orderedAscending
-                }
-                return lhsDate > rhsDate
-            }.first
-        }
-        var importHashCache: [String: String?] = [:]
-        var entriesByTrackID: [UUID: [ExternalDJMetadata]] = [:]
-        var updatedTracks = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
-        var matchedTrackIDs = Set<UUID>()
-        var unmatchedEntries = 0
-        var referenceAttachmentCount = 0
-
-        for entry in imported {
-            guard let localTrack = resolveLocalTrack(
-                for: entry.trackPath,
-                localTracksByPath: localTracksByPath,
-                localTracksByHash: localTracksByHash,
-                hashCache: &importHashCache
-            ) else {
-                unmatchedEntries += 1
-                continue
-            }
-            entriesByTrackID[localTrack.id, default: []].append(entry)
-            matchedTrackIDs.insert(localTrack.id)
-            referenceAttachmentCount += entry.playlistMemberships.count
-        }
-
-        for (trackID, entries) in entriesByTrackID {
-            guard var updatedTrack = updatedTracks[trackID] else { continue }
-            if source == .serato { updatedTrack.hasSeratoMetadata = true }
-            if source == .rekordbox { updatedTrack.hasRekordboxMetadata = true }
-
-            let metadataSource: TrackMetadataSource = source == .serato ? .serato : .rekordbox
-            let importedBPM = entries.compactMap(\.bpm).first
-            let importedKey = entries.compactMap(\.musicalKey).first
-
-            if shouldAdoptMetadataValue(importedBPM, from: metadataSource, over: updatedTrack.bpm, currentSource: updatedTrack.bpmSource) {
-                updatedTrack.bpm = importedBPM
-                updatedTrack.bpmSource = metadataSource
-            }
-            if shouldAdoptMetadataValue(importedKey, from: metadataSource, over: updatedTrack.musicalKey, currentSource: updatedTrack.keySource) {
-                updatedTrack.musicalKey = importedKey
-                updatedTrack.keySource = metadataSource
-            }
-
-            try database.upsertTrack(updatedTrack)
-            try database.replaceExternalMetadata(trackID: trackID, source: source, entries: entries)
-            updatedTracks[trackID] = updatedTrack
-        }
-
-        tracks = updatedTracks.values.sorted {
-            let lhs = "\($0.artist) \($0.title)"
-            let rhs = "\($1.artist) \($1.title)"
-            return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
-        }
-        membershipSnapshotsByTrackID = (try? database.fetchTrackMembershipSnapshots(trackIDs: tracks.map(\.id))) ?? membershipSnapshotsByTrackID
-        scopeTrackCache.removeAll()
-        try? refreshMembershipFacets()
-        await loadSelectedTrackDetails()
+        let syncSummary = try await librarySyncService.syncImportedTracks(importedRecords)
+        await refreshTracks()
 
         return MetadataImportSummary(
             source: source,
-            importedEntries: imported.count,
-            matchedLocalTracks: matchedTrackIDs.count,
-            unmatchedEntries: unmatchedEntries,
-            referenceAttachmentCount: referenceAttachmentCount
+            importedEntries: importedRecords.count,
+            matchedLocalTracks: syncSummary.matchedTrackCount,
+            unmatchedEntries: syncSummary.unmatchedEntryCount,
+            referenceAttachmentCount: syncSummary.referenceAttachmentCount
         )
-    }
-
-    private func resolveLocalTrack(
-        for trackPath: String,
-        localTracksByPath: [String: Track],
-        localTracksByHash: [String: Track],
-        hashCache: inout [String: String?]
-    ) -> Track? {
-        if let exactMatch = localTracksByPath[trackPath] {
-            return exactMatch
-        }
-
-        let contentHash = hashCache[trackPath] ?? {
-            let pathHash: String?
-            if FileManager.default.fileExists(atPath: trackPath) {
-                pathHash = FileHashingService.contentHash(for: URL(fileURLWithPath: trackPath))
-            } else {
-                pathHash = nil
-            }
-            hashCache[trackPath] = pathHash
-            return pathHash
-        }()
-
-        guard let contentHash else { return nil }
-        return localTracksByHash[contentHash]
     }
 
     static func playlistPathStatusMessage(
@@ -6571,17 +6507,47 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private static func syncLibrariesInternal(
+    private nonisolated static func syncLibrariesInternal(
         service: DJLibrarySyncService,
         sources: [LibrarySourceRecord],
+        additionalImportedTracks: [VendorLibraryTrackRecord] = [],
         onProgress: @escaping @Sendable (ScanJobProgress) -> Void
-    ) async throws -> String? {
+    ) async throws -> NativeLibrarySyncSummary? {
         guard !sources.isEmpty else { return nil }
-        let summary = try await service.syncEnabledSources(sources, onProgress: onProgress)
-        return summary.displayText
+        return try await service.syncEnabledSources(
+            sources,
+            additionalImportedTracks: additionalImportedTracks,
+            onProgress: onProgress
+        )
     }
 
-    private static func runFallbackScanInternal(
+    private static func rekordboxXMLRecords(from url: URL?) -> [VendorLibraryTrackRecord] {
+        guard let url else { return [] }
+        do {
+            return try ExternalMetadataService().importRekordboxXMLRecords(from: url)
+        } catch {
+            AppLogger.shared.error("Automatic Rekordbox XML import skipped: \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    private static func nativeLibrarySyncStatusMessage(
+        syncSummary: NativeLibrarySyncSummary?,
+        autoImportedRekordboxXMLURL: URL?,
+        autoImportedCount: Int
+    ) -> String? {
+        guard syncSummary != nil || autoImportedCount > 0 else { return nil }
+        var segments: [String] = []
+        if let syncSummary {
+            segments.append(syncSummary.displayText)
+        }
+        if autoImportedCount > 0, let autoImportedRekordboxXMLURL {
+            segments.append("Rekordbox XML: \(autoImportedCount) entries from \(autoImportedRekordboxXMLURL.path)")
+        }
+        return segments.joined(separator: " • ")
+    }
+
+    private nonisolated static func runFallbackScanInternal(
         scanner: LibraryScannerService,
         roots: [URL],
         onProgress: @escaping @Sendable (ScanJobProgress) -> Void
@@ -6848,6 +6814,10 @@ final class AppViewModel: ObservableObject {
             return reorderComparison(lhs.title.localizedStandardCompare(rhs.title), direction: sort.direction)
         case .artist:
             return reorderComparison(lhs.artist.localizedStandardCompare(rhs.artist), direction: sort.direction)
+        case .genre:
+            return reorderComparison(lhs.genre.localizedStandardCompare(rhs.genre), direction: sort.direction)
+        case .comment:
+            return reorderComparison(lhs.comment.localizedStandardCompare(rhs.comment), direction: sort.direction)
         case .bpm:
             return compareLibraryTrackBPM(lhs.bpm, rhs.bpm, direction: sort.direction)
         case .status:
