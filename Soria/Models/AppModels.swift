@@ -267,6 +267,8 @@ enum LibraryTrackFilter: String, CaseIterable, Identifiable {
 enum LibraryTrackSortColumn: String, Equatable {
     case title
     case artist
+    case genre
+    case comment
     case bpm
     case status
 }
@@ -394,6 +396,10 @@ struct LibraryTrackSortComparator: SortComparator {
             return reordered(lhs.title.localizedStandardCompare(rhs.title))
         case .artist:
             return reordered(lhs.artist.localizedStandardCompare(rhs.artist))
+        case .genre:
+            return reordered(lhs.genre.localizedStandardCompare(rhs.genre))
+        case .comment:
+            return reordered(lhs.comment.localizedStandardCompare(rhs.comment))
         case .bpm:
             return compareBPM(lhs.bpm, rhs.bpm)
         case .status:

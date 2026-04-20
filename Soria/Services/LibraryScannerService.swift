@@ -97,7 +97,8 @@ final class LibraryScannerService {
                         title: metadata.title,
                         artist: metadata.artist,
                         album: metadata.album,
-                        genre: metadata.genre,
+                        genre: metadata.genre.isEmpty ? track.genre : metadata.genre,
+                        comment: track.comment,
                         duration: metadata.duration,
                         sampleRate: metadata.sampleRate,
                         bpm: metadata.bpm,
@@ -110,6 +111,7 @@ final class LibraryScannerService {
                         embeddingUpdatedAt: fileChanged ? nil : track.embeddingUpdatedAt,
                         hasSeratoMetadata: track.hasSeratoMetadata,
                         hasRekordboxMetadata: track.hasRekordboxMetadata,
+                        genreSource: metadata.genre.isEmpty ? track.genreSource : .audioTags,
                         bpmSource: metadata.bpm == nil ? track.bpmSource : .audioTags,
                         keySource: metadata.musicalKey == nil ? track.keySource : .audioTags,
                         lastSeenInLocalScanAt: scanTimestamp
@@ -124,11 +126,8 @@ final class LibraryScannerService {
                 onProgress(progress)
             }
 
-            let normalizedRoots = roots.map(TrackPathNormalizer.normalizedAbsolutePath)
-            try database.clearLocalScanMarks(
-                underRoots: normalizedRoots,
-                excludingPaths: Array(seenPaths)
-            )
+            try database.clearLocalScanMarks(excludingPaths: Array(seenPaths))
+            try database.refreshMembershipIndexes()
         } catch {
             AppLogger.shared.error("Failed to prime index: \(error.localizedDescription)")
         }

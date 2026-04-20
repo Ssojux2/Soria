@@ -44,6 +44,7 @@ struct Track: Identifiable, Codable, Hashable {
     var artist: String
     var album: String
     var genre: String
+    var comment: String = ""
     var duration: TimeInterval
     var sampleRate: Double
     var bpm: Double?
@@ -56,6 +57,7 @@ struct Track: Identifiable, Codable, Hashable {
     var embeddingUpdatedAt: Date?
     var hasSeratoMetadata: Bool
     var hasRekordboxMetadata: Bool
+    var genreSource: TrackMetadataSource? = nil
     var bpmSource: TrackMetadataSource?
     var keySource: TrackMetadataSource?
     var lastSeenInLocalScanAt: Date? = nil
@@ -80,6 +82,7 @@ struct Track: Identifiable, Codable, Hashable {
             artist: "",
             album: "",
             genre: "",
+            comment: "",
             duration: 0,
             sampleRate: 0,
             bpm: nil,
@@ -92,6 +95,7 @@ struct Track: Identifiable, Codable, Hashable {
             embeddingUpdatedAt: nil,
             hasSeratoMetadata: false,
             hasRekordboxMetadata: false,
+            genreSource: nil,
             bpmSource: nil,
             keySource: nil,
             lastSeenInLocalScanAt: nil

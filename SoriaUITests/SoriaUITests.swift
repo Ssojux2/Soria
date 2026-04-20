@@ -360,16 +360,17 @@ final class SoriaUITests: XCTestCase {
     }
 
     @MainActor
-    func testLibraryHeadersAreSimplifiedAndSettingsKeepSourceDetails() throws {
+    func testLibraryHeadersExposeGenreAndCommentColumns() throws {
         let app = launchApp(libraryState: .prepared)
 
         XCTAssertTrue(element(in: app, identifier: "library-table").waitForExistence(timeout: 10))
         XCTAssertTrue(element(in: app, identifier: "library-column-title").waitForExistence(timeout: 10))
         XCTAssertTrue(element(in: app, identifier: "library-column-artist").exists)
+        XCTAssertTrue(element(in: app, identifier: "library-column-genre").exists)
+        XCTAssertTrue(element(in: app, identifier: "library-column-comment").exists)
         XCTAssertTrue(element(in: app, identifier: "library-column-bpm-key").exists)
         XCTAssertTrue(element(in: app, identifier: "library-column-status").exists)
         XCTAssertFalse(element(in: app, identifier: "library-column-duration").exists)
-        XCTAssertFalse(element(in: app, identifier: "library-column-genre").exists)
 
         element(in: app, identifier: "sidebar-settings").click()
 

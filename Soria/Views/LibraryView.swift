@@ -54,6 +54,15 @@ struct LibraryView: View {
                 TableColumn("Artist", sortUsing: LibraryTrackSortComparator(column: .artist)) { track in
                     Text(track.artist)
                 }
+                TableColumn("Genre", sortUsing: LibraryTrackSortComparator(column: .genre)) { track in
+                    Text(track.genre)
+                        .foregroundStyle(track.genre.isEmpty ? .secondary : .primary)
+                }
+                TableColumn("Comment", sortUsing: LibraryTrackSortComparator(column: .comment)) { track in
+                    Text(track.comment)
+                        .foregroundStyle(track.comment.isEmpty ? .secondary : .primary)
+                        .lineLimit(2)
+                }
                 TableColumn("BPM / Key", sortUsing: LibraryTrackSortComparator(column: .bpm)) { track in
                     Text(bpmKeySummary(for: track))
                         .foregroundStyle(.secondary)
@@ -103,6 +112,8 @@ struct LibraryView: View {
                 AccessibilityMarker(identifier: "library-table", label: "Library Table")
                 AccessibilityMarker(identifier: "library-column-title", label: "Title Column")
                 AccessibilityMarker(identifier: "library-column-artist", label: "Artist Column")
+                AccessibilityMarker(identifier: "library-column-genre", label: "Genre Column")
+                AccessibilityMarker(identifier: "library-column-comment", label: "Comment Column")
                 AccessibilityMarker(identifier: "library-column-bpm-key", label: "BPM and Key Column")
                 AccessibilityMarker(identifier: "library-column-status", label: "Status Column")
             }

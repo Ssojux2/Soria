@@ -686,6 +686,7 @@ final class DJLibrarySyncService {
 
     func syncEnabledSources(
         _ sources: [LibrarySourceRecord],
+        additionalImportedTracks: [VendorLibraryTrackRecord] = [],
         onProgress: @escaping @Sendable (ScanJobProgress) -> Void
     ) async throws -> NativeLibrarySyncSummary {
         await Task.yield()
@@ -709,6 +710,7 @@ final class DJLibrarySyncService {
             }
         }
 
+        importedTracks.append(contentsOf: additionalImportedTracks)
         let enrichmentSummary = try await syncImportedTracks(importedTracks, onProgress: onProgress)
         return NativeLibrarySyncSummary(
             matchedTrackCount: enrichmentSummary.matchedTrackCount,
@@ -747,7 +749,8 @@ final class DJLibrarySyncService {
         }
 
         var importedHashCache: [String: String?] = [:]
-        var groupedEntries: [VendorEnrichmentTarget: [VendorLibraryTrackRecord]] = [:]
+        var groupedRecordsByTrackID: [UUID: [VendorLibraryTrackRecord]] = [:]
+        var groupedMetadataByTarget: [VendorEnrichmentTarget: [ExternalDJMetadata]] = [:]
         var matchedTrackIDs = Set<UUID>()
         var matchedEntryCount = 0
         var unmatchedEntryCount = 0
@@ -764,7 +767,8 @@ final class DJLibrarySyncService {
                 localTracksByHash: localTracksByHash,
                 importedHashCache: &importedHashCache
             ) {
-                groupedEntries[target, default: []].append(importedTrack)
+                groupedRecordsByTrackID[target.trackID, default: []].append(importedTrack)
+                groupedMetadataByTarget[target, default: []].append(importedTrack.metadata)
                 matchedTrackIDs.insert(target.trackID)
                 matchedEntryCount += 1
                 referenceAttachmentCount += importedTrack.metadata.playlistMemberships.count
@@ -776,16 +780,30 @@ final class DJLibrarySyncService {
             onProgress(progress)
         }
 
-        for (target, records) in groupedEntries {
-            guard let localTrack = localTracksByID[target.trackID] else { continue }
-            let updatedTrack = enrich(track: localTrack, with: records, source: target.source)
+        for trackID in matchedTrackIDs {
+            guard let localTrack = localTracksByID[trackID] else { continue }
+            let records = groupedRecordsByTrackID[trackID] ?? []
+            let existingMetadata = try database.fetchExternalMetadata(trackID: trackID)
+            let updatedTrack = enrich(track: localTrack, with: records)
             try database.upsertTrack(updatedTrack)
-            localTracksByID[target.trackID] = updatedTrack
-            try database.replaceExternalMetadata(
-                trackID: updatedTrack.id,
-                source: target.source,
-                entries: records.map(\.metadata)
-            )
+            localTracksByID[trackID] = updatedTrack
+
+            for source in ExternalDJMetadata.Source.allCases {
+                let target = VendorEnrichmentTarget(trackID: trackID, source: source)
+                guard let incomingMetadata = groupedMetadataByTarget[target], !incomingMetadata.isEmpty else {
+                    continue
+                }
+                let mergedMetadata = mergeExternalMetadata(
+                    existing: existingMetadata.filter { $0.source == source },
+                    incoming: incomingMetadata,
+                    source: source
+                )
+                try database.replaceExternalMetadata(
+                    trackID: updatedTrack.id,
+                    source: source,
+                    entries: mergedMetadata.map { [$0] } ?? []
+                )
+            }
         }
 
         progress.isRunning = false
@@ -828,51 +846,199 @@ final class DJLibrarySyncService {
 
     private func enrich(
         track: Track,
-        with records: [VendorLibraryTrackRecord],
-        source: ExternalDJMetadata.Source
+        with records: [VendorLibraryTrackRecord]
     ) -> Track {
         var updatedTrack = track
-        let metadataSource: TrackMetadataSource = source == .serato ? .serato : .rekordbox
+        let seratoRecords = records.filter { $0.source == .serato }
+        let rekordboxRecords = records.filter { $0.source == .rekordbox }
 
-        updatedTrack.title = firstNonEmpty(records.map(\.title) + [track.title])
-        updatedTrack.artist = firstNonEmpty(records.map(\.artist) + [track.artist])
-        updatedTrack.album = firstNonEmpty(records.map(\.album) + [track.album])
-        updatedTrack.genre = firstNonEmpty(records.map(\.genre) + [track.genre])
+        updatedTrack.title = fillIfBlank(
+            track.title,
+            candidates: seratoRecords.map { $0.title as String? } + rekordboxRecords.map { $0.title as String? }
+        )
+        updatedTrack.artist = fillIfBlank(
+            track.artist,
+            candidates: seratoRecords.map { $0.artist as String? } + rekordboxRecords.map { $0.artist as String? }
+        )
+        updatedTrack.album = fillIfBlank(
+            track.album,
+            candidates: seratoRecords.map { $0.album as String? } + rekordboxRecords.map { $0.album as String? }
+        )
         if updatedTrack.duration <= 0, let duration = records.compactMap(\.duration).first(where: { $0 > 0 }) {
             updatedTrack.duration = duration
         }
 
-        if source == .serato {
+        if !seratoRecords.isEmpty {
             updatedTrack.hasSeratoMetadata = true
         }
-        if source == .rekordbox {
+        if !rekordboxRecords.isEmpty {
             updatedTrack.hasRekordboxMetadata = true
         }
 
-        if let importedBPM = records.compactMap(\.bpm).first,
-           shouldAdoptMetadataValue(importedBPM, from: metadataSource, over: updatedTrack.bpm, currentSource: updatedTrack.bpmSource)
-        {
-            updatedTrack.bpm = importedBPM
-            updatedTrack.bpmSource = metadataSource
-        }
+        applyPreferredGenre(
+            to: &updatedTrack,
+            seratoGenre: preferredGenre(from: seratoRecords),
+            rekordboxGenre: preferredGenre(from: rekordboxRecords)
+        )
 
-        if let importedKey = records.compactMap(\.musicalKey).first,
-           shouldAdoptMetadataValue(importedKey, from: metadataSource, over: updatedTrack.musicalKey, currentSource: updatedTrack.keySource)
-        {
-            updatedTrack.musicalKey = importedKey
-            updatedTrack.keySource = metadataSource
-        }
+        updatedTrack.comment = firstNonEmpty(
+            seratoRecords.map(\.metadata.comment)
+                + [track.comment as String?]
+                + rekordboxRecords.map(\.metadata.comment)
+        )
+
+        applyPreferredBPMAndKey(to: &updatedTrack, records: seratoRecords, source: .serato)
+        applyPreferredBPMAndKey(to: &updatedTrack, records: rekordboxRecords, source: .rekordbox)
 
         return updatedTrack
     }
 
-    private func firstNonEmpty(_ values: [String?]) -> String {
-        values.compactMap { value -> String? in
-            guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
-                return nil
+    private func applyPreferredBPMAndKey(
+        to track: inout Track,
+        records: [VendorLibraryTrackRecord],
+        source: ExternalDJMetadata.Source
+    ) {
+        guard !records.isEmpty else { return }
+        let metadataSource: TrackMetadataSource = source == .serato ? .serato : .rekordbox
+
+        if let importedBPM = records.compactMap(\.bpm).first,
+           shouldAdoptMetadataValue(importedBPM, from: metadataSource, over: track.bpm, currentSource: track.bpmSource)
+        {
+            track.bpm = importedBPM
+            track.bpmSource = metadataSource
+        }
+
+        if let importedKey = records.compactMap(\.musicalKey).first,
+           shouldAdoptMetadataValue(importedKey, from: metadataSource, over: track.musicalKey, currentSource: track.keySource)
+        {
+            track.musicalKey = importedKey
+            track.keySource = metadataSource
+        }
+    }
+
+    private func applyPreferredGenre(
+        to track: inout Track,
+        seratoGenre: String?,
+        rekordboxGenre: String?
+    ) {
+        let currentGenre = normalizedText(track.genre)
+        switch track.genreSource {
+        case .audioTags where currentGenre != nil:
+            return
+        case .serato where currentGenre != nil:
+            if let seratoGenre {
+                track.genre = seratoGenre
+                track.genreSource = .serato
             }
-            return trimmed
-        }.first ?? ""
+        case .rekordbox where currentGenre != nil:
+            if let seratoGenre {
+                track.genre = seratoGenre
+                track.genreSource = .serato
+            } else if let rekordboxGenre {
+                track.genre = rekordboxGenre
+                track.genreSource = .rekordbox
+            }
+        default:
+            if let seratoGenre {
+                track.genre = seratoGenre
+                track.genreSource = .serato
+            } else if let rekordboxGenre {
+                track.genre = rekordboxGenre
+                track.genreSource = .rekordbox
+            }
+        }
+    }
+
+    private func preferredGenre(from records: [VendorLibraryTrackRecord]) -> String? {
+        firstNonEmptyOptional(
+            records.map { $0.genre as String? } + records.flatMap { record in
+                [record.metadata.tags.first]
+            }
+        )
+    }
+
+    private func mergeExternalMetadata(
+        existing: [ExternalDJMetadata],
+        incoming: [ExternalDJMetadata],
+        source: ExternalDJMetadata.Source
+    ) -> ExternalDJMetadata? {
+        let combined = incoming + existing
+        guard !combined.isEmpty else { return nil }
+
+        let trackPath = combined
+            .map(\.trackPath)
+            .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+            ?? ""
+
+        let cuePoints = Array(Set(combined.flatMap(\.cuePoints))).sorted {
+            if $0.startSec != $1.startSec {
+                return $0.startSec < $1.startSec
+            }
+            let lhsIndex = $0.index ?? .max
+            let rhsIndex = $1.index ?? .max
+            if lhsIndex != rhsIndex {
+                return lhsIndex < rhsIndex
+            }
+            return ($0.name ?? "") < ($1.name ?? "")
+        }
+
+        return ExternalDJMetadata(
+            id: incoming.first?.id ?? existing.first?.id ?? UUID(),
+            trackPath: trackPath,
+            source: source,
+            bpm: firstNonNil(incoming.map(\.bpm) + existing.map(\.bpm)),
+            musicalKey: firstNonEmptyOptional(incoming.map(\.musicalKey) + existing.map(\.musicalKey)),
+            rating: firstNonNil(incoming.map(\.rating) + existing.map(\.rating)),
+            color: firstNonEmptyOptional(incoming.map(\.color) + existing.map(\.color)),
+            tags: uniqueOrderedStrings(combined.flatMap(\.tags)),
+            playCount: firstNonNil(incoming.map(\.playCount) + existing.map(\.playCount)),
+            lastPlayed: (incoming + existing).compactMap(\.lastPlayed).max(),
+            playlistMemberships: uniqueOrderedStrings(combined.flatMap(\.playlistMemberships)),
+            cueCount: cuePoints.isEmpty ? combined.compactMap(\.cueCount).max() : cuePoints.count,
+            cuePoints: cuePoints,
+            comment: firstNonEmptyOptional(incoming.map(\.comment) + existing.map(\.comment)),
+            vendorTrackID: firstNonEmptyOptional(incoming.map(\.vendorTrackID) + existing.map(\.vendorTrackID)),
+            analysisState: firstNonEmptyOptional(incoming.map(\.analysisState) + existing.map(\.analysisState)),
+            analysisCachePath: firstNonEmptyOptional(incoming.map(\.analysisCachePath) + existing.map(\.analysisCachePath)),
+            syncVersion: firstNonEmptyOptional(incoming.map(\.syncVersion) + existing.map(\.syncVersion))
+        )
+    }
+
+    private func fillIfBlank(_ currentValue: String, candidates: [String?]) -> String {
+        normalizedText(currentValue) ?? firstNonEmpty(candidates)
+    }
+
+    private func firstNonEmpty(_ values: [String?]) -> String {
+        firstNonEmptyOptional(values) ?? ""
+    }
+
+    private func firstNonEmptyOptional(_ values: [String?]) -> String? {
+        values.compactMap { value -> String? in
+            normalizedText(value)
+        }.first
+    }
+
+    private func normalizedText(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private func uniqueOrderedStrings(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var output: [String] = []
+        for value in values {
+            guard let normalized = normalizedText(value), seen.insert(normalized).inserted else {
+                continue
+            }
+            output.append(normalized)
+        }
+        return output
+    }
+
+    private func firstNonNil<Value>(_ values: [Value?]) -> Value? {
+        values.compactMap { $0 }.first
     }
 }
 

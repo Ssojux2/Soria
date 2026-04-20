@@ -1183,12 +1183,14 @@ struct SoriaTests {
         let existingTrack = makeTrack(
             path: "/missing/source-track.mp3",
             title: "Existing",
+            artist: "",
             genre: "House",
             bpm: 122,
             musicalKey: "8A",
             analyzedAt: Date(),
             embeddingProfileID: "profile",
             embeddingUpdatedAt: Date(),
+            genreSource: .audioTags,
             bpmSource: .soriaAnalysis,
             keySource: .soriaAnalysis,
             lastSeenInLocalScanAt: Date()
@@ -1301,10 +1303,442 @@ struct SoriaTests {
         #expect(tracks.first?.hasSeratoMetadata == true)
         #expect(tracks.first?.hasRekordboxMetadata == true)
         #expect(tracks.first?.analyzedAt != nil)
+        #expect(tracks.first?.artist == "DJ Merge")
+        #expect(tracks.first?.album == "Set")
+        #expect(tracks.first?.comment == "serato")
+        #expect(tracks.first?.genre == "House")
+        #expect(tracks.first?.genreSource == .audioTags)
         #expect(tracks.first?.bpm == 122)
         #expect(tracks.first?.bpmSource == .soriaAnalysis)
         #expect(metadata.count == 2)
         #expect(Set(metadata.map(\.source)) == Set([.serato, .rekordbox]))
+        #expect(metadata.first(where: { $0.source == .serato })?.comment == "serato")
+        #expect(metadata.first(where: { $0.source == .rekordbox })?.analysisCachePath == "/Users/test/ANLZ0000.DAT")
+    }
+
+    @Test func vendorMergeOrderIsDeterministicForGenreAndComment() async throws {
+        func runSync(with records: [VendorLibraryTrackRecord]) async throws -> Track {
+            let directory = try makeTemporaryDirectory()
+            let databaseURL = directory.appendingPathComponent("library.sqlite")
+            let database = try LibraryDatabase(databaseURL: databaseURL)
+            let syncService = DJLibrarySyncService(database: database)
+
+            let track = makeTrack(
+                path: "/music/order-sensitive.mp3",
+                title: "Order Sensitive",
+                artist: "",
+                genre: "",
+                lastSeenInLocalScanAt: Date()
+            )
+            try database.upsertTrack(track)
+
+            _ = try await syncService.syncImportedTracks(records)
+            let refreshedTrack = try database.fetchTrack(path: track.filePath)
+            return try #require(refreshedTrack)
+        }
+
+        let seratoRecord = VendorLibraryTrackRecord(
+            source: .serato,
+            normalizedPath: "/music/order-sensitive.mp3",
+            fileName: "order-sensitive.mp3",
+            title: "Serato Title",
+            artist: "Serato Artist",
+            album: "Serato Album",
+            genre: "House",
+            duration: nil,
+            bpm: 124,
+            musicalKey: "8A",
+            metadata: ExternalDJMetadata(
+                id: UUID(),
+                trackPath: "/music/order-sensitive.mp3",
+                source: .serato,
+                bpm: 124,
+                musicalKey: "8A",
+                rating: nil,
+                color: nil,
+                tags: ["House"],
+                playCount: nil,
+                lastPlayed: nil,
+                playlistMemberships: ["Warmup"],
+                cueCount: nil,
+                cuePoints: [],
+                comment: "Serato Comment",
+                vendorTrackID: "serato-order",
+                analysisState: nil,
+                analysisCachePath: nil,
+                syncVersion: nil
+            )
+        )
+        let rekordboxRecord = VendorLibraryTrackRecord(
+            source: .rekordbox,
+            normalizedPath: "/music/order-sensitive.mp3",
+            fileName: "order-sensitive.mp3",
+            title: "Rekordbox Title",
+            artist: "Rekordbox Artist",
+            album: "Rekordbox Album",
+            genre: "Tech House",
+            duration: nil,
+            bpm: 123,
+            musicalKey: "9A",
+            metadata: ExternalDJMetadata(
+                id: UUID(),
+                trackPath: "/music/order-sensitive.mp3",
+                source: .rekordbox,
+                bpm: 123,
+                musicalKey: "9A",
+                rating: nil,
+                color: nil,
+                tags: ["Tech House"],
+                playCount: nil,
+                lastPlayed: nil,
+                playlistMemberships: ["Peak"],
+                cueCount: nil,
+                cuePoints: [],
+                comment: "Rekordbox Comment",
+                vendorTrackID: "rekordbox-order",
+                analysisState: nil,
+                analysisCachePath: nil,
+                syncVersion: nil
+            )
+        )
+
+        let firstPass = try await runSync(with: [rekordboxRecord, seratoRecord])
+        let secondPass = try await runSync(with: [seratoRecord, rekordboxRecord])
+
+        #expect(firstPass.genre == "House")
+        #expect(firstPass.genreSource == .serato)
+        #expect(firstPass.comment == "Serato Comment")
+        #expect(firstPass.artist == "Serato Artist")
+        #expect(firstPass.album == "Serato Album")
+
+        #expect(secondPass.genre == firstPass.genre)
+        #expect(secondPass.genreSource == firstPass.genreSource)
+        #expect(secondPass.comment == firstPass.comment)
+        #expect(secondPass.artist == firstPass.artist)
+        #expect(secondPass.album == firstPass.album)
+    }
+
+    @Test func rekordboxNativeAndXMLMetadataAreMergedForMatchedLocalTracksOnly() async throws {
+        let directory = try makeTemporaryDirectory()
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let database = try LibraryDatabase(databaseURL: databaseURL)
+        let syncService = DJLibrarySyncService(database: database)
+
+        let localTrack = makeTrack(
+            path: "/music/rekordbox-local.mp3",
+            title: "Local Rekordbox Track",
+            artist: "",
+            genre: "",
+            lastSeenInLocalScanAt: Date()
+        )
+        try database.upsertTrack(localTrack)
+
+        let nativeRecord = VendorLibraryTrackRecord(
+            source: .rekordbox,
+            normalizedPath: localTrack.filePath,
+            fileName: "rekordbox-local.mp3",
+            title: "Local Rekordbox Track",
+            artist: "",
+            album: "",
+            genre: "",
+            duration: 300,
+            bpm: nil,
+            musicalKey: nil,
+            metadata: ExternalDJMetadata(
+                id: UUID(),
+                trackPath: localTrack.filePath,
+                source: .rekordbox,
+                bpm: nil,
+                musicalKey: nil,
+                rating: nil,
+                color: nil,
+                tags: [],
+                playCount: nil,
+                lastPlayed: nil,
+                playlistMemberships: ["Native Playlist"],
+                cueCount: 1,
+                cuePoints: [
+                    ExternalDJCuePoint(
+                        kind: .hotcue,
+                        name: "Drop",
+                        index: 1,
+                        startSec: 64,
+                        endSec: nil,
+                        color: nil,
+                        source: "rekordbox:native"
+                    )
+                ],
+                comment: nil,
+                vendorTrackID: "rk-native",
+                analysisState: "status=1",
+                analysisCachePath: "/Users/test/ANLZ0001.DAT",
+                syncVersion: "7.2.8/6"
+            )
+        )
+        let xmlMatchedRecord = VendorLibraryTrackRecord(
+            source: .rekordbox,
+            normalizedPath: localTrack.filePath,
+            fileName: "rekordbox-local.mp3",
+            title: "XML Title",
+            artist: "XML Artist",
+            album: "XML Album",
+            genre: "House",
+            duration: nil,
+            bpm: 125,
+            musicalKey: "8A",
+            metadata: ExternalDJMetadata(
+                id: UUID(),
+                trackPath: localTrack.filePath,
+                source: .rekordbox,
+                bpm: 125,
+                musicalKey: "8A",
+                rating: 4,
+                color: "Blue",
+                tags: ["House"],
+                playCount: 8,
+                lastPlayed: nil,
+                playlistMemberships: ["Festival / Day 1 / Sunrise"],
+                cueCount: nil,
+                cuePoints: [],
+                comment: "Peak-time weapon",
+                vendorTrackID: "rk-native",
+                analysisState: nil,
+                analysisCachePath: nil,
+                syncVersion: nil
+            )
+        )
+        let xmlUnmatchedRecord = VendorLibraryTrackRecord(
+            source: .rekordbox,
+            normalizedPath: "/music/not-scanned.mp3",
+            fileName: "not-scanned.mp3",
+            title: "Missing",
+            artist: "Missing Artist",
+            album: "",
+            genre: "House",
+            duration: nil,
+            bpm: 124,
+            musicalKey: "7A",
+            metadata: ExternalDJMetadata(
+                id: UUID(),
+                trackPath: "/music/not-scanned.mp3",
+                source: .rekordbox,
+                bpm: 124,
+                musicalKey: "7A",
+                rating: nil,
+                color: nil,
+                tags: ["House"],
+                playCount: nil,
+                lastPlayed: nil,
+                playlistMemberships: ["Unmatched"],
+                cueCount: nil,
+                cuePoints: [],
+                comment: "Should not import",
+                vendorTrackID: "rk-missing",
+                analysisState: nil,
+                analysisCachePath: nil,
+                syncVersion: nil
+            )
+        )
+
+        let summary = try await syncService.syncImportedTracks([nativeRecord, xmlMatchedRecord, xmlUnmatchedRecord])
+        let refreshedTrackRecord = try database.fetchTrack(path: localTrack.filePath)
+        let refreshedTrack = try #require(refreshedTrackRecord)
+        let metadata = try database.fetchExternalMetadata(trackID: localTrack.id)
+
+        #expect(summary.matchedTrackCount == 1)
+        #expect(summary.matchedEntryCount == 2)
+        #expect(summary.unmatchedEntryCount == 1)
+        #expect(summary.referenceAttachmentCount == 2)
+
+        #expect(refreshedTrack.artist == "XML Artist")
+        #expect(refreshedTrack.album == "XML Album")
+        #expect(refreshedTrack.genre == "House")
+        #expect(refreshedTrack.genreSource == .rekordbox)
+        #expect(refreshedTrack.comment == "Peak-time weapon")
+
+        #expect(metadata.count == 1)
+        #expect(metadata.first?.source == .rekordbox)
+        #expect(metadata.first?.analysisCachePath == "/Users/test/ANLZ0001.DAT")
+        #expect(metadata.first?.comment == "Peak-time weapon")
+        #expect(Set(metadata.first?.playlistMemberships ?? []) == Set(["Native Playlist", "Festival / Day 1 / Sunrise"]))
+    }
+
+    @Test func libraryScannerTracksMultipleRootsAndDropsReferencesForRemovedRoots() async throws {
+        let directory = try makeTemporaryDirectory()
+        let firstRoot = directory.appendingPathComponent("RootA", isDirectory: true)
+        let secondRoot = directory.appendingPathComponent("RootB", isDirectory: true)
+        try FileManager.default.createDirectory(at: firstRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondRoot, withIntermediateDirectories: true)
+
+        let firstTrackURL = firstRoot.appendingPathComponent("Alpha.wav")
+        let secondTrackURL = secondRoot.appendingPathComponent("Beta.wav")
+        try writeTestWAV(to: firstTrackURL, frequency: 440)
+        try writeTestWAV(to: secondTrackURL, frequency: 554.37)
+
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let database = try LibraryDatabase(databaseURL: databaseURL)
+        let scanner = LibraryScannerService(database: database)
+
+        await scanner.scan(roots: [firstRoot, secondRoot]) { _ in }
+
+        let firstTrackPath = TrackPathNormalizer.normalizedAbsolutePath(firstTrackURL)
+        let secondTrackPath = TrackPathNormalizer.normalizedAbsolutePath(secondTrackURL)
+        let firstTrackRecord = try database.fetchTrack(path: firstTrackPath)
+        let secondTrackRecord = try database.fetchTrack(path: secondTrackPath)
+        let firstTrack = try #require(firstTrackRecord)
+        let secondTrack = try #require(secondTrackRecord)
+
+        #expect(Set(try database.fetchScannedTracks().map(\.filePath)) == Set([firstTrackPath, secondTrackPath]))
+
+        try database.replaceExternalMetadata(
+            trackID: firstTrack.id,
+            source: .serato,
+            entries: [
+                ExternalDJMetadata(
+                    id: UUID(),
+                    trackPath: firstTrackPath,
+                    source: .serato,
+                    bpm: nil,
+                    musicalKey: nil,
+                    rating: nil,
+                    color: nil,
+                    tags: [],
+                    playCount: nil,
+                    lastPlayed: nil,
+                    playlistMemberships: ["Root A / Warmup"],
+                    cueCount: nil,
+                    cuePoints: [],
+                    comment: nil,
+                    vendorTrackID: nil,
+                    analysisState: nil,
+                    analysisCachePath: nil,
+                    syncVersion: nil
+                )
+            ]
+        )
+        try database.replaceExternalMetadata(
+            trackID: secondTrack.id,
+            source: .serato,
+            entries: [
+                ExternalDJMetadata(
+                    id: UUID(),
+                    trackPath: secondTrackPath,
+                    source: .serato,
+                    bpm: nil,
+                    musicalKey: nil,
+                    rating: nil,
+                    color: nil,
+                    tags: [],
+                    playCount: nil,
+                    lastPlayed: nil,
+                    playlistMemberships: ["Root B / Peak"],
+                    cueCount: nil,
+                    cuePoints: [],
+                    comment: nil,
+                    vendorTrackID: nil,
+                    analysisState: nil,
+                    analysisCachePath: nil,
+                    syncVersion: nil
+                )
+            ]
+        )
+
+        let initialFacets = try database.fetchMembershipFacets(source: .serato)
+        #expect(Set(initialFacets.map(\.membershipPath)) == Set(["Root A / Warmup", "Root B / Peak"]))
+
+        await scanner.scan(roots: [firstRoot]) { _ in }
+
+        let rescannedTracks = try database.fetchScannedTracks()
+        let secondTrackAfterRemovalRecord = try database.fetchTrack(path: secondTrackPath)
+        let secondTrackAfterRemoval = try #require(secondTrackAfterRemovalRecord)
+        let finalFacets = try database.fetchMembershipFacets(source: .serato)
+
+        #expect(Set(rescannedTracks.map(\.filePath)) == Set([firstTrackPath]))
+        #expect(secondTrackAfterRemoval.lastSeenInLocalScanAt == nil)
+        #expect(finalFacets.map(\.membershipPath) == ["Root A / Warmup"])
+    }
+
+    @Test func membershipCatalogAndScopeQueriesIgnoreInactiveTracks() throws {
+        let directory = try makeTemporaryDirectory()
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let database = try LibraryDatabase(databaseURL: databaseURL)
+
+        let activeTrack = makeTrack(
+            path: "/music/active.mp3",
+            title: "Active",
+            lastSeenInLocalScanAt: Date()
+        )
+        let inactiveTrack = makeTrack(
+            path: "/music/inactive.mp3",
+            title: "Inactive",
+            lastSeenInLocalScanAt: nil
+        )
+        try database.upsertTrack(activeTrack)
+        try database.upsertTrack(inactiveTrack)
+
+        let sharedMembership = "Warmup / Deep"
+        try database.replaceExternalMetadata(
+            trackID: activeTrack.id,
+            source: .serato,
+            entries: [
+                ExternalDJMetadata(
+                    id: UUID(),
+                    trackPath: activeTrack.filePath,
+                    source: .serato,
+                    bpm: nil,
+                    musicalKey: nil,
+                    rating: nil,
+                    color: nil,
+                    tags: [],
+                    playCount: nil,
+                    lastPlayed: nil,
+                    playlistMemberships: [sharedMembership],
+                    cueCount: nil,
+                    cuePoints: [],
+                    comment: nil,
+                    vendorTrackID: nil,
+                    analysisState: nil,
+                    analysisCachePath: nil,
+                    syncVersion: nil
+                )
+            ]
+        )
+        try database.replaceExternalMetadata(
+            trackID: inactiveTrack.id,
+            source: .serato,
+            entries: [
+                ExternalDJMetadata(
+                    id: UUID(),
+                    trackPath: inactiveTrack.filePath,
+                    source: .serato,
+                    bpm: nil,
+                    musicalKey: nil,
+                    rating: nil,
+                    color: nil,
+                    tags: [],
+                    playCount: nil,
+                    lastPlayed: nil,
+                    playlistMemberships: [sharedMembership],
+                    cueCount: nil,
+                    cuePoints: [],
+                    comment: nil,
+                    vendorTrackID: nil,
+                    analysisState: nil,
+                    analysisCachePath: nil,
+                    syncVersion: nil
+                )
+            ]
+        )
+
+        let facets = try database.fetchMembershipFacets(source: .serato)
+        var filter = LibraryScopeFilter()
+        filter.seratoMembershipPaths = [sharedMembership]
+        let scopedTrackIDs = try database.fetchTrackIDs(matching: filter)
+
+        #expect(facets.count == 1)
+        #expect(facets.first?.membershipPath == sharedMembership)
+        #expect(facets.first?.trackCount == 1)
+        #expect(scopedTrackIDs == Set([activeTrack.id]))
     }
 
     @Test func readyTrackIDsRequireStoredTrackAndSegmentVectors() throws {
@@ -1484,7 +1918,8 @@ struct SoriaTests {
         let matchedTrack = makeTrack(
             path: "/Users/test/Music/Matched Track.mp3",
             title: "Matched Track",
-            analyzedAt: Date()
+            analyzedAt: Date(),
+            lastSeenInLocalScanAt: Date()
         )
         try database.upsertTrack(matchedTrack)
 
@@ -1550,7 +1985,8 @@ struct SoriaTests {
         let rekordboxOnlyTrack = makeTrack(
             path: "/music/playlist.mp3",
             title: "Playlist Only",
-            analyzedAt: Date()
+            analyzedAt: Date(),
+            lastSeenInLocalScanAt: Date()
         )
         try database.upsertTrack(rekordboxOnlyTrack)
 
@@ -2000,6 +2436,7 @@ private func makeTrack(
     artist: String = "DJ",
     album: String = "",
     genre: String = "",
+    comment: String = "",
     duration: TimeInterval = 300,
     sampleRate: Double = 44_100,
     bpm: Double? = nil,
@@ -2010,6 +2447,7 @@ private func makeTrack(
     embeddingUpdatedAt: Date? = nil,
     hasSeratoMetadata: Bool = false,
     hasRekordboxMetadata: Bool = false,
+    genreSource: TrackMetadataSource? = nil,
     bpmSource: TrackMetadataSource? = nil,
     keySource: TrackMetadataSource? = nil,
     lastSeenInLocalScanAt: Date? = nil
@@ -2022,6 +2460,7 @@ private func makeTrack(
         artist: artist,
         album: album,
         genre: genre,
+        comment: comment,
         duration: duration,
         sampleRate: sampleRate,
         bpm: bpm,
@@ -2034,6 +2473,7 @@ private func makeTrack(
         embeddingUpdatedAt: embeddingUpdatedAt,
         hasSeratoMetadata: hasSeratoMetadata,
         hasRekordboxMetadata: hasRekordboxMetadata,
+        genreSource: genreSource,
         bpmSource: bpmSource,
         keySource: keySource,
         lastSeenInLocalScanAt: lastSeenInLocalScanAt

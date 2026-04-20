@@ -3,6 +3,9 @@ import Foundation
 struct ParsedRekordboxTrack: Hashable {
     let trackID: String?
     let trackPath: String
+    let title: String?
+    let artist: String?
+    let album: String?
     let bpm: Double?
     let musicalKey: String?
     let genre: String?
@@ -112,6 +115,9 @@ final class RekordboxXMLParser {
             return ParsedRekordboxTrack(
                 trackID: trimmed(element.attribute(forName: "TrackID")?.stringValue),
                 trackPath: trackPath,
+                title: trimmed(element.attribute(forName: "Name")?.stringValue),
+                artist: trimmed(element.attribute(forName: "Artist")?.stringValue),
+                album: trimmed(element.attribute(forName: "Album")?.stringValue),
                 bpm: parseDouble(element.attribute(forName: "AverageBpm")?.stringValue),
                 musicalKey: trimmed(element.attribute(forName: "Tonality")?.stringValue),
                 genre: trimmed(element.attribute(forName: "Genre")?.stringValue),
