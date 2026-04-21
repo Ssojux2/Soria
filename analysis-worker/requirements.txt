@@ -4,5 +4,5 @@ soundfile==0.12.1
 requests==2.32.3
 chromadb==0.5.11
 pytest==8.3.3
-torch==2.5.1
+torch==2.8.0
 transformers==4.46.3
