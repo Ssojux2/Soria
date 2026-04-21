@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/Ssojux2/Soria/discussions
+    about: Use Discussions for setup help, ideas, and workflow questions.
+  - name: Security reports
+    url: https://github.com/Ssojux2/Soria/security/advisories/new
+    about: Please report vulnerabilities privately instead of opening a public issue.

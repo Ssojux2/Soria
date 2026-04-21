@@ -41,14 +41,17 @@ jobs:
           This is an early open-source macOS build.
 
           The app is ad-hoc signed, but it is not Developer ID signed or notarized by Apple. macOS will show a security warning. If you trust this source, open System Settings > Privacy & Security and choose Open Anyway, or build the app from source with Xcode.
+
+          Soria source code is distributed under the MIT License.
           EOF
 
           if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
-            gh release edit "${TAG_NAME}" --draft=false --latest --notes-file dist/release-notes.md
+            gh release edit "${TAG_NAME}" --draft --latest=false --notes-file dist/release-notes.md
           else
             gh release create "${TAG_NAME}" \
+              --draft \
               --target "${GITHUB_SHA}" \
-              --latest \
+              --latest=false \
               --title "Soria ${TAG_NAME}" \
               --notes-file dist/release-notes.md
           fi

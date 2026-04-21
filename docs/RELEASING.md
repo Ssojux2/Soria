@@ -62,6 +62,8 @@ git push origin v0.1.0
 
 The workflow creates or updates a draft GitHub Release and uploads the DMG/ZIP
 files plus SHA-256 checksums. Review the draft notes on GitHub before publishing.
+The release should remain a draft until the install warning, checksum list, and
+release notes have been reviewed.
 
 ## Release Notes Template
 
@@ -72,15 +74,21 @@ This is an early open-source macOS build. It is ad-hoc signed, but it is not
 Developer ID signed or notarized by Apple. macOS will show a security warning.
 If you trust this source, open System Settings > Privacy & Security and choose
 Open Anyway, or build the app from source with Xcode.
+
+Soria source code is distributed under the MIT License.
 ```
 
 ## Public Repository Checklist
 
-- Choose and add an open-source license before making the repository public.
+- Confirm the MIT `LICENSE` file is present and detected by GitHub.
 - Confirm `.env`, API keys, sample music paths, and local caches are not tracked.
+- Confirm private Xcode `xcuserdata` files are not tracked.
+- Confirm `CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `PRIVACY.md`, issue
+  templates, and the pull request template are present.
 - Run `make release-dmg` and verify the DMG mounts and ZIP extracts.
 - Verify analysis runtime messaging in Settings, because the early DMG/ZIP does
   not yet ship a portable Python venv.
+- Check `THIRD_PARTY_NOTICES.md` before changing bundled dependencies.
 - Upload the DMG, ZIP, and matching `.sha256` checksums.
 - Keep the release marked as draft until the README and install warning are clear.
 

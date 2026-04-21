@@ -1,0 +1,90 @@
+name: Bug report
+description: Report a reproducible problem with Soria.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Do not include API keys, real music files,
+        private DJ databases, or unredacted paths/logs.
+  - type: input
+    id: version
+    attributes:
+      label: Soria version
+      description: Release version, commit SHA, or "main".
+      placeholder: "v0.1.2 or 94e68c4"
+    validations:
+      required: true
+  - type: dropdown
+    id: install_path
+    attributes:
+      label: Install path
+      options:
+        - Release DMG
+        - Release ZIP
+        - Source build
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and architecture
+      placeholder: "macOS 15.x, Apple Silicon"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Setup or launch
+        - Folder scan
+        - Analysis worker
+        - Gemini embeddings
+        - Recommendation scoring
+        - Rekordbox import/export
+        - Serato import/export
+        - Normalization
+        - UI
+        - Release packaging
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use synthetic paths and sample data when possible.
+      placeholder: |
+        1. Open Soria...
+        2. Add a folder...
+        3. Run analysis...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs or screenshots
+      description: Remove API keys, user names, home directories, and private music paths.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed API keys, private paths, private logs, and real music files.
+          required: true

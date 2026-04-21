@@ -158,6 +158,8 @@ The app is ad-hoc signed, but it is not Developer ID signed and has not been
 notarized by Apple. macOS Gatekeeper will warn before opening it. If you trust
 this source, open it through System Settings > Privacy & Security > Open Anyway,
 or build the app from source with Xcode.
+
+Soria source code is distributed under the MIT License.
 EOF
 
 xattr -cr "${STAGING_APP}"

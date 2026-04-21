@@ -4,6 +4,7 @@
 # Xcode / Swift
 .build/
 DerivedData/
+xcuserdata/
 *.xcuserdata/
 *.xcbkptlist
 *.xcscheme
@@ -14,6 +15,7 @@ DerivedData/
 venv/
 env/
 __pycache__/
+.pytest_cache/
 *.pyc
 
 # Environment files

@@ -1,0 +1,55 @@
+name: Feature request
+description: Suggest a focused improvement for Soria.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For broad ideas or workflow discussion, GitHub Discussions is usually a
+        better place. Use this template when the request is concrete enough to
+        evaluate.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or workflow
+      description: What DJ workflow or developer workflow would this improve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the smallest useful version.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Library scan
+        - Analysis
+        - Recommendations
+        - Export
+        - Metadata compatibility
+        - Privacy or security
+        - Packaging
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This request does not require direct writes to private vendor libraries without a backup/safety plan.
+          required: true
+        - label: This request does not include private music files, API keys, or unredacted paths/logs.
+          required: true

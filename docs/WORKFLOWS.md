@@ -354,7 +354,8 @@ Useful checks:
 
 ```bash
 make build
-python3 -m pytest analysis-worker/tests
+make test-worker
+make test-swift
 VERSION=0.1.0 make release-dmg
 ```
 

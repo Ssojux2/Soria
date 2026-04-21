@@ -3,6 +3,7 @@
 [![Sponsor](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-EA4AAA)](https://github.com/sponsors/Ssojux2)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ssojux2-FFDD00?logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/ssojux2)
 [![Release macOS assets](https://github.com/Ssojux2/Soria/actions/workflows/release-dmg.yml/badge.svg)](https://github.com/Ssojux2/Soria/actions/workflows/release-dmg.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Soria is a local-first macOS DJ mix assistant. It scans folders you choose,
 indexes your music library locally, analyzes track structure, recommends
@@ -47,12 +48,23 @@ Soria is supported through [GitHub Sponsors](https://github.com/sponsors/Ssojux2
 and [Buy Me a Coffee](https://buymeacoffee.com/ssojux2). Sponsorship supports
 future music-related app development.
 
+### License
+
+Soria is released under the [MIT License](LICENSE). Contributions are accepted
+under the same license unless a contributor explicitly states otherwise.
+
 ### Documentation
 
 - [Program Workflows](docs/WORKFLOWS.md) explains how the app moves through
   setup, scanning, analysis, recommendation, normalization, and export.
 - [Release Notes](docs/RELEASING.md) explains the current GitHub Releases,
   DMG, ZIP, checksum, and Gatekeeper-warning workflow.
+- [Privacy](PRIVACY.md) explains local storage, Keychain usage, Gemini embedding
+  requests, and safe issue-reporting practices.
+- [Contributing](CONTRIBUTING.md), [Support](SUPPORT.md), and
+  [Security](SECURITY.md) explain how to participate safely.
+- [Third-Party Notices](THIRD_PARTY_NOTICES.md) summarizes direct dependency
+  license metadata for the current source and release approach.
 
 ### Install Directly From GitHub Releases
 
@@ -244,13 +256,16 @@ Useful checks:
 
 ```bash
 make build
-python3 -m pytest analysis-worker/tests
+make test-worker
+make test-swift
 VERSION=0.1.0 make release-dmg
 ```
 
 The Python tests require the active interpreter to have the worker dependencies
-installed. macOS UI/unit tests may require local system services that are not
-available in every sandboxed environment.
+installed. `make test-swift` runs the CI Swift unit-test set. Use
+`make test-swift-full` when changing playback preview, waveform seeking, or
+timing behavior. macOS UI/unit tests may require local system services that are
+not available in every sandboxed environment.
 
 ### Known Limitations
 
@@ -265,13 +280,27 @@ available in every sandboxed environment.
 - Recommendation quality depends on local metadata quality and embedding
   availability.
 
+### Privacy and Security
+
+Soria stores the library database, analysis summaries, waveform previews, and
+vector persistence on your Mac. Gemini embedding profiles can send short derived
+segment payloads, descriptor text, query text, and metadata context for
+embedding requests, but Soria does not intentionally upload full source music
+files or the local library database.
+
+Before opening issues or pull requests, remove API keys, private music files,
+private DJ databases, unredacted home-directory paths, and private logs. Report
+security issues privately through the process in [SECURITY.md](SECURITY.md).
+
 ### Contributing
 
-Issues, discussions, and focused pull requests are welcome after the repository
-is public. Good first areas include metadata fixtures, export compatibility,
-performance on large libraries, and documentation for DJ workflows.
+Issues, discussions, and focused pull requests are welcome. Good first areas
+include metadata fixtures, export compatibility, performance on large libraries,
+and documentation for DJ workflows.
 
-Before making the repository fully public, choose and add an open-source license.
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+For larger changes, open an issue first and keep each pull request tied to one
+issue or one clear root cause.
 
 ---
 
@@ -357,6 +386,8 @@ make run
   recommendation, normalization, export 흐름을 저장소 안에서 확인할 수 있습니다.
 - [릴리스 문서](docs/RELEASING.md): GitHub Releases, DMG/ZIP, checksum,
   Gatekeeper 경고 처리 흐름을 정리합니다.
+- [Privacy](PRIVACY.md), [Contributing](CONTRIBUTING.md),
+  [Support](SUPPORT.md), [Security](SECURITY.md) 문서도 함께 확인해 주세요.
 
 ### 기본 사용 방법
 
@@ -377,6 +408,8 @@ make run
 개발을 후원하려면 [GitHub Sponsors](https://github.com/sponsors/Ssojux2) 또는
 [Buy Me a Coffee](https://buymeacoffee.com/ssojux2)를 이용해 주세요. 후원은
 향후 음악 관련 앱 개발에 사용됩니다.
+
+Soria 소스코드는 [MIT License](LICENSE)로 배포됩니다.
 
 ---
 
@@ -460,6 +493,8 @@ make run
   recommendation、normalization、exportの流れをリポジトリ内で確認できます。
 - [Release Notes](docs/RELEASING.md): GitHub Releases、DMG/ZIP、checksum、
   Gatekeeper警告の扱いをまとめています。
+- [Privacy](PRIVACY.md)、[Contributing](CONTRIBUTING.md)、
+  [Support](SUPPORT.md)、[Security](SECURITY.md)も参照してください。
 
 ### 基本的な使い方
 
@@ -480,3 +515,5 @@ make run
 開発支援は[GitHub Sponsors](https://github.com/sponsors/Ssojux2)または
 [Buy Me a Coffee](https://buymeacoffee.com/ssojux2)から可能です。支援は今後の
 音楽関連アプリ開発に使われます。
+
+Soriaのソースコードは[MIT License](LICENSE)で公開されています。
