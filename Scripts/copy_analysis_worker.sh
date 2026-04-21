@@ -15,6 +15,11 @@ RSYNC_EXCLUDES="
   --exclude=.venv
   --exclude=.pytest_cache
   --exclude=__pycache__
+  --exclude=.env
+  --exclude=.env.*
+  --exclude=*.key
+  --exclude=*.pem
+  --exclude=*.p8
   --exclude=tests
 "
 
