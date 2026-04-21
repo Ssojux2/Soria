@@ -1,5 +1,5 @@
 numpy==1.26.4
-librosa==0.10.2.post1
+librosa==0.11.0
 soundfile==0.12.1
 requests==2.33.0
 chromadb==0.5.11
