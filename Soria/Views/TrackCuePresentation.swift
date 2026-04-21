@@ -229,15 +229,18 @@ enum TrackCuePresentation {
     }
 
     nonisolated private static func cueKey(for cuePoint: ExternalDJCuePoint) -> String {
-        [
+        let startMilliseconds = Int((cuePoint.startSec * 1000.0).rounded())
+        let endMilliseconds = cuePoint.endSec.map { Int(($0 * 1000.0).rounded()) }
+        let components: [String] = [
             cuePoint.kind.rawValue,
-            String(Int((cuePoint.startSec * 1000.0).rounded())),
-            cuePoint.endSec.map { String(Int(($0 * 1000.0).rounded())) } ?? "",
+            String(startMilliseconds),
+            endMilliseconds.map(String.init) ?? "",
             cuePoint.index.map(String.init) ?? "",
             normalizedText(cuePoint.name) ?? "",
             normalizedText(cuePoint.color) ?? "",
             normalizedText(cuePoint.source) ?? ""
-        ].joined(separator: "|")
+        ]
+        return components.joined(separator: "|")
     }
 
     nonisolated private static func canMergeWaveformCueGroup(

@@ -346,15 +346,18 @@ struct ExternalCuePointParser: Sendable {
             return payload
         }
         if let payload = try? JSONDecoder().decode([String: [ParsedCuePoint]].self, from: data) {
-            return payload["cues"]
-                ?? payload["cuePoints"]
-                ?? payload["hotcues"]
-                ?? payload["hot_cues"]
-                ?? payload["points"]
-                ?? payload["cue_data"]
-                ?? payload["hotcue_data"]
-                ?? payload["cue_points"]
-                ?? payload["cue_points_json"]
+            let keys = [
+                "cues",
+                "cuePoints",
+                "hotcues",
+                "hot_cues",
+                "points",
+                "cue_data",
+                "hotcue_data",
+                "cue_points",
+                "cue_points_json"
+            ]
+            return firstParsedCuePoints(in: payload, keys: keys)
         }
         return nil
     }
@@ -364,13 +367,40 @@ struct ExternalCuePointParser: Sendable {
             return points
         }
         if let dict = object as? [String: Any] {
-            return (dict["cues"] as? [[String: Any]])
-                ?? (dict["cuePoints"] as? [[String: Any]])
-                ?? (dict["hotcues"] as? [[String: Any]])
-                ?? (dict["hot_cues"] as? [[String: Any]])
-                ?? (dict["points"] as? [[String: Any]])
-                ?? (dict["data"] as? [[String: Any]])
-                ?? (dict["markers"] as? [[String: Any]])
+            let keys = [
+                "cues",
+                "cuePoints",
+                "hotcues",
+                "hot_cues",
+                "points",
+                "data",
+                "markers"
+            ]
+            return firstCuePointDictionaryArray(in: dict, keys: keys)
+        }
+        return nil
+    }
+
+    nonisolated private func firstParsedCuePoints(
+        in payload: [String: [ParsedCuePoint]],
+        keys: [String]
+    ) -> [ParsedCuePoint]? {
+        for key in keys {
+            if let points = payload[key] {
+                return points
+            }
+        }
+        return nil
+    }
+
+    nonisolated private func firstCuePointDictionaryArray(
+        in dict: [String: Any],
+        keys: [String]
+    ) -> [[String: Any]]? {
+        for key in keys {
+            if let points = dict[key] as? [[String: Any]] {
+                return points
+            }
         }
         return nil
     }
