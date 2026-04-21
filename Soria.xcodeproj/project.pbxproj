@@ -235,7 +235,6 @@
 /* Begin PBXShellScriptBuildPhase section */
 		84B5A1D331B91B4200A8EB7B /* Bundle Analysis Worker */ = {
 			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);

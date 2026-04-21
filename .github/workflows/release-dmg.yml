@@ -1,4 +1,4 @@
-name: Release DMG
+name: Release macOS assets
 
 on:
   push:
@@ -15,8 +15,8 @@ permissions:
   contents: write
 
 jobs:
-  build-release-dmg:
-    name: Build ad-hoc signed macOS DMG
+  build-release-assets:
+    name: Build ad-hoc signed macOS assets
     runs-on: macos-latest
 
     steps:
@@ -26,7 +26,7 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
-      - name: Build DMG
+      - name: Build DMG and ZIP
         env:
           TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
@@ -53,9 +53,9 @@ jobs:
               --notes-file dist/release-notes.md
           fi
 
-      - name: Upload DMG artifacts
+      - name: Upload macOS artifacts
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
-          gh release upload "${TAG_NAME}" dist/*.dmg dist/*.dmg.sha256 --clobber
+          gh release upload "${TAG_NAME}" dist/*.dmg dist/*.dmg.sha256 dist/*.zip dist/*.zip.sha256 --clobber

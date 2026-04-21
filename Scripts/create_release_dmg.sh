@@ -17,8 +17,8 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [--clean] [--skip-build] [--version VERSION]
 
-Builds a Release app bundle, ad-hoc signs it, and packages it as a DMG for
-early GitHub Releases distribution.
+Builds a Release app bundle, ad-hoc signs it, and packages it as DMG and ZIP
+artifacts for early GitHub Releases distribution.
 
 Environment overrides:
   VERSION                Release version. Defaults to Xcode MARKETING_VERSION.
@@ -93,12 +93,18 @@ STAGING_DIR=""
 STAGING_APP=""
 DMG_PATH="${DIST_DIR}/${APP_NAME}-${SAFE_VERSION}-macOS-unnotarized.dmg"
 CHECKSUM_PATH="${DMG_PATH}.sha256"
+ZIP_PATH="${DIST_DIR}/${APP_NAME}-${SAFE_VERSION}-macOS-unnotarized.zip"
+ZIP_CHECKSUM_PATH="${ZIP_PATH}.sha256"
 MOUNT_DIR=""
+ZIP_VERIFY_DIR=""
 
 cleanup() {
   if [ -n "${MOUNT_DIR}" ] && [ -d "${MOUNT_DIR}" ]; then
     hdiutil detach "${MOUNT_DIR}" -quiet >/dev/null 2>&1 || true
     rm -rf "${MOUNT_DIR}"
+  fi
+  if [ -n "${ZIP_VERIFY_DIR}" ] && [ -d "${ZIP_VERIFY_DIR}" ]; then
+    rm -rf "${ZIP_VERIFY_DIR}"
   fi
   if [ -n "${STAGING_DIR}" ] && [ -d "${STAGING_DIR}" ]; then
     rm -rf "${STAGING_DIR}"
@@ -155,7 +161,9 @@ xattr -cr "${STAGING_APP}"
 codesign --force --deep --sign - "${STAGING_APP}"
 codesign --verify --deep --strict --verbose=2 "${STAGING_APP}"
 
-rm -f "${DMG_PATH}" "${CHECKSUM_PATH}"
+rm -f "${DMG_PATH}" "${CHECKSUM_PATH}" "${ZIP_PATH}" "${ZIP_CHECKSUM_PATH}"
+ditto -c -k --sequesterRsrc --keepParent "${STAGING_APP}" "${ZIP_PATH}"
+
 hdiutil create \
   -volname "${VOLUME_NAME}" \
   -srcfolder "${STAGING_DIR}" \
@@ -166,7 +174,17 @@ hdiutil create \
 (
   cd "${DIST_DIR}"
   shasum -a 256 "$(basename "${DMG_PATH}")" > "$(basename "${CHECKSUM_PATH}")"
+  shasum -a 256 "$(basename "${ZIP_PATH}")" > "$(basename "${ZIP_CHECKSUM_PATH}")"
 )
+
+ZIP_VERIFY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/soria-zip.XXXXXX")"
+ditto -x -k "${ZIP_PATH}" "${ZIP_VERIFY_DIR}"
+if [ ! -d "${ZIP_VERIFY_DIR}/${APP_NAME}.app" ]; then
+  printf 'ZIP verification failed: app bundle not found in archive.\n' >&2
+  exit 1
+fi
+rm -rf "${ZIP_VERIFY_DIR}"
+ZIP_VERIFY_DIR=""
 
 MOUNT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/soria-dmg.XXXXXX")"
 hdiutil attach "${DMG_PATH}" -mountpoint "${MOUNT_DIR}" -nobrowse -readonly -quiet
@@ -183,4 +201,6 @@ STAGING_DIR=""
 printf '\nCreated release artifacts:\n'
 printf '  %s\n' "${DMG_PATH}"
 printf '  %s\n' "${CHECKSUM_PATH}"
-printf '\nNote: this DMG is not Developer ID signed or notarized; Gatekeeper warnings are expected.\n'
+printf '  %s\n' "${ZIP_PATH}"
+printf '  %s\n' "${ZIP_CHECKSUM_PATH}"
+printf '\nNote: these artifacts are not Developer ID signed or notarized; Gatekeeper warnings are expected.\n'

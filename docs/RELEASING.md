@@ -1,11 +1,11 @@
 # Releasing Soria
 
 This is the initial zero-cost distribution path for public open-source builds:
-GitHub source, GitHub Releases, and an ad-hoc signed DMG.
+GitHub source, GitHub Releases, and ad-hoc signed macOS DMG/ZIP assets.
 
 ## Distribution Status
 
-The DMG produced by this repo is:
+The macOS app produced by this repo is:
 
 - Built from the `Soria` Xcode scheme.
 - Ad-hoc signed with `codesign --sign -`.
@@ -16,9 +16,9 @@ That means macOS Gatekeeper warnings are expected. This avoids Apple Developer
 Program cost for the early phase, but it is less friendly for non-technical
 users than a Developer ID signed and notarized release.
 
-## Local DMG Build
+## Local Release Build
 
-Build the app and create a release DMG:
+Build the app and create release DMG/ZIP assets:
 
 ```bash
 make release-dmg
@@ -41,6 +41,8 @@ Artifacts are written to `dist/`:
 ```text
 dist/Soria-0.1.0-macOS-unnotarized.dmg
 dist/Soria-0.1.0-macOS-unnotarized.dmg.sha256
+dist/Soria-0.1.0-macOS-unnotarized.zip
+dist/Soria-0.1.0-macOS-unnotarized.zip.sha256
 ```
 
 ## GitHub Releases
@@ -52,8 +54,8 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The workflow creates or updates a draft GitHub Release and uploads the DMG plus
-SHA-256 checksum. Review the draft notes on GitHub before publishing.
+The workflow creates or updates a draft GitHub Release and uploads the DMG/ZIP
+files plus SHA-256 checksums. Review the draft notes on GitHub before publishing.
 
 ## Release Notes Template
 
@@ -70,8 +72,8 @@ Open Anyway, or build the app from source with Xcode.
 
 - Choose and add an open-source license before making the repository public.
 - Confirm `.env`, API keys, sample music paths, and local caches are not tracked.
-- Run `make release-dmg` and verify the DMG mounts.
-- Upload both the DMG and `.sha256` checksum.
+- Run `make release-dmg` and verify the DMG mounts and ZIP extracts.
+- Upload the DMG, ZIP, and matching `.sha256` checksums.
 - Keep the release marked as draft until the README and install warning are clear.
 
 ## Later Upgrade Path
