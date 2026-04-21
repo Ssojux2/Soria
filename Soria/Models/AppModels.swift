@@ -924,7 +924,6 @@ struct RecommendationInputState: Equatable {
 
 enum EmbeddingBackendKind: String, Codable, Hashable {
     case googleAI = "google_ai"
-    case clap = "clap"
 }
 
 struct EmbeddingPipeline: Codable, Hashable, Identifiable {
@@ -949,6 +948,7 @@ struct EmbeddingPipeline: Codable, Hashable, Identifiable {
 struct EmbeddingProfile: Codable, Hashable, Identifiable {
     static let legacyGoogleTextEmbedding004ID = "google/text-embedding-004"
     static let legacyGeminiEmbedding001ID = "google/gemini-embedding-001"
+    static let retiredCLAPHTSATUnfusedID = "local/clap-htsat-unfused"
     static let googleGeminiEmbedding2PreviewID = "google/gemini-embedding-2-preview"
 
     let id: String
@@ -965,17 +965,8 @@ struct EmbeddingProfile: Codable, Hashable, Identifiable {
         requiresAPIKey: true
     )
 
-    static let clapHTSATUnfused = EmbeddingProfile(
-        id: "local/clap-htsat-unfused",
-        displayName: "CLAP HTSAT Unfused",
-        modelName: "laion/clap-htsat-unfused",
-        backendKind: .clap,
-        requiresAPIKey: false
-    )
-
     static let all: [EmbeddingProfile] = [
-        .googleGeminiEmbedding2Preview,
-        .clapHTSATUnfused
+        .googleGeminiEmbedding2Preview
     ]
 
     var pipelineID: String {
@@ -984,7 +975,10 @@ struct EmbeddingProfile: Codable, Hashable, Identifiable {
 
     static func resolve(id: String?) -> EmbeddingProfile {
         guard let id else { return .googleGeminiEmbedding2Preview }
-        if id == legacyGoogleTextEmbedding004ID || id == legacyGeminiEmbedding001ID {
+        if id == legacyGoogleTextEmbedding004ID ||
+            id == legacyGeminiEmbedding001ID ||
+            id == retiredCLAPHTSATUnfusedID
+        {
             return .googleGeminiEmbedding2Preview
         }
         return all.first(where: { $0.id == id }) ?? .googleGeminiEmbedding2Preview

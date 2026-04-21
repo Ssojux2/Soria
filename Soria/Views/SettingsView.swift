@@ -11,18 +11,13 @@ struct SettingsView: View {
 
                 GroupBox("Analysis Worker") {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Embedding Profile")
+                        Text("Embedding Model")
                             .font(.headline)
-                        Picker("Embedding Profile", selection: $viewModel.embeddingProfile) {
-                            ForEach(EmbeddingProfile.all, id: \.id) { profile in
-                                Text(profile.displayName)
-                                    .tag(profile)
-                                    .disabled(!(viewModel.workerProfileStatuses[profile.id]?.supported ?? true))
-                            }
-                        }
-                        .pickerStyle(.menu)
 
-                        Text("Active model: \(viewModel.embeddingProfile.modelName)")
+                        Text(viewModel.embeddingProfile.displayName)
+                            .font(.subheadline)
+
+                        Text("Model ID: \(viewModel.embeddingProfile.modelName)")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
 
@@ -39,11 +34,9 @@ struct SettingsView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
 
-                        if viewModel.embeddingProfile == .googleGeminiEmbedding2Preview {
-                            Text("This is the default Google audio embedding path for direct segment-to-vector preparation.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
+                        Text("Google AI is the supported audio embedding path for direct segment-to-vector preparation.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
 
                         if let dependencyMessage = viewModel.selectedEmbeddingProfileDependencyMessage {
                             Text(dependencyMessage)
@@ -61,13 +54,6 @@ struct SettingsView: View {
                             .font(.headline)
                         SecureField("Paste your Google AI API key", text: $viewModel.googleAIAPIKey)
                             .textFieldStyle(.roundedBorder)
-                            .disabled(!viewModel.embeddingProfile.requiresAPIKey)
-
-                        if !viewModel.embeddingProfile.requiresAPIKey {
-                            Text("This profile does not require a Google AI API key, but it still needs explicit validation.")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        }
 
                         Text("Python Executable")
                             .font(.headline)
@@ -88,7 +74,7 @@ struct SettingsView: View {
                         HStack {
                             Button("Use Detected Defaults") { viewModel.useDetectedAnalysisDefaults() }
                             Button("Save") { viewModel.saveAnalysisSettings() }
-                            Button(viewModel.embeddingProfile.requiresAPIKey ? "Validate API Key" : "Validate Profile") {
+                            Button("Validate API Key") {
                                 viewModel.validateEmbeddingProfile()
                             }
                             .disabled(viewModel.validationStatus == .validating || !viewModel.isSelectedEmbeddingProfileSupported)

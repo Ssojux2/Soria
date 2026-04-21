@@ -591,13 +591,6 @@ struct AnalysisProgressTests {
         #expect(
             AnalysisConcurrencyProfile.balancedAuto.resolvedMaxConcurrentJobs(
                 processorCount: 10,
-                backendKind: .clap,
-                environment: [:]
-            ) == 1
-        )
-        #expect(
-            AnalysisConcurrencyProfile.balancedAuto.resolvedMaxConcurrentJobs(
-                processorCount: 10,
                 backendKind: .googleAI,
                 environment: ["SORIA_ANALYSIS_MAX_CONCURRENCY": "5"]
             ) == 5

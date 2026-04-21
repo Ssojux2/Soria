@@ -39,23 +39,14 @@ enum AnalysisConcurrencyProfile: String, Codable, CaseIterable, Identifiable, Se
         }
 
         let normalizedProcessorCount = max(processorCount, 1)
+        _ = backendKind
         switch self {
         case .conservative:
             return 1
         case .balancedAuto:
-            switch backendKind {
-            case .googleAI:
-                return min(max(2, normalizedProcessorCount / 3), 4)
-            case .clap:
-                return 1
-            }
+            return min(max(2, normalizedProcessorCount / 3), 4)
         case .maxThroughput:
-            switch backendKind {
-            case .googleAI:
-                return min(max(2, normalizedProcessorCount / 2), 6)
-            case .clap:
-                return min(max(1, normalizedProcessorCount / 4), 2)
-            }
+            return min(max(2, normalizedProcessorCount / 2), 6)
         }
     }
 }
