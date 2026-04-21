@@ -402,14 +402,14 @@ def test_hybrid_query_embeddings_blend_text_and_reference_evenly(monkeypatch: py
     assert embeddings["outro"] == pytest.approx(expected)
 
 
-def test_profile_namespace_separates_collections(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_profile_namespace_separates_current_and_retired_collections(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _install_fake_chroma(monkeypatch)
 
     google_store = chroma_store.ChromaVectorStore(
         persist_dir=str(tmp_path / "vectordb"),
         profile_id="google/gemini-embedding-2-preview",
     )
-    clap_store = chroma_store.ChromaVectorStore(
+    retired_store = chroma_store.ChromaVectorStore(
         persist_dir=str(tmp_path / "vectordb"),
         profile_id="local/clap-htsat-unfused",
     )
@@ -424,13 +424,13 @@ def test_profile_namespace_separates_collections(monkeypatch: pytest.MonkeyPatch
             {"intro": [1.0, 0.0], "middle": [1.0, 0.0], "outro": [1.0, 0.0]},
         ),
     )
-    clap_store.upsert_track_embeddings(
+    retired_store.upsert_track_embeddings(
         track_id="shared-track",
         scan_version="c1",
-        track_metadata=_make_track_metadata("app-clap", "/tracks/shared.mp3"),
+        track_metadata=_make_track_metadata("app-retired", "/tracks/shared.mp3"),
         track_embedding=[0.0, 1.0],
         segments=_make_segments(
-            "shared-track-clap",
+            "shared-track-retired",
             {"intro": [0.0, 1.0], "middle": [0.0, 1.0], "outro": [0.0, 1.0]},
         ),
     )
@@ -439,13 +439,13 @@ def test_profile_namespace_separates_collections(monkeypatch: pytest.MonkeyPatch
         query_embeddings={"tracks": [1.0, 0.0]},
         weights={"tracks": 1.0},
     )
-    clap_results = clap_store.search(
+    retired_results = retired_store.search(
         query_embeddings={"tracks": [1.0, 0.0]},
         weights={"tracks": 1.0},
     )
 
     assert google_results[0]["trackID"] == "app-google"
-    assert google_results[0]["trackScore"] > clap_results[0]["trackScore"]
+    assert google_results[0]["trackScore"] > retired_results[0]["trackScore"]
     assert set(FakePersistentClient.stores[str(tmp_path / "vectordb")].keys()) == {
         "tracks__google_gemini-embedding-2-preview",
         "intro__google_gemini-embedding-2-preview",

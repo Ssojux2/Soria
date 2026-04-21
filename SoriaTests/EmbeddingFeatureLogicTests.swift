@@ -38,9 +38,9 @@ extension SoriaTests {
         #expect(
             AppSettingsStore.computeValidationStatus(
                 apiKey: "same-key",
-                profile: .clapHTSATUnfused,
+                profile: .googleGeminiEmbedding2Preview,
                 storedKeyHash: storedHash,
-                storedProfileID: EmbeddingProfile.googleGeminiEmbedding2Preview.id,
+                storedProfileID: EmbeddingProfile.retiredCLAPHTSATUnfusedID,
                 storedAt: validatedAt
             ) == .unvalidated
         )
@@ -54,6 +54,10 @@ extension SoriaTests {
         )
         #expect(
             EmbeddingProfile.resolve(id: EmbeddingProfile.legacyGeminiEmbedding001ID)
+                == .googleGeminiEmbedding2Preview
+        )
+        #expect(
+            EmbeddingProfile.resolve(id: EmbeddingProfile.retiredCLAPHTSATUnfusedID)
                 == .googleGeminiEmbedding2Preview
         )
     }
@@ -70,7 +74,7 @@ extension SoriaTests {
         )
         let staleTrack = makeTrack(
             analyzedAt: Date(timeIntervalSince1970: 10),
-            embeddingProfileID: EmbeddingProfile.clapHTSATUnfused.id,
+            embeddingProfileID: EmbeddingProfile.retiredCLAPHTSATUnfusedID,
             embeddingUpdatedAt: Date(timeIntervalSince1970: 20)
         )
         let neverAnalyzedTrack = makeTrack(analyzedAt: nil, embeddingProfileID: nil, embeddingUpdatedAt: nil)
@@ -329,7 +333,7 @@ extension SoriaTests {
         let needsRefresh = makeTrack(
             title: "Needs Refresh",
             analyzedAt: Date(),
-            embeddingProfileID: EmbeddingProfile.clapHTSATUnfused.id,
+            embeddingProfileID: EmbeddingProfile.retiredCLAPHTSATUnfusedID,
             embeddingUpdatedAt: Date()
         )
         let needsAnalysis = makeTrack(

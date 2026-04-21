@@ -166,7 +166,8 @@ enum AppSettingsStore {
     static func loadEmbeddingProfile() -> EmbeddingProfile {
         let storedID = UserDefaults.standard.string(forKey: embeddingProfileIDKey)
         if storedID == EmbeddingProfile.legacyGoogleTextEmbedding004ID ||
-            storedID == EmbeddingProfile.legacyGeminiEmbedding001ID
+            storedID == EmbeddingProfile.legacyGeminiEmbedding001ID ||
+            storedID == EmbeddingProfile.retiredCLAPHTSATUnfusedID
         {
             UserDefaults.standard.set(EmbeddingProfile.googleGeminiEmbedding2Preview.id, forKey: embeddingProfileIDKey)
             clearValidationMetadata()

@@ -23,18 +23,16 @@ EMBEDDING_PROFILES: dict[str, dict[str, Any]] = {
         "backend": "google_ai",
         "model": "gemini-embedding-2-preview",
         "requires_api_key": True,
-    },
-    "local/clap-htsat-unfused": {
-        "backend": "clap",
-        "model": "laion/clap-htsat-unfused",
-        "requires_api_key": False,
-    },
+    }
 }
+RETIRED_VECTOR_PROFILE_IDS = (
+    "local/clap-htsat-unfused",
+)
 LEGACY_VECTOR_PROFILE_IDS = (
     "google/text-embedding-004",
     "google/gemini-embedding-001",
 )
-ALL_VECTOR_PROFILE_IDS = tuple(EMBEDDING_PROFILES.keys()) + LEGACY_VECTOR_PROFILE_IDS
+ALL_VECTOR_PROFILE_IDS = tuple(EMBEDDING_PROFILES.keys()) + RETIRED_VECTOR_PROFILE_IDS + LEGACY_VECTOR_PROFILE_IDS
 
 
 def main() -> int:
@@ -723,11 +721,6 @@ def _profile_statuses(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         dependency_errors: list[str] = []
         if not _module_available("chromadb"):
             dependency_errors.append("Missing dependency: chromadb")
-        if profile["backend"] == "clap":
-            if not _module_available("torch"):
-                dependency_errors.append("Missing dependency: torch")
-            if not _module_available("transformers"):
-                dependency_errors.append("Missing dependency: transformers")
 
         status_by_id[profile_id] = {
             "supported": not dependency_errors,
@@ -798,15 +791,6 @@ def _build_embedding_client(
         from embedding.gemini_client import GeminiEmbeddingClient
 
         return GeminiEmbeddingClient(
-            api_key=api_key,
-            cache_dir=cache_dir,
-            model=profile["model"],
-            progress_callback=progress_callback,
-        )
-    if profile["backend"] == "clap":
-        from embedding.clap_client import CLAPEmbeddingClient
-
-        return CLAPEmbeddingClient(
             api_key=api_key,
             cache_dir=cache_dir,
             model=profile["model"],
