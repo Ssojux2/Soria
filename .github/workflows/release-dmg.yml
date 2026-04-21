@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Show Xcode version
         run: xcodebuild -version
@@ -32,7 +32,7 @@ jobs:
         run: |
           VERSION="${TAG_NAME#v}" make release-dmg
 
-      - name: Create draft GitHub Release
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -44,11 +44,11 @@ jobs:
           EOF
 
           if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
-            gh release edit "${TAG_NAME}" --draft=true --notes-file dist/release-notes.md
+            gh release edit "${TAG_NAME}" --draft=false --latest --notes-file dist/release-notes.md
           else
             gh release create "${TAG_NAME}" \
-              --draft \
               --target "${GITHUB_SHA}" \
+              --latest \
               --title "Soria ${TAG_NAME}" \
               --notes-file dist/release-notes.md
           fi
