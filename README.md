@@ -306,46 +306,106 @@ issue or one clear root cause.
 
 ## 한국어
 
-Soria는 DJ를 위한 로컬 우선 macOS 믹스 어시스턴트입니다. 사용자가 선택한 음악
-폴더를 스캔하고, 트랙의 intro/middle/outro 구간을 분석하며, 로컬 메타데이터와
-분석 결과를 바탕으로 다음에 믹스하기 좋은 트랙을 추천합니다. 전체 음악 파일과
-라이브러리 DB는 업로드하지 않고 Mac 안에 저장합니다. 임베딩 기반 추천에는 짧은
-오디오 세그먼트 payload와 query text가 Gemini로 전송될 수 있습니다.
+Soria는 로컬 우선 macOS DJ 믹스 어시스턴트입니다. 사용자가 선택한 폴더를
+스캔하고, 음악 라이브러리를 로컬에서 색인하며, 트랙 구조를 분석하고, 다음에
+믹스하기 좋은 호환 트랙을 추천하며, DJ 라이브러리 친화적인 플레이리스트를
+내보냅니다. 전체 음악 파일이나 라이브러리 데이터베이스는 업로드하지 않습니다.
 
 ### 주요 기능
 
-- 선택한 폴더 기반 로컬 음악 라이브러리 생성
-- 트랙 구간, 파형 미리보기, BPM/key/에너지 관련 분석
-- Rekordbox XML 및 Serato CSV 메타데이터 가져오기
-- Gemini Embeddings 기반 오디오 세그먼트 및 query text 임베딩
-- SQLite와 로컬 Chroma 저장소 사용
-- 전환 후보 추천 및 점수 근거 확인
-- Rekordbox XML, Serato-safe 패키지 내보내기
+- 사용자가 선택한 음악 폴더에서 로컬 트랙 라이브러리를 만듭니다.
+- 믹스 계획을 위해 intro, middle, outro 구간을 추출합니다.
+- 로컬 오디오 메타데이터와 선택적인 DJ 라이브러리 메타데이터를 읽습니다.
+- 분석된 트랙 구간, query text, 메타데이터 context에서 임베딩을 생성합니다.
+- 라이브러리는 SQLite에, 벡터는 로컬 Chroma persistence에 저장합니다.
+- 투명한 점수 breakdown과 함께 전환 후보를 추천합니다.
+- Rekordbox XML과 비파괴적인 Serato-safe 패키지를 내보냅니다.
 
-### 설치
+Soria는 음악 컬렉션을 원격 서비스에 맡기지 않고 추천 지원을 받고 싶은 DJ를
+위해 설계되었습니다. 오디오 분석은 Mac 안에서 이루어집니다. 임베딩 요청은
+짧은 파생 오디오 세그먼트 payload와 query text를 Gemini로 보낼 수 있지만,
+원본 전체 파일과 로컬 라이브러리 데이터베이스는 Mac에 남습니다.
 
-1. [Releases](https://github.com/Ssojux2/Soria/releases)에서 최신
-   `Soria-<version>-macOS-unnotarized.dmg` 또는
-   `Soria-<version>-macOS-unnotarized.zip`을 받습니다.
-2. DMG는 파일을 열고 `Soria.app`을 `Applications`로 옮깁니다.
-3. ZIP은 압축을 풀어 나온 `Soria.app`을 `Applications`로 옮깁니다.
-4. GitHub의 **Source code (zip)** 파일은 설치용 앱이 아니라 소스 코드입니다.
-5. 초기 빌드는 Developer ID 서명 및 Apple notarization이 되어 있지 않으므로
-   macOS 경고가 뜰 수 있습니다.
-6. 신뢰할 수 있는 소스라고 판단하면 **시스템 설정 > 개인정보 보호 및 보안 >
-   Open Anyway**로 실행하거나, Xcode로 직접 빌드합니다.
+### 현재 릴리스 상태
+
+Soria는 초기 오픈소스 배포 단계입니다.
+
+- 소스 코드는 GitHub에 공개되어 있습니다.
+- 초기 빌드는 GitHub Releases를 통해 DMG와 ZIP 파일로 배포됩니다.
+- 릴리스 앱 산출물은 ad-hoc 서명되어 있지만 Developer ID 서명이나 notarization은
+  되어 있지 않습니다.
+- 이 초기 빌드에서는 macOS Gatekeeper 경고가 예상됩니다.
+
+소스를 신뢰한다면 **시스템 설정 > 개인정보 보호 및 보안 > Open Anyway**로 앱을
+열거나, Xcode로 직접 빌드할 수 있습니다.
+
+### 개발 후원
+
+Soria는 [GitHub Sponsors](https://github.com/sponsors/Ssojux2)와
+[Buy Me a Coffee](https://buymeacoffee.com/ssojux2)를 통해 후원할 수 있습니다.
+후원은 향후 음악 관련 앱 개발에 사용됩니다.
+
+### 라이선스
+
+Soria는 [MIT License](LICENSE)로 배포됩니다. 기여자가 명시적으로 다른 조건을
+밝히지 않는 한, 기여 역시 같은 라이선스로 받습니다.
+
+### 문서
+
+- [Program Workflows](docs/WORKFLOWS.md)는 앱이 setup, scanning, analysis,
+  recommendation, normalization, export를 어떻게 거치는지 설명합니다.
+- [Release Notes](docs/RELEASING.md)는 현재 GitHub Releases, DMG, ZIP,
+  checksum, Gatekeeper 경고 workflow를 설명합니다.
+- [Privacy](PRIVACY.md)는 로컬 저장소, Keychain 사용, Gemini embedding 요청,
+  안전한 이슈 보고 방식을 설명합니다.
+- [Contributing](CONTRIBUTING.md), [Support](SUPPORT.md),
+  [Security](SECURITY.md)는 안전하게 참여하는 방법을 설명합니다.
+- [Third-Party Notices](THIRD_PARTY_NOTICES.md)는 현재 소스와 릴리스 방식에서
+  직접 의존성의 라이선스 메타데이터를 요약합니다.
+
+### GitHub Releases에서 직접 설치
+
+1. [Releases](https://github.com/Ssojux2/Soria/releases) 페이지를 엽니다.
+2. 다음 릴리스 asset 중 하나를 다운로드합니다.
+   - drag-and-drop 설치용 `Soria-<version>-macOS-unnotarized.dmg`
+   - 직접 앱 archive용 `Soria-<version>-macOS-unnotarized.zip`
+3. 필요하면 matching `.sha256` 파일로 다운로드한 파일을 검증합니다.
+
+   ```bash
+   shasum -a 256 Soria-0.1.0-macOS-unnotarized.dmg
+   cat Soria-0.1.0-macOS-unnotarized.dmg.sha256
+
+   shasum -a 256 Soria-0.1.0-macOS-unnotarized.zip
+   cat Soria-0.1.0-macOS-unnotarized.zip.sha256
+   ```
+
+4. DMG는 파일을 열고 `Soria.app`을 `Applications`로 드래그합니다.
+5. ZIP은 더블클릭해 `Soria.app`을 추출한 뒤 `Applications`로 옮깁니다.
+6. Soria를 실행합니다. macOS가 앱을 막으면 **시스템 설정 > 개인정보 보호 및
+   보안 > Open Anyway**를 사용합니다.
+
+GitHub는 모든 릴리스에 **Source code (zip)** 다운로드도 표시합니다. 이 파일은
+소스 코드일 뿐입니다. 직접 빌드하지 않고 Soria를 설치하려면 위의 앱 ZIP 또는
+DMG를 사용하세요.
 
 DMG 또는 앱 ZIP은 실행 자체를 위해 `SORIA_PYTHON`과 `SORIA_WORKER_SCRIPT`를
-직접 설정할 필요가 없습니다. 이 두 값은 개발자용 runtime override에 가깝습니다.
-다만 현재 초기 패키지는 portable Python venv를 앱 안에 포함하지 않으므로, 분석
-검증이 실패하면 Settings에서 호환되는 Python 환경을 지정하세요. 임베딩 기반 추천을
-쓰려면 Gemini API key도 필요합니다.
+직접 설정할 필요가 없습니다. 앱과 bundled analysis-worker source scripts가 함께
+포함되기 때문입니다. 현재 zero-cost package는 portable Python virtual environment를
+vendor하지 않습니다. 설치된 앱에서 worker validation이 실패하면 **Settings >
+Analysis Worker**에서 호환되는 Python 환경을 지정하거나, 소스에서 빌드하고 repo의
+`analysis-worker/.venv`를 사용하세요. `SORIA_PYTHON`과 `SORIA_WORKER_SCRIPT`는
+developer/runtime override입니다. 임베딩 기반 추천을 사용하려는 경우에만 Gemini API
+key를 설정하거나 붙여 넣으면 됩니다.
 
 ### 소스에서 빌드
 
-임베딩 기반 추천을 사용하려면
-[Google AI Studio API Keys](https://aistudio.google.com/app/apikey)에서
-Gemini API key를 발급받아 `GEMINI_API_KEY`로 설정해야 합니다.
+요구사항:
+
+- 최신 Xcode 버전이 설치된 macOS.
+- analysis worker용 Python 3.11 이상 권장.
+- 임베딩 기반 추천에는 Gemini API key가 필요합니다.
+  [Google AI Studio API Keys page](https://aistudio.google.com/app/apikey)에서
+  발급 및 관리한 뒤 `GEMINI_API_KEY`로 설정하세요.
 
 Gemini API 무료 티어 참고:
 
@@ -361,98 +421,284 @@ embedding API request라는 뜻이지, 1,000곡 처리를 보장한다는 뜻은
 캐시되지 않은 오디오 세그먼트마다 embedding request를 보낼 수 있고, text embedding은
 `SORIA_EMBED_BATCH_SIZE`로 batch 처리될 수 있습니다.
 
+Python worker 설정:
+
 ```bash
 cd analysis-worker
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cd ..
+```
+
+Xcode scheme 또는 shell에 환경 변수를 설정합니다.
+
+- `GEMINI_API_KEY`, Google AI Studio에서 발급한 값
+- `SORIA_PYTHON`, 예: `analysis-worker/.venv/bin/python`
+- `SORIA_WORKER_SCRIPT`, 예: `analysis-worker/main.py`
+- 선택: `SORIA_EMBED_BATCH_SIZE`
+- 선택: `SORIA_EMBED_TIMEOUT_SEC`
+
+Terminal에서 빌드:
+
+```bash
+make build
+```
+
+빌드 후 실행:
+
+```bash
 make run
 ```
 
-필요한 환경 변수:
+clean, build, launch:
 
-- `GEMINI_API_KEY`: Google AI Studio에서 발급한 Gemini API key
-- `SORIA_PYTHON`
-- `SORIA_WORKER_SCRIPT`
+```bash
+make run-clean
+```
 
-위 worker 환경변수는 소스 빌드에서 repo의 worker runtime을 명시하고 싶을 때
-사용합니다. DMG/ZIP에서 분석 runtime을 바꾸고 싶다면 Settings의 Analysis Worker
-경로를 사용하는 편이 더 자연스럽습니다.
+초기 릴리스 DMG와 ZIP asset 생성:
 
-### 문서
+```bash
+VERSION=0.1.0 make release-dmg
+```
 
-- [프로그램 워크플로우](docs/WORKFLOWS.md): setup, scan, analysis,
-  recommendation, normalization, export 흐름을 저장소 안에서 확인할 수 있습니다.
-- [릴리스 문서](docs/RELEASING.md): GitHub Releases, DMG/ZIP, checksum,
-  Gatekeeper 경고 처리 흐름을 정리합니다.
-- [Privacy](PRIVACY.md), [Contributing](CONTRIBUTING.md),
-  [Support](SUPPORT.md), [Security](SECURITY.md) 문서도 함께 확인해 주세요.
+생성된 릴리스 산출물은 `dist/`에 기록됩니다.
 
-### 기본 사용 방법
+```text
+dist/Soria-0.1.0-macOS-unnotarized.dmg
+dist/Soria-0.1.0-macOS-unnotarized.dmg.sha256
+dist/Soria-0.1.0-macOS-unnotarized.zip
+dist/Soria-0.1.0-macOS-unnotarized.zip.sha256
+```
 
-1. Settings 또는 Library에서 음악 루트 폴더를 추가합니다.
-2. Settings에서 Gemini API key와 분석 worker 설정을 검증합니다.
-3. Scan을 실행해 로컬 라이브러리를 만듭니다.
-4. 필요하면 Rekordbox XML 또는 Serato CSV 메타데이터를 가져옵니다.
-5. 트랙 분석을 실행합니다.
-6. seed track을 선택하고 추천 후보를 확인합니다.
-7. 필요하면 오디오 normalization을 실행합니다. Soria는 활성 라이브러리 파일을
+GitHub Releases workflow는 [docs/RELEASING.md](docs/RELEASING.md)를 참고하세요.
+
+### 전체 사용 가이드
+
+1. **설치 경로를 선택합니다.** 초기 수동 설치에는 release DMG/ZIP을 사용하고,
+   Python worker runtime을 완전히 제어하고 싶다면 소스에서 빌드합니다. 임베딩 기반
+   추천에는 Google AI Studio의 Gemini API key가 필요합니다. Soria Settings에
+   붙여 넣거나 `GEMINI_API_KEY`로 제공할 수 있습니다.
+
+2. **분석 설정을 검증합니다.** 릴리스 빌드에서는 Settings를 열어 active embedding
+   profile을 검증합니다. 소스 빌드에서는 `analysis-worker/requirements.txt`를
+   `analysis-worker/.venv`에 설치한 뒤, 필요하면 `SORIA_PYTHON`과
+   `SORIA_WORKER_SCRIPT`를 설정하거나 감지합니다.
+
+3. **음악 폴더를 추가합니다.** Soria를 열고 Settings 또는 Library에서 트랙이 들어
+   있는 하나 이상의 root folder를 추가합니다.
+
+4. **라이브러리를 스캔합니다.** scan을 시작해 지원되는 오디오 파일을 색인합니다.
+   Soria는 이후 scan에서 변경되지 않은 파일을 건너뛰기 위해 modification time과
+   content hash를 사용합니다.
+
+5. **사용 가능한 DJ 메타데이터를 가져옵니다.** DJ software에서 cue point, BPM,
+   key, crate, playlist를 이미 관리하고 있다면 Rekordbox XML 또는 Serato CSV
+   metadata를 가져옵니다.
+
+6. **트랙을 분석합니다.** 트랙 하나를 분석하거나 pending track을 batch analyze합니다.
+   worker는 추천을 위해 audio feature, waveform preview, segment summary, descriptor를
+   추출합니다.
+
+7. **트랙 세부 정보를 검토합니다.** track detail view에서 metadata, waveform-derived
+   preview, analysis confidence, cue information, segment structure를 확인합니다.
+
+8. **추천을 생성합니다.** seed track을 선택하고 Soria에 호환되는 다음 트랙 후보를
+   요청합니다. 점수는 segment similarity, tempo/key context, energy shape,
+   사용 가능한 DJ metadata를 결합합니다.
+
+9. **필요하면 오디오를 normalize합니다.** 제안된 normalization은 활성 라이브러리 파일을
    정규화된 파일로 교체하고, 원본 파일은 원래 파일명 그대로 macOS 휴지통으로
    보냅니다. 그래서 Finder의 **Put Back**으로 더 자연스럽게 복구할 수 있습니다.
    휴지통 이동을 사용할 수 없는 경우에는 트랙 옆에 timestamp backup을 남기고
    경고를 표시합니다.
-8. 후보를 바탕으로 플레이리스트 경로를 다듬습니다.
-9. Rekordbox XML 또는 Serato-safe 패키지로 내보냅니다.
 
-개발을 후원하려면 [GitHub Sponsors](https://github.com/sponsors/Ssojux2) 또는
-[Buy Me a Coffee](https://buymeacoffee.com/ssojux2)를 이용해 주세요. 후원은
-향후 음악 관련 앱 개발에 사용됩니다.
+10. **플레이리스트 경로를 만듭니다.** 추천을 사용해 라이브러리 안의 candidate path를
+    조립하고, export 전에 순서를 직접 다듬습니다.
 
-Soria 소스코드는 [MIT License](LICENSE)로 배포됩니다.
+11. **DJ software용으로 내보냅니다.** Rekordbox XML 또는 Serato-safe package를
+    내보냅니다. Serato export는 의도적으로 비파괴적이며 local crate file을 직접
+    rewrite하지 않습니다.
+
+12. **필요하면 로그를 확인합니다.** 분석이 실패하면 Soria log와 worker stderr를
+    확인합니다. 대부분의 실패는 누락된 Python package, 누락된 API key, 또는 local
+    decoder가 읽을 수 없는 오디오 파일 때문입니다.
+
+### 아키텍처
+
+```text
+Soria/
+├── Soria/                 SwiftUI macOS 앱
+│   ├── Models/            Track, segment, recommendation, metadata 모델
+│   ├── Services/          SQLite, scanner, worker IPC, export, logging
+│   ├── ViewModels/        App workflow와 background state
+│   └── Views/             Library, recommendations, exports, settings
+├── analysis-worker/       Python audio analysis 및 vector worker
+│   ├── audio/             Feature extraction 및 segmentation
+│   ├── embedding/         Gemini embedding client
+│   ├── vectordb/          Local Chroma vector persistence
+│   ├── dj_metadata/       External metadata adapter
+│   └── exporters/         Shared export helper
+├── SoriaTests/            macOS unit tests
+├── SoriaUITests/          macOS UI tests
+├── Scripts/               Local build, run, DMG scripts
+└── docs/                  Workflow, release, distribution notes
+```
+
+### 검증
+
+유용한 확인 명령:
+
+```bash
+make build
+make test-worker
+make test-swift
+VERSION=0.1.0 make release-dmg
+```
+
+Python 테스트는 active interpreter에 worker dependency가 설치되어 있어야 합니다.
+`make test-swift`는 CI Swift unit-test set을 실행합니다. playback preview,
+waveform seeking, timing behavior를 바꿀 때는 `make test-swift-full`을 사용하세요.
+macOS UI/unit test는 일부 sandboxed environment에서 사용할 수 없는 local system
+service가 필요할 수 있습니다.
+
+### 알려진 제한사항
+
+- 초기 DMG는 notarized 상태가 아니므로 Gatekeeper 경고가 예상됩니다.
+- 직접 만든 DMG/ZIP build는 현재 worker script만 포함하고 portable Python virtual
+  environment는 포함하지 않습니다.
+- 오디오 feature extraction은 local Python package에 의존합니다.
+- waveform preview는 파생 분석 데이터이며 sample-accurate editor가 아닙니다.
+- Rekordbox XML import/export는 일반적인 XML 구조를 대상으로 합니다. 특이한 vendor
+  version은 추가 adapter가 필요할 수 있습니다.
+- Serato export는 의도적으로 보수적이고 비파괴적입니다.
+- 추천 품질은 local metadata quality와 embedding availability에 따라 달라집니다.
+
+### 개인정보 보호 및 보안
+
+Soria는 library database, analysis summary, waveform preview, vector persistence를
+Mac에 저장합니다. Gemini embedding profile은 embedding 요청을 위해 짧은 파생 segment
+payload, descriptor text, query text, metadata context를 보낼 수 있지만, Soria는
+원본 전체 음악 파일이나 로컬 라이브러리 데이터베이스를 의도적으로 업로드하지 않습니다.
+
+이슈나 pull request를 열기 전에 API key, private music file, private DJ database,
+redaction되지 않은 home-directory path, private log를 제거하세요. 보안 문제는
+[SECURITY.md](SECURITY.md)의 절차에 따라 비공개로 보고해 주세요.
+
+### 기여
+
+이슈, Discussions, focused pull request를 환영합니다. metadata fixture, export
+compatibility, 대규모 라이브러리 성능, DJ workflow 문서는 좋은 첫 기여 영역입니다.
+
+pull request를 열기 전에 [CONTRIBUTING.md](CONTRIBUTING.md)를 읽어 주세요. 큰 변경은
+먼저 issue를 열고, 각 pull request는 하나의 issue 또는 하나의 명확한 root cause에
+연결해 주세요.
 
 ---
 
 ## 日本語
 
-SoriaはDJ向けのローカルファーストなmacOSミックスアシスタントです。選択した
-音楽フォルダをスキャンし、トラックのintro/middle/outroを解析し、ローカルの
-メタデータと解析結果を使って次にミックスしやすい曲を推薦します。音楽ファイル
-全体とライブラリDBはアップロードせずMac上に保存します。埋め込みベースの推薦では、
-短いオーディオセグメントpayloadとquery textがGeminiへ送信される場合があります。
+SoriaはローカルファーストなmacOS DJミックスアシスタントです。ユーザーが選択した
+フォルダをスキャンし、音楽ライブラリをローカルでインデックス化し、トラック構造を
+解析し、互換性のある次の候補曲を推薦し、DJライブラリで扱いやすいプレイリストを
+書き出します。音楽ファイル全体やライブラリデータベースはアップロードしません。
 
 ### 主な機能
 
-- 選択したフォルダからローカル音楽ライブラリを作成
-- トラック構造、波形プレビュー、BPM/key/エネルギー情報を解析
-- Rekordbox XMLとSerato CSVメタデータの取り込み
-- Gemini Embeddingsを使ったオーディオセグメントとquery textの埋め込み
-- SQLiteとローカルChromaストレージ
-- 次の候補曲の推薦とスコア内訳の確認
-- Rekordbox XMLとSerato-safeパッケージの書き出し
+- ユーザーが選択した音楽フォルダからローカルトラックライブラリを作成します。
+- ミックス計画のためにintro、middle、outroセグメントを抽出します。
+- ローカルのオーディオメタデータと任意のDJライブラリメタデータを読み込みます。
+- 解析済みトラックセグメント、query text、メタデータcontextから埋め込みを生成します。
+- ライブラリはSQLiteに、ベクトルはローカルChroma persistenceに保存します。
+- 透明なスコア内訳付きでトランジション候補を推薦します。
+- Rekordbox XMLと非破壊のSerato-safeパッケージを書き出します。
 
-### インストール
+Soriaは、音楽コレクションをリモートサービスに預けずに推薦支援を使いたいDJ向けに
+設計されています。オーディオ解析はMac上に残ります。埋め込みリクエストでは、短い
+派生オーディオセグメントpayloadとquery textがGeminiへ送信される場合がありますが、
+元のファイル全体とローカルライブラリデータベースはMac上に残ります。
 
-1. [Releases](https://github.com/Ssojux2/Soria/releases)から最新の
-   `Soria-<version>-macOS-unnotarized.dmg`または
-   `Soria-<version>-macOS-unnotarized.zip`をダウンロードします。
-2. DMGの場合は開いて、`Soria.app`を`Applications`へドラッグします。
-3. ZIPの場合は展開して、出てきた`Soria.app`を`Applications`へ移動します。
-4. GitHubの**Source code (zip)**はインストール用アプリではなく、ソースコードです。
-5. 初期ビルドはDeveloper ID署名とApple notarizationがないため、macOSの警告が表示されます。
-6. ソースを信頼できる場合は、**System Settings > Privacy & Security > Open Anyway**から開くか、Xcodeで自分でビルドしてください。
+### 現在のリリース状況
+
+Soriaは初期のオープンソース配布段階です。
+
+- ソースコードはGitHubで公開されています。
+- 初期ビルドはGitHub Releasesを通じてDMGとZIPファイルとして配布されます。
+- リリースアプリの成果物はad-hoc署名されていますが、Developer ID署名や
+  notarizationは行われていません。
+- これらの初期ビルドではmacOS Gatekeeperの警告が想定されます。
+
+ソースを信頼できる場合は、**System Settings > Privacy & Security > Open Anyway**
+からアプリを開くか、Xcodeで自分でビルドできます。
+
+### 開発支援
+
+Soriaは[GitHub Sponsors](https://github.com/sponsors/Ssojux2)と
+[Buy Me a Coffee](https://buymeacoffee.com/ssojux2)で支援できます。支援は今後の
+音楽関連アプリ開発に使われます。
+
+### ライセンス
+
+Soriaは[MIT License](LICENSE)で公開されています。コントリビューターが明示的に
+別の条件を示さない限り、コントリビューションも同じライセンスで受け入れます。
+
+### ドキュメント
+
+- [Program Workflows](docs/WORKFLOWS.md)では、アプリがsetup、scanning、
+  analysis、recommendation、normalization、exportをどのように進むかを説明します。
+- [Release Notes](docs/RELEASING.md)では、現在のGitHub Releases、DMG、ZIP、
+  checksum、Gatekeeper警告のworkflowを説明します。
+- [Privacy](PRIVACY.md)では、ローカル保存、Keychainの使用、Gemini embedding
+  request、安全なissue報告方法を説明します。
+- [Contributing](CONTRIBUTING.md)、[Support](SUPPORT.md)、
+  [Security](SECURITY.md)では、安全に参加する方法を説明します。
+- [Third-Party Notices](THIRD_PARTY_NOTICES.md)では、現在のソースとリリース方式に
+  関する直接依存関係のライセンスメタデータを要約しています。
+
+### GitHub Releasesから直接インストール
+
+1. [Releases](https://github.com/Ssojux2/Soria/releases)ページを開きます。
+2. 次のいずれかのリリースassetをダウンロードします。
+   - drag-and-dropインストーラー用の`Soria-<version>-macOS-unnotarized.dmg`
+   - 直接アプリarchiveとして使う`Soria-<version>-macOS-unnotarized.zip`
+3. 必要に応じて、対応する`.sha256`ファイルでダウンロードしたファイルを検証します。
+
+   ```bash
+   shasum -a 256 Soria-0.1.0-macOS-unnotarized.dmg
+   cat Soria-0.1.0-macOS-unnotarized.dmg.sha256
+
+   shasum -a 256 Soria-0.1.0-macOS-unnotarized.zip
+   cat Soria-0.1.0-macOS-unnotarized.zip.sha256
+   ```
+
+4. DMGの場合は開いて、`Soria.app`を`Applications`へドラッグします。
+5. ZIPの場合はダブルクリックして`Soria.app`を展開し、`Applications`へ移動します。
+6. Soriaを起動します。macOSがアプリをブロックする場合は、**System Settings >
+   Privacy & Security > Open Anyway**を使います。
+
+GitHubは各リリースに**Source code (zip)**ダウンロードも表示します。このファイルは
+ソースコードのみです。自分でビルドせずにSoriaをインストールしたい場合は、上記の
+アプリZIPまたはDMGを使ってください。
 
 DMGまたはアプリZIPは、起動そのものに`SORIA_PYTHON`と
-`SORIA_WORKER_SCRIPT`の手動設定を必要としません。この2つは主に開発者向けの
-runtime overrideです。ただし現在の初期パッケージはportable Python venvを同梱して
-いないため、解析の検証に失敗する場合はSettingsで互換性のあるPython環境を指定して
-ください。埋め込みベースの推薦にはGemini API keyも必要です。
+`SORIA_WORKER_SCRIPT`の手動設定を必要としません。アプリとbundled
+analysis-worker source scriptsが含まれているためです。現在のzero-cost packageは
+portable Python virtual environmentをvendorしていません。インストール済みアプリで
+worker validationが失敗する場合は、**Settings > Analysis Worker**で互換性のある
+Python環境を指定するか、ソースからビルドしてrepoの`analysis-worker/.venv`を使って
+ください。`SORIA_PYTHON`と`SORIA_WORKER_SCRIPT`はdeveloper/runtime overrideです。
+埋め込みベースの推薦を使う場合にのみGemini API keyを設定または貼り付けてください。
 
 ### ソースからビルド
 
-埋め込みベースの推薦を使うには、
-[Google AI Studio API Keys](https://aistudio.google.com/app/apikey)で
-Gemini API keyを発行し、`GEMINI_API_KEY`として設定する必要があります。
+要件:
+
+- 最近のXcodeがインストールされたmacOS。
+- analysis workerにはPython 3.11以上を推奨。
+- 埋め込みベースの推薦にはGemini API keyが必要です。
+  [Google AI Studio API Keys page](https://aistudio.google.com/app/apikey)で
+  作成・管理し、`GEMINI_API_KEY`として設定してください。
 
 Gemini API無料枠の注意:
 
@@ -468,52 +714,178 @@ standard inputがGemini API Free Tierで無料とされています。ただし
 ものではありません。Soriaはcacheされていないaudio segmentごとにembedding requestを
 送る場合があり、text embeddingは`SORIA_EMBED_BATCH_SIZE`でbatch処理できます。
 
+Python workerの設定:
+
 ```bash
 cd analysis-worker
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cd ..
+```
+
+Xcode schemeまたはshellで環境変数を設定します。
+
+- `GEMINI_API_KEY`: Google AI Studioで発行した値
+- `SORIA_PYTHON`: 例 `analysis-worker/.venv/bin/python`
+- `SORIA_WORKER_SCRIPT`: 例 `analysis-worker/main.py`
+- 任意: `SORIA_EMBED_BATCH_SIZE`
+- 任意: `SORIA_EMBED_TIMEOUT_SEC`
+
+Terminalからビルド:
+
+```bash
+make build
+```
+
+ビルドして起動:
+
+```bash
 make run
 ```
 
-必要な環境変数:
+clean、build、launch:
 
-- `GEMINI_API_KEY`: Google AI Studioで発行したGemini API key
-- `SORIA_PYTHON`
-- `SORIA_WORKER_SCRIPT`
+```bash
+make run-clean
+```
 
-上記のworker環境変数は、ソースビルドでrepo内のworker runtimeを明示したい場合に
-使います。DMG/ZIPで解析runtimeを変更したい場合は、SettingsのAnalysis Worker
-パスを使う方が自然です。
+初期リリースのDMGとZIP assetを作成:
 
-### ドキュメント
+```bash
+VERSION=0.1.0 make release-dmg
+```
 
-- [Program Workflows](docs/WORKFLOWS.md): setup、scan、analysis、
-  recommendation、normalization、exportの流れをリポジトリ内で確認できます。
-- [Release Notes](docs/RELEASING.md): GitHub Releases、DMG/ZIP、checksum、
-  Gatekeeper警告の扱いをまとめています。
-- [Privacy](PRIVACY.md)、[Contributing](CONTRIBUTING.md)、
-  [Support](SUPPORT.md)、[Security](SECURITY.md)も参照してください。
+生成されたリリース成果物は`dist/`に書き込まれます。
 
-### 基本的な使い方
+```text
+dist/Soria-0.1.0-macOS-unnotarized.dmg
+dist/Soria-0.1.0-macOS-unnotarized.dmg.sha256
+dist/Soria-0.1.0-macOS-unnotarized.zip
+dist/Soria-0.1.0-macOS-unnotarized.zip.sha256
+```
 
-1. SettingsまたはLibraryで音楽フォルダを追加します。
-2. SettingsでGemini API keyとanalysis worker設定を検証します。
-3. Scanを実行してローカルライブラリを作成します。
-4. 必要に応じてRekordbox XMLまたはSerato CSVメタデータを取り込みます。
-5. トラック解析を実行します。
-6. seed trackを選び、推薦候補を確認します。
-7. 必要に応じてオーディオnormalizationを実行します。Soriaはアクティブな
+GitHub Releases workflowについては[docs/RELEASING.md](docs/RELEASING.md)を参照してください。
+
+### 詳細な使い方
+
+1. **インストール方法を選びます。** 初期の手動インストールにはrelease DMG/ZIPを
+   使い、Python worker runtimeを完全に制御したい場合はソースからビルドします。
+   埋め込みベースの推薦にはGoogle AI StudioのGemini API keyが必要です。Soria
+   Settingsに貼り付けるか、`GEMINI_API_KEY`として提供できます。
+
+2. **解析設定を検証します。** リリースビルドではSettingsを開き、active embedding
+   profileを検証します。ソースビルドでは`analysis-worker/requirements.txt`を
+   `analysis-worker/.venv`へインストールし、必要に応じて`SORIA_PYTHON`と
+   `SORIA_WORKER_SCRIPT`を設定または検出します。
+
+3. **音楽フォルダを追加します。** Soriaを開き、SettingsまたはLibraryでトラックを
+   含む1つ以上のroot folderを追加します。
+
+4. **ライブラリをスキャンします。** scanを開始して、対応するオーディオファイルを
+   インデックス化します。Soriaは後続のscanで未変更ファイルをスキップするために
+   modification timeとcontent hashを使います。
+
+5. **利用可能なDJメタデータを取り込みます。** DJ softwareでcue point、BPM、key、
+   crate、playlistをすでに管理している場合は、Rekordbox XMLまたはSerato CSV
+   metadataを取り込みます。
+
+6. **トラックを解析します。** 1曲を解析するか、pending trackをbatch analyzeします。
+   workerは推薦のためにaudio feature、waveform preview、segment summary、descriptorを
+   抽出します。
+
+7. **トラック詳細を確認します。** track detail viewでmetadata、waveform-derived
+   preview、analysis confidence、cue information、segment structureを確認します。
+
+8. **推薦を生成します。** seed trackを選択し、互換性のある次の候補曲をSoriaに
+   生成させます。スコアはsegment similarity、tempo/key context、energy shape、
+   利用可能なDJ metadataを組み合わせます。
+
+9. **必要に応じてオーディオをnormalizeします。** 提案されたnormalizationはアクティブな
    ライブラリファイルを正規化済みファイルに置き換え、元ファイルは元の
    ファイル名のままmacOSのTrashへ移動します。そのためFinderの**Put Back**で
    より自然に復元できます。Trashを使えない場合は、トラックの横にtimestamp
    backupを残して警告を表示します。
-8. 候補をもとにプレイリストの流れを調整します。
-9. Rekordbox XMLまたはSerato-safeパッケージとして書き出します。
 
-開発支援は[GitHub Sponsors](https://github.com/sponsors/Ssojux2)または
-[Buy Me a Coffee](https://buymeacoffee.com/ssojux2)から可能です。支援は今後の
-音楽関連アプリ開発に使われます。
+10. **プレイリストの流れを作ります。** 推薦を使ってライブラリ内のcandidate pathを
+    組み立て、export前に順序を手動で調整します。
 
-Soriaのソースコードは[MIT License](LICENSE)で公開されています。
+11. **DJ software向けに書き出します。** Rekordbox XMLまたはSerato-safe packageを
+    書き出します。Serato exportは意図的に非破壊で、local crate fileを直接rewrite
+    しません。
+
+12. **必要に応じてログを確認します。** 解析が失敗した場合は、Soria logとworker
+    stderrを確認します。多くの失敗は、Python packageの不足、API keyの不足、または
+    local decoderが読めないオーディオファイルが原因です。
+
+### アーキテクチャ
+
+```text
+Soria/
+├── Soria/                 SwiftUI macOSアプリ
+│   ├── Models/            Track、segment、recommendation、metadataモデル
+│   ├── Services/          SQLite、scanner、worker IPC、export、logging
+│   ├── ViewModels/        App workflowとbackground state
+│   └── Views/             Library、recommendations、exports、settings
+├── analysis-worker/       Python audio analysisとvector worker
+│   ├── audio/             Feature extractionとsegmentation
+│   ├── embedding/         Gemini embedding client
+│   ├── vectordb/          Local Chroma vector persistence
+│   ├── dj_metadata/       External metadata adapter
+│   └── exporters/         Shared export helper
+├── SoriaTests/            macOS unit tests
+├── SoriaUITests/          macOS UI tests
+├── Scripts/               Local build、run、DMG scripts
+└── docs/                  Workflow、release、distribution notes
+```
+
+### 検証
+
+有用な確認コマンド:
+
+```bash
+make build
+make test-worker
+make test-swift
+VERSION=0.1.0 make release-dmg
+```
+
+Python testsを実行するには、active interpreterにworker dependenciesがインストール
+されている必要があります。`make test-swift`はCI Swift unit-test setを実行します。
+playback preview、waveform seeking、timing behaviorを変更する場合は
+`make test-swift-full`を使ってください。macOS UI/unit testsは、一部のsandboxed
+environmentでは利用できないlocal system servicesを必要とする場合があります。
+
+### 既知の制限
+
+- 初期DMGはnotarizedされていないため、Gatekeeper警告が想定されます。
+- 直接作成するDMG/ZIP buildは現在worker scriptsを同梱しますが、portable Python
+  virtual environmentは同梱しません。
+- オーディオfeature extractionはlocal Python packagesに依存します。
+- waveform previewは派生解析データであり、sample-accurate editorではありません。
+- Rekordbox XML import/exportは一般的なXML構造を対象にしています。特殊なvendor
+  versionには追加adapterが必要になる場合があります。
+- Serato exportは意図的に保守的かつ非破壊です。
+- 推薦品質はlocal metadata qualityとembedding availabilityに依存します。
+
+### プライバシーとセキュリティ
+
+Soriaはlibrary database、analysis summary、waveform preview、vector persistenceを
+Mac上に保存します。Gemini embedding profileは、embedding requestのために短い派生
+segment payload、descriptor text、query text、metadata contextを送信する場合が
+ありますが、Soriaは元の音楽ファイル全体やローカルライブラリデータベースを意図的に
+アップロードしません。
+
+issueやpull requestを開く前に、API key、private music file、private DJ database、
+redactionされていないhome-directory path、private logを削除してください。セキュリティ
+問題は[SECURITY.md](SECURITY.md)の手順に従って非公開で報告してください。
+
+### コントリビューション
+
+Issues、Discussions、focused pull requestsを歓迎します。metadata fixtures、export
+compatibility、大規模ライブラリでのperformance、DJ workflow documentationはよい最初の
+コントリビューション領域です。
+
+pull requestを開く前に[CONTRIBUTING.md](CONTRIBUTING.md)を読んでください。大きな変更は
+先にissueを開き、各pull requestは1つのissueまたは1つの明確なroot causeに紐づけて
+ください。
