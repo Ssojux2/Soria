@@ -1,6 +1,6 @@
 SHELL := /bin/sh
 
-.PHONY: build clean run run-clean
+.PHONY: build clean run run-clean release-dmg clean-dist
 
 build:
 	xcodebuild build \
@@ -25,3 +25,9 @@ run:
 
 run-clean:
 	./Scripts/run_debug_app.sh --clean
+
+release-dmg:
+	./Scripts/create_release_dmg.sh
+
+clean-dist:
+	rm -rf dist

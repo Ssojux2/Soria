@@ -1,6 +1,6 @@
 import Foundation
 
-final class LibraryScannerService {
+final class LibraryScannerService: @unchecked Sendable {
     private static let timestampFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]

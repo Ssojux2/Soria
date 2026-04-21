@@ -1,6 +1,6 @@
 import Foundation
 
-nonisolated final class AppLogger {
+nonisolated final class AppLogger: @unchecked Sendable {
     static let shared = AppLogger()
     private let queue = DispatchQueue(label: "soria.logger.queue", qos: .utility)
     private let logFileURL: URL

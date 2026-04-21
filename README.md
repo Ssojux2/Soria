@@ -1,185 +1,326 @@
-# Soria DJ Mix Assistant
+# Soria
 
-Soria is a local-first macOS app for DJs. It scans user-selected music folders, extracts intro/middle/outro segments, derives embedding descriptors from audio analysis plus DJ metadata, stores vectors locally, recommends compatible next tracks, and exports DJ-library-friendly playlists.
+[![Sponsor](https://img.shields.io/badge/Sponsor-GitHub%20Sponsors-EA4AAA)](https://github.com/sponsors/Ssojux2)
+[![Release DMG](https://github.com/Ssojux2/Soria/actions/workflows/release-dmg.yml/badge.svg)](https://github.com/Ssojux2/Soria/actions/workflows/release-dmg.yml)
 
-## 1. Implementation Plan
+Soria is a local-first macOS DJ mix assistant. It scans folders you choose,
+indexes your music library locally, analyzes track structure, recommends
+compatible next tracks, and exports DJ-library-friendly playlists without
+uploading raw audio.
 
-1. Build a native SwiftUI macOS shell with a sidebar-driven workflow for library, analysis, recommendations, exports, and settings.
-2. Persist the local library in SQLite with incremental rescans, content-hash deduplication, segment storage, and imported Serato / rekordbox metadata.
-3. Run audio-heavy work in a Python worker process over JSON stdin/stdout IPC so the UI stays responsive.
-4. Use energy-aware segmentation to isolate intro, climax/middle, and outro, then embed descriptor text with Gemini Embeddings instead of uploading raw audio.
-5. Store segment vectors in local Chroma persistence, combine them into a weighted track embedding, and use transparent scoring to recommend transitions.
-6. Export Rekordbox XML and a non-destructive Serato-safe package (M3U + ranked CSV + import instructions).
+Languages: [English](#english) | [한국어](#한국어) | [日本語](#日本語)
 
-## 2. Architecture
+## English
 
-### macOS app (`Soria/`)
-- `Models/`: track, segment, recommendation, and external metadata domain models
-- `Services/`: SQLite persistence, scanner, worker IPC, export logic, metadata parsing, hashing, logging
-- `ViewModels/`: app orchestration and background workflow state
-- `Views/`: native SwiftUI desktop views for browsing, analysis, recommendations, and export
+### What Soria Does
 
-### Python worker (`analysis-worker/`)
-- `audio/`: librosa-based feature extraction, waveform preview generation, energy-aware segmentation
-- `embedding/`: Gemini Embeddings client with local cache, retry, and rate-limit handling
-- `vectordb/`: local Chroma persistence for segment vectors
-- `dj_metadata/`: helper adapters for external library formats
-- `exporters/`: shared export utilities
-- `tests/`: worker unit tests
+- Builds a local track library from user-selected music folders.
+- Extracts intro, middle, and outro segments for mix planning.
+- Reads local audio metadata and optional DJ-library metadata.
+- Generates descriptor embeddings from analysis summaries and metadata.
+- Stores the library in SQLite and vectors in local Chroma persistence.
+- Recommends transition candidates with transparent score breakdowns.
+- Exports Rekordbox XML and a non-destructive Serato-safe package.
 
-### Shared assumptions
-- Audio analysis remains local.
-- Vector search remains local.
-- DJ-library ingestion is read-only.
-- Serato direct crate write remains disabled by default for safety.
+Soria is designed for DJs who want recommendation support without handing their
+music collection to a remote service. Audio analysis stays on your Mac. Embedding
+requests use descriptor text derived from analysis and metadata, not raw audio.
 
-## 3. Project Tree
+### Current Release Status
 
-```text
-Soria/
-├── Soria.xcodeproj
-├── Soria/
-│   ├── ContentView.swift
-│   ├── SoriaApp.swift
-│   ├── Models/
-│   │   ├── AppModels.swift
-│   │   ├── ExternalMetadataModels.swift
-│   │   ├── RecommendationModels.swift
-│   │   └── TrackModels.swift
-│   ├── Services/
-│   │   ├── AppLogger.swift
-│   │   ├── AppPaths.swift
-│   │   ├── AudioMetadataReader.swift
-│   │   ├── ExternalMetadataService.swift
-│   │   ├── FileHashingService.swift
-│   │   ├── LibraryDatabase.swift
-│   │   ├── LibraryRootsStore.swift
-│   │   ├── LibraryScannerService.swift
-│   │   ├── PlaylistExportService.swift
-│   │   ├── PythonWorkerClient.swift
-│   │   └── RecommendationEngine.swift
-│   ├── ViewModels/
-│   │   └── AppViewModel.swift
-│   └── Views/
-│       ├── AnalysisView.swift
-│       ├── ExportsView.swift
-│       ├── LibraryView.swift
-│       ├── RecommendationsView.swift
-│       ├── ScanJobsView.swift
-│       ├── SettingsView.swift
-│       └── TrackDetailView.swift
-├── SoriaTests/
-│   └── SoriaTests.swift
-├── analysis-worker/
-│   ├── audio/
-│   │   ├── __init__.py
-│   │   └── features.py
-│   ├── dj_metadata/
-│   │   ├── __init__.py
-│   │   └── adapters.py
-│   ├── embedding/
-│   │   ├── __init__.py
-│   │   └── gemini_client.py
-│   ├── exporters/
-│   │   ├── __init__.py
-│   │   └── playlist_exporters.py
-│   ├── tests/
-│   │   └── test_features.py
-│   ├── vectordb/
-│   │   ├── __init__.py
-│   │   └── chroma_store.py
-│   ├── main.py
-│   └── requirements.txt
-├── shared/
-│   └── config.sample.json
-├── .env.example
-└── DEVELOPER_NOTES.md
-```
+Soria is in an early open-source distribution phase.
 
-## 4. Setup Instructions
+- Source code is published on GitHub.
+- Early builds are distributed as DMG files through GitHub Releases.
+- Release DMGs are ad-hoc signed, but not Developer ID signed or notarized.
+- macOS Gatekeeper warnings are expected for these early builds.
 
-### Python worker
+If you trust the source, you can open the app through **System Settings >
+Privacy & Security > Open Anyway**, or build it yourself with Xcode.
+
+### Support Development
+
+Soria is supported through [GitHub Sponsors](https://github.com/sponsors/Ssojux2).
+Sponsorship helps cover future Developer ID signing/notarization costs, test
+fixtures, documentation, and continued macOS packaging work.
+
+### Install From GitHub Releases
+
+1. Open the [Releases](https://github.com/Ssojux2/Soria/releases) page.
+2. Download the latest `Soria-<version>-macOS-unnotarized.dmg`.
+3. Optionally verify the downloaded file with the matching `.sha256` file:
+
+   ```bash
+   shasum -a 256 Soria-0.1.0-macOS-unnotarized.dmg
+   cat Soria-0.1.0-macOS-unnotarized.dmg.sha256
+   ```
+
+4. Open the DMG and drag `Soria.app` to `Applications`.
+5. Launch Soria. If macOS blocks the app, use **System Settings > Privacy &
+   Security > Open Anyway**.
+
+### Build From Source
+
+Requirements:
+
+- macOS with a recent Xcode version.
+- Python 3.11+ recommended for the analysis worker.
+- A Gemini API key if you want embedding-based recommendations.
+
+Set up the Python worker:
+
 ```bash
-cd /Users/ssojux2/Documents/BluePenguin/Soriga/Soria/analysis-worker
+cd analysis-worker
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+cd ..
 ```
 
-### Environment
-Set these in your Xcode scheme or shell environment:
+Configure environment variables in your Xcode scheme or shell:
 
 - `GEMINI_API_KEY`
-- `SORIA_PYTHON`
-- `SORIA_WORKER_SCRIPT`
+- `SORIA_PYTHON`, for example `analysis-worker/.venv/bin/python`
+- `SORIA_WORKER_SCRIPT`, for example `analysis-worker/main.py`
 - Optional: `SORIA_EMBED_BATCH_SIZE`
 - Optional: `SORIA_EMBED_TIMEOUT_SEC`
 
-Use `.env.example` as the baseline.
+Build from Terminal:
 
-### Build
-Open `Soria.xcodeproj` in Xcode and run the `Soria` scheme.
-
-For CLI validation inside restricted environments:
 ```bash
-xcodebuild build \
-  -scheme Soria \
-  -project Soria.xcodeproj \
-  -derivedDataPath .build/DerivedData \
-  -destination 'platform=macOS' \
-  CODE_SIGNING_ALLOWED=NO \
-  CODE_SIGNING_REQUIRED=NO
+make build
 ```
 
-That command is build-only by design. It verifies that the app compiles, but it does not launch the macOS app bundle after the build finishes.
+Build and launch:
 
-To build and launch the desktop app from Terminal, use:
-```bash
-./Scripts/run_debug_app.sh
-```
-
-You can also use the top-level shortcut:
 ```bash
 make run
 ```
 
-If you need a clean rebuild first:
-```bash
-./Scripts/run_debug_app.sh --clean
-```
+Clean, build, and launch:
 
-Or:
 ```bash
 make run-clean
 ```
 
-Use `open .../Soria.app`, not `.../Contents/MacOS/Soria`, when launching from Terminal. The app is a macOS bundle and is more reliable when started through Launch Services.
+Create an early release DMG:
 
-### App workflow
-1. Add one or more music root folders in Settings or Library.
-2. Run a scan to index local files and skip unchanged tracks.
-3. Import Rekordbox XML or Serato CSV metadata if available.
-4. Analyze a selected track or batch-analyze pending tracks.
-5. Generate recommendations or build a full playlist path from a seed track.
-6. Export to Rekordbox XML or the Serato-safe package.
+```bash
+VERSION=0.1.0 make release-dmg
+```
 
-## 5. Validation Notes
+Generated release artifacts are written to `dist/`:
 
-- `python3 -m pytest analysis-worker/tests` currently skips when `librosa` is not installed in the active interpreter.
-- macOS unit tests can fail inside this sandbox because `xcodebuild test` cannot communicate with `testmanagerd`; the app code itself builds successfully with signing disabled.
+```text
+dist/Soria-0.1.0-macOS-unnotarized.dmg
+dist/Soria-0.1.0-macOS-unnotarized.dmg.sha256
+```
 
-## 6. Known Limitations
+See [docs/RELEASING.md](docs/RELEASING.md) for the GitHub Releases workflow.
 
-1. Audio feature extraction depends on local Python packages being installed into the worker environment.
-2. The SwiftUI waveform is a derived preview, not a sample-accurate editable waveform editor.
-3. Rekordbox XML import/export targets common XML structures; uncommon vendor/version variations may need extra adapters.
-4. Serato export remains intentionally non-destructive. Direct crate writing is not claimed or enabled.
-5. Embedding quality depends on Gemini availability, quota, and the fidelity of local metadata/features.
+### Full Usage Guide
 
-## 7. Next-Step Improvements
+1. **Create your local worker environment.** Install the Python dependencies in
+   `analysis-worker/.venv` and set `SORIA_PYTHON` and `SORIA_WORKER_SCRIPT`.
 
-1. Add explicit scan-job persistence and cancellation/resume controls.
-2. Add richer key normalization and full Camelot / Open Key conversion utilities.
-3. Add user-editable segment boundaries and playlist energy-curve presets.
-4. Add batch-analysis scheduling with bounded worker concurrency.
-5. Add fixture-based integration tests with real rekordbox exports and larger music libraries.
+2. **Add music folders.** Open Soria, go to Settings or Library, and add one or
+   more root folders that contain your tracks.
+
+3. **Scan the library.** Start a scan to index supported audio files. Soria uses
+   modified time and content hashing to skip unchanged files on later scans.
+
+4. **Import DJ metadata when available.** Import Rekordbox XML or Serato CSV
+   metadata if you already maintain cue points, BPM, keys, crates, or playlists
+   in DJ software.
+
+5. **Analyze tracks.** Analyze one track or batch-analyze pending tracks. The
+   worker extracts audio features, waveform previews, segment summaries, and
+   descriptors for recommendation.
+
+6. **Review track details.** Use the track detail view to inspect metadata,
+   waveform-derived previews, analysis confidence, cue information, and segment
+   structure.
+
+7. **Generate recommendations.** Select a seed track and ask Soria for compatible
+   next-track candidates. Scores combine segment similarity, tempo/key context,
+   energy shape, and available DJ metadata.
+
+8. **Build playlist paths.** Use recommendations to assemble a candidate path
+   through your library, then refine the order manually before export.
+
+9. **Export for DJ software.** Export Rekordbox XML or the Serato-safe package.
+   Serato export is intentionally non-destructive and does not directly rewrite
+   local crate files.
+
+10. **Check logs when needed.** If analysis fails, inspect Soria logs and worker
+    stderr. Most failures are missing Python packages, missing API keys, or audio
+    files the local decoder cannot read.
+
+### Architecture
+
+```text
+Soria/
+├── Soria/                 SwiftUI macOS app
+│   ├── Models/            Track, segment, recommendation, metadata models
+│   ├── Services/          SQLite, scanner, worker IPC, export, logging
+│   ├── ViewModels/        App workflow and background state
+│   └── Views/             Library, recommendations, exports, settings
+├── analysis-worker/       Python audio analysis and vector worker
+│   ├── audio/             Feature extraction and segmentation
+│   ├── embedding/         Gemini embedding client
+│   ├── vectordb/          Local Chroma vector persistence
+│   ├── dj_metadata/       External metadata adapters
+│   └── exporters/         Shared export helpers
+├── SoriaTests/            macOS unit tests
+├── SoriaUITests/          macOS UI tests
+├── Scripts/               Local build, run, and DMG scripts
+└── docs/                  Release and distribution notes
+```
+
+### Validation
+
+Useful checks:
+
+```bash
+make build
+python3 -m pytest analysis-worker/tests
+VERSION=0.1.0 make release-dmg
+```
+
+The Python tests require the active interpreter to have the worker dependencies
+installed. macOS UI/unit tests may require local system services that are not
+available in every sandboxed environment.
+
+### Known Limitations
+
+- Early DMGs are not notarized, so Gatekeeper warnings are expected.
+- Audio feature extraction depends on local Python packages.
+- The waveform preview is derived analysis data, not a sample-accurate editor.
+- Rekordbox XML import/export targets common XML structures; unusual vendor
+  versions may need more adapters.
+- Serato export is deliberately conservative and non-destructive.
+- Recommendation quality depends on local metadata quality and embedding
+  availability.
+
+### Contributing
+
+Issues, discussions, and focused pull requests are welcome after the repository
+is public. Good first areas include metadata fixtures, export compatibility,
+performance on large libraries, and documentation for DJ workflows.
+
+Before making the repository fully public, choose and add an open-source license.
+
+---
+
+## 한국어
+
+Soria는 DJ를 위한 로컬 우선 macOS 믹스 어시스턴트입니다. 사용자가 선택한 음악
+폴더를 스캔하고, 트랙의 intro/middle/outro 구간을 분석하며, 로컬 메타데이터와
+분석 결과를 바탕으로 다음에 믹스하기 좋은 트랙을 추천합니다. 원본 오디오는
+업로드하지 않고, 라이브러리와 벡터 데이터도 Mac 안에 저장합니다.
+
+### 주요 기능
+
+- 선택한 폴더 기반 로컬 음악 라이브러리 생성
+- 트랙 구간, 파형 미리보기, BPM/key/에너지 관련 분석
+- Rekordbox XML 및 Serato CSV 메타데이터 가져오기
+- Gemini Embeddings 기반 설명자 임베딩
+- SQLite와 로컬 Chroma 저장소 사용
+- 전환 후보 추천 및 점수 근거 확인
+- Rekordbox XML, Serato-safe 패키지 내보내기
+
+### 설치
+
+1. [Releases](https://github.com/Ssojux2/Soria/releases)에서 최신 DMG를 받습니다.
+2. DMG를 열고 `Soria.app`을 `Applications`로 옮깁니다.
+3. 초기 빌드는 Developer ID 서명 및 Apple notarization이 되어 있지 않으므로
+   macOS 경고가 뜰 수 있습니다.
+4. 신뢰할 수 있는 소스라고 판단하면 **시스템 설정 > 개인정보 보호 및 보안 >
+   Open Anyway**로 실행하거나, Xcode로 직접 빌드합니다.
+
+### 소스에서 빌드
+
+```bash
+cd analysis-worker
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cd ..
+make run
+```
+
+필요한 환경 변수:
+
+- `GEMINI_API_KEY`
+- `SORIA_PYTHON`
+- `SORIA_WORKER_SCRIPT`
+
+### 기본 사용 방법
+
+1. Settings 또는 Library에서 음악 루트 폴더를 추가합니다.
+2. Scan을 실행해 로컬 라이브러리를 만듭니다.
+3. 필요하면 Rekordbox XML 또는 Serato CSV 메타데이터를 가져옵니다.
+4. 트랙 분석을 실행합니다.
+5. seed track을 선택하고 추천 후보를 확인합니다.
+6. 후보를 바탕으로 플레이리스트 경로를 다듬습니다.
+7. Rekordbox XML 또는 Serato-safe 패키지로 내보냅니다.
+
+개발을 후원하려면 [GitHub Sponsors](https://github.com/sponsors/Ssojux2)를
+이용해 주세요. 후원은 향후 Developer ID 서명, notarization, 테스트 fixture,
+문서화 작업에 사용됩니다.
+
+---
+
+## 日本語
+
+SoriaはDJ向けのローカルファーストなmacOSミックスアシスタントです。選択した
+音楽フォルダをスキャンし、トラックのintro/middle/outroを解析し、ローカルの
+メタデータと解析結果を使って次にミックスしやすい曲を推薦します。元の音声は
+アップロードせず、ライブラリとベクトルデータもMac上に保存します。
+
+### 主な機能
+
+- 選択したフォルダからローカル音楽ライブラリを作成
+- トラック構造、波形プレビュー、BPM/key/エネルギー情報を解析
+- Rekordbox XMLとSerato CSVメタデータの取り込み
+- Gemini Embeddingsを使った説明文ベースの埋め込み
+- SQLiteとローカルChromaストレージ
+- 次の候補曲の推薦とスコア内訳の確認
+- Rekordbox XMLとSerato-safeパッケージの書き出し
+
+### インストール
+
+1. [Releases](https://github.com/Ssojux2/Soria/releases)から最新のDMGをダウンロードします。
+2. DMGを開き、`Soria.app`を`Applications`へドラッグします。
+3. 初期ビルドはDeveloper ID署名とApple notarizationがないため、macOSの警告が表示されます。
+4. ソースを信頼できる場合は、**System Settings > Privacy & Security > Open Anyway**から開くか、Xcodeで自分でビルドしてください。
+
+### ソースからビルド
+
+```bash
+cd analysis-worker
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cd ..
+make run
+```
+
+必要な環境変数:
+
+- `GEMINI_API_KEY`
+- `SORIA_PYTHON`
+- `SORIA_WORKER_SCRIPT`
+
+### 基本的な使い方
+
+1. SettingsまたはLibraryで音楽フォルダを追加します。
+2. Scanを実行してローカルライブラリを作成します。
+3. 必要に応じてRekordbox XMLまたはSerato CSVメタデータを取り込みます。
+4. トラック解析を実行します。
+5. seed trackを選び、推薦候補を確認します。
+6. 候補をもとにプレイリストの流れを調整します。
+7. Rekordbox XMLまたはSerato-safeパッケージとして書き出します。
+
+開発支援は[GitHub Sponsors](https://github.com/sponsors/Ssojux2)から可能です。
+支援は今後のDeveloper ID署名、notarization、テストfixture、ドキュメント整備に使われます。

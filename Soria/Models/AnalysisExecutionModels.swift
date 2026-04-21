@@ -126,21 +126,21 @@ extension AnalysisConcurrencyProfile {
     static let `default`: AnalysisConcurrencyProfile = .balancedAuto
 }
 
-extension EmbeddingBackendKind: Sendable {}
-extension EmbeddingPipeline: Sendable {}
-extension EmbeddingProfile: Sendable {}
-extension TrackMetadataSource: Sendable {}
-extension Track: Sendable {}
-extension TrackSegment.SegmentType: Sendable {}
-extension TrackSegment: Sendable {}
-extension AnalysisFocus: Sendable {}
-extension AnalysisTaskState: Sendable {}
-extension TrackAnalysisState: Sendable {}
-extension ExternalDJMetadata.Source: Sendable {}
-extension ExternalDJCuePoint.Kind: Sendable {}
-extension ExternalDJCuePoint: Sendable {}
-extension ExternalDJMetadata: Sendable {}
-extension WorkerSegmentResult: Sendable {}
-extension WorkerEmbeddingResult: Sendable {}
-extension WorkerAnalysisResult: Sendable {}
-extension PythonWorkerClient.WorkerConfig: Sendable {}
+extension EmbeddingBackendKind: @unchecked Sendable {}
+extension EmbeddingPipeline: @unchecked Sendable {}
+extension EmbeddingProfile: @unchecked Sendable {}
+extension TrackMetadataSource: @unchecked Sendable {}
+extension Track: @unchecked Sendable {}
+extension TrackSegment.SegmentType: @unchecked Sendable {}
+extension TrackSegment: @unchecked Sendable {}
+extension AnalysisFocus: @unchecked Sendable {}
+extension AnalysisTaskState: @unchecked Sendable {}
+extension TrackAnalysisState: @unchecked Sendable {}
+extension ExternalDJMetadata.Source: @unchecked Sendable {}
+extension ExternalDJCuePoint.Kind: @unchecked Sendable {}
+extension ExternalDJCuePoint: @unchecked Sendable {}
+extension ExternalDJMetadata: @unchecked Sendable {}
+extension WorkerSegmentResult: @unchecked Sendable {}
+extension WorkerEmbeddingResult: @unchecked Sendable {}
+extension WorkerAnalysisResult: @unchecked Sendable {}
+extension PythonWorkerClient.WorkerConfig: @unchecked Sendable {}

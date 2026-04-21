@@ -1163,7 +1163,7 @@ nonisolated private struct WorkerErrorResponse: Codable {
     let error: String
 }
 
-nonisolated final class WorkerStderrRouter {
+nonisolated final class WorkerStderrRouter: @unchecked Sendable {
     private var buffer = Data()
     private let decoder = JSONDecoder()
     private let progress: PythonWorkerClient.WorkerProgressHandler?

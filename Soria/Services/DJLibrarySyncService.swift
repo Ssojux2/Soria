@@ -629,7 +629,7 @@ private func trimToNil(_ value: String?) -> String? {
     return trimmed
 }
 
-final class DJLibrarySyncService {
+final class DJLibrarySyncService: @unchecked Sendable {
     private let database: LibraryDatabase
     private let fileManager: FileManager
     private let seratoService: SeratoLibraryService

@@ -1,0 +1,61 @@
+name: Release DMG
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-release-dmg:
+    name: Build ad-hoc signed macOS DMG
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build DMG
+        env:
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          VERSION="${TAG_NAME#v}" make release-dmg
+
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          cat > dist/release-notes.md <<'EOF'
+          This is an early open-source macOS build.
+
+          The app is ad-hoc signed, but it is not Developer ID signed or notarized by Apple. macOS will show a security warning. If you trust this source, open System Settings > Privacy & Security and choose Open Anyway, or build the app from source with Xcode.
+          EOF
+
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            gh release edit "${TAG_NAME}" --draft=true --notes-file dist/release-notes.md
+          else
+            gh release create "${TAG_NAME}" \
+              --draft \
+              --target "${GITHUB_SHA}" \
+              --title "Soria ${TAG_NAME}" \
+              --notes-file dist/release-notes.md
+          fi
+
+      - name: Upload DMG artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          gh release upload "${TAG_NAME}" dist/*.dmg dist/*.dmg.sha256 --clobber
