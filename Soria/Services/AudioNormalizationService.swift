@@ -10,15 +10,16 @@ final class AudioNormalizationService: @unchecked Sendable {
     private let worker: AudioNormalizationWorkering
     private let fileManager: FileManager
     private let trackRefresher: @Sendable (URL) async throws -> Track
-    private let trashBackupOperation: @Sendable (FileManager, URL) throws -> Void
+    private let trashBackupOperation: @Sendable (FileManager, URL) throws -> URL?
 
     init(
         worker: AudioNormalizationWorkering = PythonWorkerClient(),
         fileManager: FileManager = .default,
         trackRefresher: @escaping @Sendable (URL) async throws -> Track,
-        trashBackupOperation: @escaping @Sendable (FileManager, URL) throws -> Void = { fileManager, backupURL in
+        trashBackupOperation: @escaping @Sendable (FileManager, URL) throws -> URL? = { fileManager, backupURL in
             var trashedURL: NSURL?
             try fileManager.trashItem(at: backupURL, resultingItemURL: &trashedURL)
+            return trashedURL as URL?
         }
     ) {
         self.worker = worker
@@ -298,6 +299,32 @@ final class AudioNormalizationService: @unchecked Sendable {
         at originalURL: URL,
         withNormalizedCopyAt normalizedOutputURL: URL
     ) throws -> [String] {
+        let trashedOriginalURL: URL?
+        do {
+            trashedOriginalURL = try trashBackupOperation(fileManager, originalURL)
+        } catch {
+            return try replaceOriginalKeepingTimestampedBackup(
+                at: originalURL,
+                withNormalizedCopyAt: normalizedOutputURL,
+                trashError: error
+            )
+        }
+
+        do {
+            try fileManager.moveItem(at: normalizedOutputURL, to: originalURL)
+        } catch {
+            try? restoreOriginalFromTrashIfPossible(trashedOriginalURL, to: originalURL)
+            throw error
+        }
+
+        return []
+    }
+
+    private func replaceOriginalKeepingTimestampedBackup(
+        at originalURL: URL,
+        withNormalizedCopyAt normalizedOutputURL: URL,
+        trashError: Error
+    ) throws -> [String] {
         let extensionSuffix = originalURL.pathExtension.isEmpty ? "" : ".\(originalURL.pathExtension)"
         let backupName = "\(originalURL.deletingPathExtension().lastPathComponent)-soria-backup-\(Self.backupTimestamp())\(extensionSuffix)"
         let backupURL = originalURL.deletingLastPathComponent().appendingPathComponent(backupName)
@@ -317,16 +344,21 @@ final class AudioNormalizationService: @unchecked Sendable {
         var warnings: [String] = []
 
         if fileManager.fileExists(atPath: backupURL.path) {
-            do {
-                try trashBackupOperation(fileManager, backupURL)
-            } catch {
-                warnings.append(
-                    "Original backup for \(activeURL.lastPathComponent) could not be moved to Trash. Backup kept at \(backupURL.path)."
-                )
-            }
+            warnings.append(
+                "Original file for \(activeURL.lastPathComponent) could not be moved to Trash with its original name (\(trashError.localizedDescription)). Backup kept at \(backupURL.path)."
+            )
         }
 
         return warnings
+    }
+
+    private func restoreOriginalFromTrashIfPossible(_ trashedOriginalURL: URL?, to originalURL: URL) throws {
+        guard !fileManager.fileExists(atPath: originalURL.path),
+              let trashedOriginalURL,
+              fileManager.fileExists(atPath: trashedOriginalURL.path) else {
+            return
+        }
+        try fileManager.moveItem(at: trashedOriginalURL, to: originalURL)
     }
 
     nonisolated private static func inspectM4AFile(

@@ -1,4 +1,5 @@
 SHELL := /bin/sh
+MACOS_DESTINATION ?= platform=macOS,arch=$(shell uname -m)
 
 .PHONY: build clean run run-clean release-dmg clean-dist
 
@@ -7,7 +8,7 @@ build:
 		-scheme Soria \
 		-project Soria.xcodeproj \
 		-derivedDataPath .build/DerivedData \
-		-destination 'platform=macOS' \
+		-destination '$(MACOS_DESTINATION)' \
 		CODE_SIGNING_ALLOWED=NO \
 		CODE_SIGNING_REQUIRED=NO
 
@@ -16,7 +17,7 @@ clean:
 		-scheme Soria \
 		-project Soria.xcodeproj \
 		-derivedDataPath .build/DerivedData \
-		-destination 'platform=macOS' \
+		-destination '$(MACOS_DESTINATION)' \
 		CODE_SIGNING_ALLOWED=NO \
 		CODE_SIGNING_REQUIRED=NO
 

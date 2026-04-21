@@ -8,6 +8,7 @@ APP_NAME="${APP_NAME:-Soria}"
 CONFIGURATION="${CONFIGURATION:-Release}"
 DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-${ROOT_DIR}/.build/ReleaseDerivedData}"
 DIST_DIR="${DIST_DIR:-${ROOT_DIR}/dist}"
+MACOS_DESTINATION="${SORIA_MACOS_DESTINATION:-platform=macOS,arch=$(uname -m)}"
 VOLUME_NAME="${VOLUME_NAME:-Soria}"
 VERSION="${VERSION:-}"
 CLEAN_FIRST="${CLEAN_FIRST:-0}"
@@ -25,6 +26,8 @@ Environment overrides:
   CONFIGURATION          Xcode configuration. Defaults to Release.
   DERIVED_DATA_PATH      Build output path. Defaults to .build/ReleaseDerivedData.
   DIST_DIR               Artifact output path. Defaults to dist.
+  SORIA_MACOS_DESTINATION
+                         Xcode destination. Defaults to platform=macOS,arch=<host arch>.
 EOF
 }
 
@@ -122,7 +125,7 @@ if [ "${CLEAN_FIRST}" -eq 1 ]; then
     -project "${PROJECT_PATH}" \
     -configuration "${CONFIGURATION}" \
     -derivedDataPath "${DERIVED_DATA_PATH}" \
-    -destination 'platform=macOS' \
+    -destination "${MACOS_DESTINATION}" \
     CODE_SIGNING_ALLOWED=NO \
     CODE_SIGNING_REQUIRED=NO
 fi
@@ -133,7 +136,7 @@ if [ "${SKIP_BUILD}" -ne 1 ]; then
     -project "${PROJECT_PATH}" \
     -configuration "${CONFIGURATION}" \
     -derivedDataPath "${DERIVED_DATA_PATH}" \
-    -destination 'platform=macOS' \
+    -destination "${MACOS_DESTINATION}" \
     CODE_SIGNING_ALLOWED=NO \
     CODE_SIGNING_REQUIRED=NO
 fi

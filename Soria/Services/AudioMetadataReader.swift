@@ -16,7 +16,7 @@ struct ExternalVisualizationResolution {
 struct ExternalVisualizationResolver {
     private let cuePointParser = ExternalCuePointParser()
 
-    nonisolated func enrich(trackPath: String, metadata: [ExternalDJMetadata]) -> ExternalVisualizationResolution {
+    nonisolated func enrich(trackPath: String, metadata: [ExternalDJMetadata]) async -> ExternalVisualizationResolution {
         var resolvedMetadata = metadata
         var waveformPreview: [Double] = []
 
@@ -28,7 +28,7 @@ struct ExternalVisualizationResolver {
                     resolvedMetadata[index].trackPath.isEmpty ? trackPath : resolvedMetadata[index].trackPath
                 )
                 guard !resolvedPath.isEmpty else { continue }
-                snapshot = readSeratoVisualization(trackURL: URL(fileURLWithPath: resolvedPath))
+                snapshot = await readSeratoVisualization(trackURL: URL(fileURLWithPath: resolvedPath))
             case .rekordbox:
                 guard let analysisPath = resolvedMetadata[index].analysisCachePath else { continue }
                 let resolvedPath = TrackPathNormalizer.normalizedAbsolutePath(analysisPath)
@@ -56,18 +56,21 @@ struct ExternalVisualizationResolver {
         )
     }
 
-    nonisolated func readSeratoVisualization(trackURL: URL) -> ExternalVisualizationSnapshot {
+    nonisolated func readSeratoVisualization(trackURL: URL) async -> ExternalVisualizationSnapshot {
         guard FileManager.default.fileExists(atPath: trackURL.path) else { return .empty }
 
         let asset = AVURLAsset(url: trackURL)
         var cuePoints: [ExternalDJCuePoint] = []
         var waveformPreview: [Double] = []
 
-        for format in asset.availableMetadataFormats {
-            for item in asset.metadata(forFormat: format) {
+        let metadataFormats = (try? await asset.load(.availableMetadataFormats)) ?? []
+        for format in metadataFormats {
+            let metadataItems = (try? await asset.loadMetadata(for: format)) ?? []
+            for item in metadataItems {
                 guard (item.key as? String) == "GEOB" else { continue }
-                guard let info = item.extraAttributes?[AVMetadataExtraAttributeKey.info] as? String else { continue }
-                guard let data = item.dataValue else { continue }
+                let extraAttributes = (try? await item.load(.extraAttributes)) ?? [:]
+                guard let info = extraAttributes[AVMetadataExtraAttributeKey.info] as? String else { continue }
+                guard let data = try? await item.load(.dataValue) else { continue }
 
                 switch info {
                 case "Serato Overview":
@@ -453,7 +456,7 @@ struct ExternalVisualizationResolver {
 enum AudioMetadataReader {
     static func readMetadata(for url: URL) async -> (title: String, artist: String, album: String, genre: String, duration: TimeInterval, sampleRate: Double, bpm: Double?, musicalKey: String?) {
         let asset = AVURLAsset(url: url)
-        let duration = CMTimeGetSeconds(asset.duration)
+        let duration = (try? await asset.load(.duration).seconds) ?? 0
         var title = url.deletingPathExtension().lastPathComponent
         var artist = ""
         var album = ""
@@ -461,9 +464,10 @@ enum AudioMetadataReader {
         var bpm: Double?
         var musicalKey: String?
 
-        for item in asset.commonMetadata {
+        let commonMetadata = (try? await asset.load(.commonMetadata)) ?? []
+        for item in commonMetadata {
             guard let key = item.commonKey?.rawValue else { continue }
-            let value = item.stringValue ?? ""
+            let value = (try? await item.load(.stringValue)) ?? ""
             switch key {
             case "title": title = value
             case "artist": artist = value
@@ -473,10 +477,12 @@ enum AudioMetadataReader {
             }
         }
 
-        for format in asset.availableMetadataFormats {
-            for item in asset.metadata(forFormat: format) {
+        let metadataFormats = (try? await asset.load(.availableMetadataFormats)) ?? []
+        for format in metadataFormats {
+            let metadataItems = (try? await asset.loadMetadata(for: format)) ?? []
+            for item in metadataItems {
                 let key = item.commonKey?.rawValue.lowercased() ?? ""
-                let value = item.stringValue ?? ""
+                let value = (try? await item.load(.stringValue)) ?? ""
                 if bpm == nil, key.contains("bpm") || value.lowercased().contains("bpm") {
                     bpm = Double(value.filter { "0123456789.".contains($0) })
                 }

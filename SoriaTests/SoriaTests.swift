@@ -2115,7 +2115,7 @@ struct SoriaTests {
         let database = try LibraryDatabase(databaseURL: databaseURL)
 
         for index in 0..<31 {
-            try database.insertScoreSession(
+            _ = try database.insertScoreSession(
                 session: ScoreSession(
                     id: UUID(),
                     kind: .search,
@@ -2521,6 +2521,98 @@ struct SoriaTests {
         #expect((try database.fetchSegments(trackID: track.id)).isEmpty)
         #expect(try database.fetchWaveformCache(trackID: track.id) == nil)
         #expect(await invalidatedTracks.snapshot() == [track.id])
+    }
+
+    @Test func audioNormalizationServiceMovesOriginalToTrashWithOriginalFileName() async throws {
+        let directory = try makeTemporaryDirectory()
+        let fakeTrashDirectory = directory.appendingPathComponent("Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeTrashDirectory, withIntermediateDirectories: true)
+        let trackURL = directory.appendingPathComponent("Normalize Me.wav")
+        try writeTestWAV(to: trackURL, frequency: 440)
+
+        let originalTrack = makeTrack(path: TrackPathNormalizer.normalizedAbsolutePath(trackURL), title: "Normalize Me")
+        let updatedTrack = Track(
+            id: originalTrack.id,
+            filePath: originalTrack.filePath,
+            fileName: originalTrack.fileName,
+            title: originalTrack.title,
+            artist: originalTrack.artist,
+            album: originalTrack.album,
+            genre: originalTrack.genre,
+            duration: originalTrack.duration,
+            sampleRate: originalTrack.sampleRate,
+            bpm: originalTrack.bpm,
+            musicalKey: originalTrack.musicalKey,
+            modifiedTime: Date().addingTimeInterval(10),
+            contentHash: "normalized-hash",
+            analyzedAt: nil,
+            embeddingProfileID: nil,
+            embeddingPipelineID: nil,
+            embeddingUpdatedAt: nil,
+            hasSeratoMetadata: originalTrack.hasSeratoMetadata,
+            hasRekordboxMetadata: originalTrack.hasRekordboxMetadata,
+            bpmSource: originalTrack.bpmSource,
+            keySource: originalTrack.keySource,
+            lastSeenInLocalScanAt: originalTrack.lastSeenInLocalScanAt
+        )
+
+        let worker = StubNormalizationWorker(
+            inspectionResult: WorkerNormalizationInspectionResponse(
+                state: .needsNormalize,
+                peakAmplitude: 0.25,
+                formatName: "WAV",
+                subtype: "PCM_16",
+                endian: "FILE",
+                sampleRate: 22_050,
+                channelCount: 1,
+                frameCount: 22_050,
+                hasMetadata: false,
+                isLossy: false,
+                detailMessage: nil
+            ),
+            normalizeHandler: { _, outputPath in
+                try writeTestWAV(to: URL(fileURLWithPath: outputPath), frequency: 880)
+                return WorkerNormalizationResultResponse(
+                    state: .ready,
+                    originalPeakAmplitude: 0.25,
+                    normalizedPeakAmplitude: 1.0,
+                    appliedGain: 4.0,
+                    didNormalize: true,
+                    outputPath: outputPath,
+                    formatName: "WAV",
+                    subtype: "PCM_16",
+                    endian: "FILE",
+                    sampleRate: 22_050,
+                    channelCount: 1,
+                    frameCount: 22_050,
+                    hasMetadata: false,
+                    isLossy: false,
+                    detailMessage: nil
+                )
+            }
+        )
+
+        let service = AudioNormalizationService(
+            worker: worker,
+            fileManager: .default,
+            trackRefresher: { _ in updatedTrack },
+            trashBackupOperation: { fileManager, originalURL in
+                let destinationURL = fakeTrashDirectory.appendingPathComponent(originalURL.lastPathComponent)
+                try fileManager.moveItem(at: originalURL, to: destinationURL)
+                return destinationURL
+            }
+        )
+
+        let result = await service.normalizeQueuedTracks([originalTrack])
+        let fakeTrashedURL = fakeTrashDirectory.appendingPathComponent("Normalize Me.wav")
+        let directoryContents = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+
+        #expect(result.updatedTracksByID[originalTrack.id]?.contentHash == "normalized-hash")
+        #expect(result.warnings.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: trackURL.path))
+        #expect(FileManager.default.fileExists(atPath: fakeTrashedURL.path))
+        #expect(directoryContents.contains("Normalize Me.wav"))
+        #expect(!directoryContents.contains(where: { $0.contains("soria-backup") }))
     }
 
     @Test func audioNormalizationServiceKeepsBackupWhenTrashMoveFails() async throws {

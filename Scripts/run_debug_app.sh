@@ -5,6 +5,7 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 DERIVED_DATA_PATH="${ROOT_DIR}/.build/DerivedData"
 APP_PATH="${DERIVED_DATA_PATH}/Build/Products/Debug/Soria.app"
 BUNDLE_ID="bluepenguin.Soria"
+MACOS_DESTINATION="${SORIA_MACOS_DESTINATION:-platform=macOS,arch=$(uname -m)}"
 
 CLEAN_FIRST=0
 
@@ -38,7 +39,7 @@ if [ "${CLEAN_FIRST}" -eq 1 ]; then
     -scheme Soria \
     -project "${ROOT_DIR}/Soria.xcodeproj" \
     -derivedDataPath "${DERIVED_DATA_PATH}" \
-    -destination 'platform=macOS' \
+    -destination "${MACOS_DESTINATION}" \
     CODE_SIGNING_ALLOWED=NO \
     CODE_SIGNING_REQUIRED=NO
 fi
@@ -47,7 +48,7 @@ xcodebuild build \
   -scheme Soria \
   -project "${ROOT_DIR}/Soria.xcodeproj" \
   -derivedDataPath "${DERIVED_DATA_PATH}" \
-  -destination 'platform=macOS' \
+  -destination "${MACOS_DESTINATION}" \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO
 

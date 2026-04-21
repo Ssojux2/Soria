@@ -235,6 +235,7 @@
 /* Begin PBXShellScriptBuildPhase section */
 		84B5A1D331B91B4200A8EB7B /* Bundle Analysis Worker */ = {
 			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);
@@ -430,7 +431,13 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				LM_FILTER_WARNINGS = YES;
 				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					AppIntents,
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = bluepenguin.Soria;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -461,7 +468,13 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				LM_FILTER_WARNINGS = YES;
 				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					AppIntents,
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = bluepenguin.Soria;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -482,6 +495,12 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.3;
 				MARKETING_VERSION = 1.0;
+				LM_FILTER_WARNINGS = YES;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					AppIntents,
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = bluepenguin.SoriaTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
@@ -502,6 +521,12 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.3;
 				MARKETING_VERSION = 1.0;
+				LM_FILTER_WARNINGS = YES;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					AppIntents,
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = bluepenguin.SoriaTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
@@ -520,6 +545,12 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
+				LM_FILTER_WARNINGS = YES;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					AppIntents,
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = bluepenguin.SoriaUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
@@ -538,6 +569,12 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
+				LM_FILTER_WARNINGS = YES;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework",
+					AppIntents,
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = bluepenguin.SoriaUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;

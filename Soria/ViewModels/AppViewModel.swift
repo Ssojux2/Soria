@@ -4764,7 +4764,7 @@ final class AppViewModel: ObservableObject {
                 let trackPath = track.filePath
                 let resolver = externalVisualizationResolver
                 let resolution = await Task.detached(priority: .userInitiated) {
-                    resolver.enrich(trackPath: trackPath, metadata: metadataSnapshot)
+                    await resolver.enrich(trackPath: trackPath, metadata: metadataSnapshot)
                 }.value
 
                 guard selectedTrack?.id == selectedTrackID else { return }

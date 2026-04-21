@@ -7,7 +7,7 @@ import Testing
 struct AnalysisProgressTests {
     @Test
     func workerStderrRouterSeparatesProgressEventsFromPlainText() {
-        var events: [WorkerProgressEvent] = []
+        let events = TestProgressEventBox()
         let router = WorkerStderrRouter { event in
             events.append(event)
         }
@@ -22,10 +22,11 @@ struct AnalysisProgressTests {
         router.append(Data(payload[splitIndex...].utf8))
         router.finish()
 
-        #expect(events.count == 1)
-        #expect(events.first?.stage == .extractingFeatures)
-        #expect(events.first?.message == "Extracting rhythmic and spectral features")
-        #expect(events.first?.trackPath == "/tmp/example.mp3")
+        let capturedEvents = events.events
+        #expect(capturedEvents.count == 1)
+        #expect(capturedEvents.first?.stage == .extractingFeatures)
+        #expect(capturedEvents.first?.message == "Extracting rhythmic and spectral features")
+        #expect(capturedEvents.first?.trackPath == "/tmp/example.mp3")
         #expect(router.plainText == "plain stderr line")
     }
 
@@ -814,7 +815,7 @@ struct AnalysisProgressTests {
             timeoutSec: 180
         )
 
-        var progressEvents: [WorkerProgressEvent] = []
+        let progressEvents = TestProgressEventBox()
         let router = WorkerStderrRouter { event in
             progressEvents.append(event)
         }
@@ -823,9 +824,26 @@ struct AnalysisProgressTests {
 
         let response = try JSONDecoder().decode(WorkerAnalysisResult.self, from: result.stdoutData)
         #expect(result.terminationStatus == 0)
-        #expect(progressEvents.isEmpty == false)
+        #expect(progressEvents.events.isEmpty == false)
         #expect(response.segments.count == 3)
         #expect(response.trackEmbedding?.isEmpty == false)
+    }
+}
+
+private final class TestProgressEventBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [WorkerProgressEvent] = []
+
+    var events: [WorkerProgressEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ event: WorkerProgressEvent) {
+        lock.lock()
+        storage.append(event)
+        lock.unlock()
     }
 }
 

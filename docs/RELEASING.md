@@ -11,10 +11,16 @@ The macOS app produced by this repo is:
 - Ad-hoc signed with `codesign --sign -`.
 - Not signed with an Apple Developer ID certificate.
 - Not notarized by Apple.
+- Bundled with the `analysis-worker` source scripts, but not a portable Python
+  virtual environment.
 
 That means macOS Gatekeeper warnings are expected. This avoids Apple Developer
 Program cost for the early phase, but it is less friendly for non-technical
 users than a Developer ID signed and notarized release.
+
+Analysis features still need a compatible Python runtime with
+`analysis-worker/requirements.txt` installed. Installed users can point Soria at
+that runtime from Settings; source users can use `analysis-worker/.venv`.
 
 ## Local Release Build
 
@@ -73,6 +79,8 @@ Open Anyway, or build the app from source with Xcode.
 - Choose and add an open-source license before making the repository public.
 - Confirm `.env`, API keys, sample music paths, and local caches are not tracked.
 - Run `make release-dmg` and verify the DMG mounts and ZIP extracts.
+- Verify analysis runtime messaging in Settings, because the early DMG/ZIP does
+  not yet ship a portable Python venv.
 - Upload the DMG, ZIP, and matching `.sha256` checksums.
 - Keep the release marked as draft until the README and install warning are clear.
 
