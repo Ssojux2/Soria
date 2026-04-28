@@ -1,6 +1,6 @@
 numpy==1.26.4
 librosa==0.10.2.post1
 soundfile==0.12.1
-requests==2.33.0
+requests==2.33.1
 chromadb==0.5.11
 pytest==9.0.3
