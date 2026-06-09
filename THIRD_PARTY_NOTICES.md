@@ -23,14 +23,11 @@ The Python worker dependencies are declared in
 | `numpy` | `1.26.4` | BSD-style license with bundled component notices |
 | `librosa` | `0.10.2.post1` | ISC |
 | `soundfile` | `0.12.1` | BSD 3-Clause |
-| `requests` | `2.32.3` | Apache-2.0 |
-| `chromadb` | `0.5.11` | Apache Software License classifier |
-| `pytest` | `8.3.3` | MIT |
-| `torch` | `2.5.1` | BSD-3-Clause |
-| `transformers` | `4.46.3` | Apache 2.0 |
+| `requests` | `2.34.2` | Apache-2.0 |
+| `chromadb` | `1.5.9` | Apache Software License classifier |
+| `pytest` | `9.0.3` | MIT |
 
-`pytest` is used for tests. `torch` and `transformers` support optional CLAP
-embedding paths.
+`pytest` is used for tests.
 
 ## Release Artifacts
 
@@ -52,5 +49,5 @@ For a local worker virtual environment, inspect package license metadata with:
 
 ```bash
 analysis-worker/.venv/bin/python -m pip show \
-  numpy librosa soundfile requests chromadb pytest torch transformers
+  numpy librosa soundfile requests chromadb pytest
 ```
