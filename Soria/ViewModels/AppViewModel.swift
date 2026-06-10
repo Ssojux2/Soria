@@ -196,6 +196,23 @@ final class AppViewModel: ObservableObject {
         }
     }
     @Published var libraryStatusMessage: String = ""
+    @Published var isShowingFolderOrganizationSheet = false
+    @Published var folderOrganizationScope: FolderOrganizationScope = .selectedTracks {
+        didSet { resetFolderOrganizationPreviewForInputChange() }
+    }
+    @Published var folderOrganizationPreset: FolderOrganizationPreset = .energyMood {
+        didSet { resetFolderOrganizationPreviewForInputChange() }
+    }
+    @Published var folderOrganizationPrompt: String = "" {
+        didSet { resetFolderOrganizationPreviewForInputChange() }
+    }
+    @Published var folderOrganizationDestinationRoot: String = ""
+    @Published private(set) var folderOrganizationPlan: FolderOrganizationPlan?
+    @Published private(set) var folderOrganizationResult: FolderOrganizationResult?
+    @Published private(set) var folderOrganizationProgress: FolderOrganizationProgress?
+    @Published private(set) var isBuildingFolderOrganizationPlan = false
+    @Published private(set) var isApplyingFolderOrganizationPlan = false
+    @Published var folderOrganizationStatusMessage: String = ""
     @Published var exportMessage: String = ""
     @Published var exportWarnings: [String] = []
     @Published var exportDestinationDescription: String = ""
@@ -348,6 +365,17 @@ final class AppViewModel: ObservableObject {
                 return try await self.scanner.refreshTrack(at: url)
             }
     }()
+    private lazy var folderOrganizationService: FolderOrganizationService = FolderOrganizationService(
+        database: database
+    ) { [weak self] track, segments, trackEmbedding in
+        guard let self else { return }
+        let worker = await MainActor.run { self.worker }
+        try await worker.upsertTrackVectors(
+            track: track,
+            segments: segments,
+            trackEmbedding: trackEmbedding
+        )
+    }
     private lazy var librarySyncService: DJLibrarySyncService = DJLibrarySyncService(database: database) { [weak self] track in
         await self?.invalidateTrackVectors(for: track)
     }
@@ -926,6 +954,33 @@ final class AppViewModel: ObservableObject {
 
     var canOpenRecommendationSearchFromLibrary: Bool {
         selectionReadiness.hasSelection
+    }
+
+    var canOpenFolderOrganizationFromLibrary: Bool {
+        !tracks.isEmpty && !isApplyingFolderOrganizationPlan
+    }
+
+    var canBuildFolderOrganizationPlan: Bool {
+        !isBuildingFolderOrganizationPlan
+            && !isApplyingFolderOrganizationPlan
+            && !folderOrganizationTargetTracks().isEmpty
+            && !libraryRoots.isEmpty
+    }
+
+    var canApplyFolderOrganizationPlan: Bool {
+        guard let folderOrganizationPlan else { return false }
+        return !isApplyingFolderOrganizationPlan
+            && !isBuildingFolderOrganizationPlan
+            && folderOrganizationPlan.movableCount > 0
+    }
+
+    var folderOrganizationTargetCount: Int {
+        folderOrganizationTargetTracks().count
+    }
+
+    var folderOrganizationDestinationDescription: String {
+        let trimmed = folderOrganizationDestinationRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Use each track's Music Folder" : trimmed
     }
 
     var shouldShowLibraryPreviewStrip: Bool {
@@ -2593,6 +2648,132 @@ final class AppViewModel: ObservableObject {
                 await self?.completeFallbackScan(summary: summary ?? "Scanned Music Folders.")
             }
         }
+    }
+
+    func openFolderOrganizationSheet() {
+        folderOrganizationScope = selectedTrackIDs.isEmpty ? .visibleTracks : .selectedTracks
+        folderOrganizationPlan = nil
+        folderOrganizationResult = nil
+        folderOrganizationProgress = nil
+        folderOrganizationStatusMessage = folderOrganizationTargetTracks().isEmpty
+            ? "No tracks are available for organization in the current scope."
+            : ""
+        isShowingFolderOrganizationSheet = true
+    }
+
+    func dismissFolderOrganizationSheetIfPossible() {
+        guard !isApplyingFolderOrganizationPlan && !isBuildingFolderOrganizationPlan else { return }
+        isShowingFolderOrganizationSheet = false
+    }
+
+    func chooseFolderOrganizationDestinationRoot() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use Folder"
+        if panel.runModal() == .OK, let url = panel.url {
+            folderOrganizationDestinationRoot = TrackPathNormalizer.normalizedAbsolutePath(url)
+            folderOrganizationPlan = nil
+            folderOrganizationResult = nil
+        }
+    }
+
+    func clearFolderOrganizationDestinationRoot() {
+        folderOrganizationDestinationRoot = ""
+        folderOrganizationPlan = nil
+        folderOrganizationResult = nil
+    }
+
+    func buildFolderOrganizationPlan() {
+        guard !isBuildingFolderOrganizationPlan && !isApplyingFolderOrganizationPlan else { return }
+        let targetTracks = folderOrganizationTargetTracks()
+        guard !targetTracks.isEmpty else {
+            folderOrganizationStatusMessage = "No tracks are available for organization in the current scope."
+            folderOrganizationPlan = nil
+            return
+        }
+        guard !libraryRoots.isEmpty else {
+            folderOrganizationStatusMessage = "Choose a Music Folder before organizing files."
+            folderOrganizationPlan = nil
+            return
+        }
+
+        let intent = FolderOrganizationIntent(
+            scope: folderOrganizationScope,
+            preset: folderOrganizationPreset,
+            prompt: folderOrganizationPrompt,
+            destinationRoot: folderOrganizationDestinationRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? nil
+                : folderOrganizationDestinationRoot,
+            groupingRules: []
+        )
+        let roots = libraryRoots
+        let service = folderOrganizationService
+        isBuildingFolderOrganizationPlan = true
+        folderOrganizationStatusMessage = "Building organization preview..."
+        folderOrganizationResult = nil
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, service, intent, targetTracks, roots] in
+            let plan = service.generatePlan(
+                intent: intent,
+                tracks: targetTracks,
+                libraryRoots: roots
+            )
+            Task { @MainActor [weak self, plan] in
+                guard let self else { return }
+                self.folderOrganizationPlan = plan
+                self.folderOrganizationStatusMessage = "Preview ready: \(plan.movableCount) move(s), \(plan.skippedCount) skipped."
+                self.isBuildingFolderOrganizationPlan = false
+            }
+        }
+    }
+
+    func applyFolderOrganizationPlan() {
+        guard let plan = folderOrganizationPlan else { return }
+        guard !isApplyingFolderOrganizationPlan && !isBuildingFolderOrganizationPlan else { return }
+
+        isApplyingFolderOrganizationPlan = true
+        folderOrganizationResult = nil
+        folderOrganizationProgress = FolderOrganizationProgress(
+            completed: 0,
+            total: plan.moves.count,
+            currentFileName: nil,
+            message: "Starting file organization."
+        )
+        folderOrganizationStatusMessage = "Moving files..."
+
+        let service = folderOrganizationService
+        let progressHandler: FolderOrganizationService.ProgressHandler = { [weak self] progress in
+            Task { @MainActor [weak self, progress] in
+                self?.folderOrganizationProgress = progress
+            }
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, service, plan, progressHandler] in
+            Task {
+                let result = await service.apply(plan: plan, onProgress: progressHandler)
+                await MainActor.run { [weak self, result] in
+                    guard let self else { return }
+                    self.folderOrganizationResult = result
+                    self.folderOrganizationStatusMessage = result.summaryText
+                    self.isApplyingFolderOrganizationPlan = false
+                    self.folderOrganizationProgress = FolderOrganizationProgress(
+                        completed: plan.moves.count,
+                        total: plan.moves.count,
+                        currentFileName: nil,
+                        message: result.summaryText
+                    )
+                    Task { @MainActor [weak self] in
+                        await self?.refreshTracks()
+                    }
+                }
+            }
+        }
+    }
+
+    func folderOrganizationTargetCount(for scope: FolderOrganizationScope) -> Int {
+        folderOrganizationTargetTracks(for: scope).count
     }
 
     func preparationActionTitle(_ action: PreparationOverviewAction) -> String {
@@ -6655,6 +6836,27 @@ final class AppViewModel: ObservableObject {
         case .search, .recommendation:
             recommendationScopeFilter = filter
         }
+    }
+
+    private func folderOrganizationTargetTracks() -> [Track] {
+        folderOrganizationTargetTracks(for: folderOrganizationScope)
+    }
+
+    private func folderOrganizationTargetTracks(for scope: FolderOrganizationScope) -> [Track] {
+        switch scope {
+        case .selectedTracks:
+            return selectedTracks
+        case .visibleTracks:
+            return filteredTracks
+        }
+    }
+
+    private func resetFolderOrganizationPreviewForInputChange() {
+        guard !isBuildingFolderOrganizationPlan && !isApplyingFolderOrganizationPlan else { return }
+        folderOrganizationPlan = nil
+        folderOrganizationResult = nil
+        folderOrganizationProgress = nil
+        folderOrganizationStatusMessage = ""
     }
 
     private func reconcileLibrarySelectionToVisibleTracks() {

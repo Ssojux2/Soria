@@ -34,6 +34,12 @@ struct LibraryView: View {
         .onChange(of: isLibrarySearchFieldFocused) { _, isFocused in
             viewModel.setLibrarySearchFieldFocused(isFocused)
         }
+        .sheet(isPresented: $viewModel.isShowingFolderOrganizationSheet) {
+            FolderOrganizationSheet(viewModel: viewModel)
+                .interactiveDismissDisabled(
+                    viewModel.isBuildingFolderOrganizationPlan || viewModel.isApplyingFolderOrganizationPlan
+                )
+        }
     }
 
     private var libraryTracksTable: some View {
@@ -300,11 +306,13 @@ struct LibraryView: View {
             HStack(spacing: 8) {
                 analyzeSelectionButton
                 recommendationSearchButton
+                organizeFilesButton
             }
 
             VStack(alignment: .leading, spacing: 8) {
                 analyzeSelectionButton
                 recommendationSearchButton
+                organizeFilesButton
             }
         }
     }
@@ -325,6 +333,17 @@ struct LibraryView: View {
         .buttonStyle(.bordered)
         .disabled(!viewModel.canOpenRecommendationSearchFromLibrary)
         .accessibilityIdentifier("library-recommendation-search-button")
+    }
+
+    private var organizeFilesButton: some View {
+        Button {
+            viewModel.openFolderOrganizationSheet()
+        } label: {
+            Label("Organize Files...", systemImage: "folder.badge.gearshape")
+        }
+        .buttonStyle(.bordered)
+        .disabled(!viewModel.canOpenFolderOrganizationFromLibrary)
+        .accessibilityIdentifier("library-organize-files-button")
     }
 
     private var libraryPreviewStrip: some View {

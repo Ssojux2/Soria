@@ -76,6 +76,20 @@ final class LibraryDatabase {
         }
     }
 
+    func fetchTrack(id: UUID) throws -> Track? {
+        let sql = """
+        SELECT \(trackSelectColumns)
+        FROM tracks
+        WHERE id = ?
+        LIMIT 1;
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, index: 1, text: id.uuidString)
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+            return track(from: statement)
+        }
+    }
+
     func fetchTrack(matchingContentHash hash: String, requireLocalScan: Bool = false) throws -> Track? {
         let localPredicate = requireLocalScan ? "AND last_seen_in_local_scan_at IS NOT NULL" : ""
         let sql = """
@@ -153,6 +167,42 @@ final class LibraryDatabase {
                 throw DatabaseError.writeFailed
             }
         }
+    }
+
+    func updateTrackFileLocation(
+        trackID: UUID,
+        fileURL: URL,
+        modifiedTime: Date,
+        contentHash: String,
+        lastSeenInLocalScanAt: Date?
+    ) throws -> Track {
+        let normalizedURL = fileURL.standardizedFileURL
+        let normalizedPath = TrackPathNormalizer.normalizedAbsolutePath(normalizedURL)
+        let sql = """
+        UPDATE tracks
+        SET file_path = ?,
+            file_name = ?,
+            modified_time = ?,
+            content_hash = ?,
+            last_seen_in_local_scan_at = ?
+        WHERE id = ?;
+        """
+        try withStatement(sql) { statement in
+            bind(statement, index: 1, text: normalizedPath)
+            bind(statement, index: 2, text: normalizedURL.lastPathComponent)
+            bind(statement, index: 3, text: Self.iso8601.string(from: modifiedTime))
+            bind(statement, index: 4, text: contentHash)
+            bind(statement, index: 5, text: lastSeenInLocalScanAt.map { Self.iso8601.string(from: $0) })
+            bind(statement, index: 6, text: trackID.uuidString)
+            guard sqlite3_step(statement) == SQLITE_DONE, sqlite3_changes(db) == 1 else {
+                throw DatabaseError.writeFailed
+            }
+        }
+
+        guard let updatedTrack = try fetchTrack(id: trackID) else {
+            throw DatabaseError.writeFailed
+        }
+        return updatedTrack
     }
 
     func lookupTrack(path: String) throws -> Track? {
