@@ -3,4 +3,4 @@ librosa==0.10.2.post1
 soundfile==0.14.0
 requests==2.34.2
 chromadb==1.5.9
-pytest==9.0.3
+pytest==9.1.1
