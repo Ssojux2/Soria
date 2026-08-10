@@ -93,6 +93,8 @@ def _dispatch_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         return handle_embed_audio_segments(payload), 0
     if command == "build_query_embeddings":
         return handle_build_query_embeddings(payload), 0
+    if command == "embed_text_labels":
+        return handle_embed_text_labels(payload), 0
     if command == "search_tracks":
         return handle_search_tracks(payload), 0
     if command == "upsert_track_vectors":
@@ -274,6 +276,34 @@ def handle_build_query_embeddings(payload: dict[str, Any]) -> dict[str, Any]:
     query_embeddings = _search_query_embeddings(payload, profile, mode)
     return {
         "queryEmbeddings": query_embeddings,
+        "embeddingProfileID": profile["id"],
+    }
+
+
+def handle_embed_text_labels(payload: dict[str, Any]) -> dict[str, Any]:
+    profile = _resolve_embedding_profile(payload)
+    labels = _normalized_text_labels(payload.get("labels") or [])
+    if not labels:
+        return {
+            "labelEmbeddings": {},
+            "embeddingProfileID": profile["id"],
+        }
+
+    client = _build_embedding_client(payload, profile)
+    embeddings = client.embed_text_batch(labels)
+    output: dict[str, list[float]] = {}
+    for label, embedding in zip(labels, embeddings):
+        if embedding:
+            output[label] = _normalize_query_vector([float(value) for value in embedding])
+
+    if len(output) != len(labels):
+        detail = getattr(client, "_last_error", None)
+        if detail:
+            raise ValueError(f"Failed to embed one or more text labels. {detail}")
+        raise ValueError("Failed to embed one or more text labels.")
+
+    return {
+        "labelEmbeddings": output,
         "embeddingProfileID": profile["id"],
     }
 
@@ -562,6 +592,18 @@ def _normalize_query_vector(vector: list[float]) -> list[float]:
     if norm > 0:
         array = array / norm
     return [float(value) for value in array.tolist()]
+
+
+def _normalized_text_labels(labels: list[Any]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for label in labels:
+        normalized = str(label or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        output.append(normalized)
+    return output
 
 
 def _build_where(filters: dict[str, Any]) -> dict[str, Any] | None:

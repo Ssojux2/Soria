@@ -285,6 +285,63 @@ def test_build_query_embeddings_returns_profile_and_embeddings(monkeypatch: pyte
     }
 
 
+def test_embed_text_labels_returns_normalized_label_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeEmbeddingClient:
+        def embed_text_batch(self, labels: list[str]) -> list[list[float]]:
+            assert labels == ["house DJ track", "techno DJ track"]
+            return [[3.0, 4.0], [0.0, 2.0]]
+
+    monkeypatch.setattr(worker_main, "_build_embedding_client", lambda payload, profile: FakeEmbeddingClient())
+
+    result = worker_main.handle_embed_text_labels(
+        {
+            "command": "embed_text_labels",
+            "labels": [" house DJ track ", "", "techno DJ track", "house DJ track"],
+            "options": {"embeddingProfileID": "google/gemini-embedding-2-preview"},
+        }
+    )
+
+    assert result["embeddingProfileID"] == "google/gemini-embedding-2-preview"
+    assert result["labelEmbeddings"]["house DJ track"] == pytest.approx([0.6, 0.8])
+    assert result["labelEmbeddings"]["techno DJ track"] == pytest.approx([0.0, 1.0])
+
+
+def test_embed_text_labels_allows_empty_labels(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(worker_main, "_build_embedding_client", lambda payload, profile: pytest.fail("client unused"))
+
+    result = worker_main.handle_embed_text_labels(
+        {
+            "command": "embed_text_labels",
+            "labels": ["", "   "],
+            "options": {"embeddingProfileID": "google/gemini-embedding-2-preview"},
+        }
+    )
+
+    assert result == {
+        "labelEmbeddings": {},
+        "embeddingProfileID": "google/gemini-embedding-2-preview",
+    }
+
+
+def test_embed_text_labels_reports_embedding_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeEmbeddingClient:
+        _last_error = "Synthetic label failure"
+
+        def embed_text_batch(self, labels: list[str]) -> list[list[float] | None]:
+            return [[1.0, 0.0], None]
+
+    monkeypatch.setattr(worker_main, "_build_embedding_client", lambda payload, profile: FakeEmbeddingClient())
+
+    with pytest.raises(ValueError, match="Synthetic label failure"):
+        worker_main.handle_embed_text_labels(
+            {
+                "command": "embed_text_labels",
+                "labels": ["house DJ track", "techno DJ track"],
+                "options": {"embeddingProfileID": "google/gemini-embedding-2-preview"},
+            }
+        )
+
+
 def test_search_tracks_applies_deterministic_late_fusion(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _install_fake_chroma(monkeypatch)
 

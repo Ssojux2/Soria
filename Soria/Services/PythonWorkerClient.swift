@@ -58,6 +58,11 @@ struct WorkerQueryEmbeddingsResponse: Codable {
     let embeddingProfileID: String
 }
 
+struct WorkerTextLabelEmbeddingsResponse: Codable {
+    let labelEmbeddings: [String: [Double]]
+    let embeddingProfileID: String
+}
+
 struct WorkerValidationResponse: Codable {
     let ok: Bool
     let profileID: String
@@ -279,6 +284,15 @@ nonisolated final class PythonWorkerClient {
                     embedding: vector
                 )
             },
+            options: workerOptions()
+        )
+        return try await runGeneric(payload: payload, commandName: payload.command)
+    }
+
+    func embedTextLabels(_ labels: [String]) async throws -> WorkerTextLabelEmbeddingsResponse {
+        let payload = WorkerTextLabelsPayload(
+            command: "embed_text_labels",
+            labels: labels,
             options: workerOptions()
         )
         return try await runGeneric(payload: payload, commandName: payload.command)
@@ -1136,6 +1150,12 @@ private struct WorkerBuildQueryEmbeddingsPayload: Codable {
     let queryText: String?
     let queryTrackEmbedding: [Double]?
     let querySegments: [WorkerQuerySegment]
+    let options: WorkerOptionsPayload
+}
+
+private struct WorkerTextLabelsPayload: Codable {
+    let command: String
+    let labels: [String]
     let options: WorkerOptionsPayload
 }
 
