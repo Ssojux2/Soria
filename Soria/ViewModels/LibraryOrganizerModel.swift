@@ -30,6 +30,12 @@ final class LibraryOrganizerModel: ObservableObject {
         var hasDurableWriteAccess: @MainActor ([String]) -> Bool
         var addLibraryRoot: @MainActor (String) -> Void
         var onLibraryChanged: @MainActor () async -> Void
+        var loadCollections: @Sendable () throws -> [SoriaCollection]
+        var loadCollectionTrackIDs: @Sendable (UUID) throws -> [UUID]
+        var latestOrganizationDate: @Sendable () throws -> Date?
+        var tracksByID: @MainActor () -> [UUID: Track]
+        var runBatchExport: @MainActor ([BatchExportRequest], ExportTarget, URL?) throws -> BatchExportResult
+        var markCollectionExported: @Sendable (UUID) -> Void
     }
 
     @Published var scope: LibraryOrganizationScope = .visibleReadyTracks {
@@ -46,6 +52,11 @@ final class LibraryOrganizerModel: ObservableObject {
     @Published private(set) var isApplying = false
     @Published private(set) var statusMessage = ""
     @Published private(set) var warnings: [String] = []
+    @Published var batchExportTarget: ExportTarget = .seratoCrate
+    @Published private(set) var isExporting = false
+    @Published private(set) var exportMessage = ""
+    @Published private(set) var exportWarnings: [String] = []
+    @Published private(set) var exportableCollectionCount = 0
 
     private let dependencies: Dependencies
 
@@ -232,6 +243,107 @@ final class LibraryOrganizerModel: ObservableObject {
             excludedMoveIDs = []
 
             await dependencies.onLibraryChanged()
+        }
+    }
+
+    // MARK: - Batch export
+
+    var canExportCollections: Bool {
+        !isExporting && !isApplying && exportableCollectionCount > 0
+    }
+
+    func refreshExportableCollections() {
+        exportableCollectionCount = (try? collectionExportRequests().count) ?? 0
+    }
+
+    /// Sends every organized folder to Serato or rekordbox in one action.
+    ///
+    /// This is the step that makes organizing worth doing: without it a DJ has
+    /// forty new folders on disk and no way to see them in their DJ software.
+    func exportCollections(outputURL: URL? = nil) {
+        guard canExportCollections else { return }
+
+        let target = batchExportTarget
+        isExporting = true
+        exportMessage = "Exporting organized folders..."
+
+        Task {
+            defer { isExporting = false }
+
+            do {
+                let entries = try collectionExportRequests()
+                guard !entries.isEmpty else {
+                    exportMessage = "No organized folders with tracks to export yet."
+                    return
+                }
+
+                let result = try dependencies.runBatchExport(entries.map(\.request), target, outputURL)
+
+                for entry in entries where result.results[entry.request.playlistName] != nil {
+                    dependencies.markCollectionExported(entry.collectionID)
+                }
+
+                exportWarnings = result.warnings
+                let destinations = result.outputPaths.prefix(3).joined(separator: ", ")
+                exportMessage = result.outputPaths.isEmpty
+                    ? result.summaryMessage
+                    : "\(result.summaryMessage) \(destinations)"
+                if let firstFailure = result.failures.first {
+                    exportMessage += " \(firstFailure.key): \(firstFailure.value)"
+                }
+                refreshExportableCollections()
+            } catch {
+                exportWarnings = []
+                exportMessage = "Export failed: \(error.localizedDescription)"
+                AppLogger.shared.error("organizer_batch_export_failed error=\(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Turns the collection tree into one export request per leaf folder, named
+    /// with its full `/`-separated path so Serato nests crates and rekordbox
+    /// nests NODE folders.
+    private func collectionExportRequests() throws -> [(collectionID: UUID, request: BatchExportRequest)] {
+        let collections = try dependencies.loadCollections()
+        guard !collections.isEmpty else { return [] }
+
+        let byID = Dictionary(uniqueKeysWithValues: collections.map { ($0.id, $0) })
+        let tracksByID = dependencies.tracksByID()
+        var entries: [(collectionID: UUID, request: BatchExportRequest)] = []
+
+        // Group nodes exist only to nest; they hold no tracks of their own.
+        for collection in collections where collection.kind != .group {
+            let trackIDs = try dependencies.loadCollectionTrackIDs(collection.id)
+            let tracks = trackIDs.compactMap { tracksByID[$0] }
+            guard !tracks.isEmpty else { continue }
+
+            entries.append(
+                (
+                    collection.id,
+                    BatchExportRequest(
+                        playlistName: SoriaCollection.hierarchicalName(for: collection.id, in: byID),
+                        tracks: tracks
+                    )
+                )
+            )
+        }
+
+        return entries
+    }
+
+    /// Whether any organizing happened after the last export, which means the
+    /// vendor libraries still point at pre-move paths.
+    var hasStaleVendorExports: Bool {
+        guard let latestOrganization = (try? dependencies.latestOrganizationDate()) ?? nil else {
+            return false
+        }
+        guard let collections = try? dependencies.loadCollections(), !collections.isEmpty else {
+            return false
+        }
+        return collections.contains { collection in
+            guard collection.kind != .group else { return false }
+            guard let exportedAt = collection.lastExportedAt else { return true }
+            return exportedAt < latestOrganization
         }
     }
 

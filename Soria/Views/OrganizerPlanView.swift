@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Build, review, and apply a folder plan.
@@ -11,12 +12,114 @@ struct OrganizerPlanView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             controls
+            exportCard
             progressCard
             previewTable
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("organizer-plan-view")
+        .onAppear { model.refreshExportableCollections() }
+    }
+
+    /// Organized folders are only useful once they reach Serato or rekordbox, so
+    /// the handoff lives on the same screen rather than in the Exports pane.
+    @ViewBuilder
+    private var exportCard: some View {
+        if model.exportableCollectionCount > 0 {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Text("\(model.exportableCollectionCount) organized folders")
+                            .font(.subheadline.weight(.semibold))
+
+                        Picker("Target", selection: $model.batchExportTarget) {
+                            ForEach(ExportTarget.allCases) { target in
+                                Text(target.shortLabel).tag(target)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(maxWidth: 320)
+                        .disabled(model.isExporting)
+                        .accessibilityIdentifier("organizer-export-target-picker")
+
+                        Button("Export Organized Folders") {
+                            exportOrganizedFolders()
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!model.canExportCollections)
+                        .accessibilityIdentifier("organizer-export-button")
+
+                        if model.isExporting {
+                            ProgressView().controlSize(.small)
+                        }
+
+                        Spacer(minLength: 8)
+                    }
+
+                    Text(model.batchExportTarget.helperText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if model.hasStaleVendorExports {
+                        Label(
+                            "Files were moved since the last export. Serato crates and rekordbox playlists still point at the old paths until you export again.",
+                            systemImage: "exclamationmark.triangle"
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("organizer-stale-export-warning")
+                    }
+
+                    if !model.exportMessage.isEmpty {
+                        Text(model.exportMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("organizer-export-message")
+                    }
+
+                    ForEach(model.exportWarnings, id: \.self) { warning in
+                        Label(warning, systemImage: "exclamationmark.triangle")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    /// Serato writes straight into the detected `_Serato_/Subcrates`; the other
+    /// two targets need somewhere to put their files.
+    private func exportOrganizedFolders() {
+        guard model.batchExportTarget.requiresExplicitOutputDirectory else {
+            model.exportCollections()
+            return
+        }
+
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Export Here"
+        panel.message = model.batchExportTarget == .rekordboxLibraryXML
+            ? "Choose where to write the rekordbox library XML."
+            : "Choose where to write the playlist files."
+        panel.directoryURL = AppPaths.exportsDirectory
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        LibraryRootsStore.rememberAccess(to: url)
+
+        let outputURL = model.batchExportTarget == .rekordboxLibraryXML
+            ? url.appendingPathComponent("Soria Organized.xml")
+            : url
+        model.exportCollections(outputURL: outputURL)
     }
 
     private var controls: some View {

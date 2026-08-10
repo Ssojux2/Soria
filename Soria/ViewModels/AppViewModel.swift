@@ -1205,6 +1205,31 @@ final class AppViewModel: ObservableObject {
             onLibraryChanged: { [weak self] in
                 await self?.refreshTracks()
                 self?.refreshQuarantineRows()
+                self?.organizer.refreshExportableCollections()
+            },
+            loadCollections: { try database.fetchCollections() },
+            loadCollectionTrackIDs: { try database.fetchCollectionTrackIDs(collectionID: $0) },
+            latestOrganizationDate: { try database.fetchOrganizationBatches(limit: 1).first?.createdAt },
+            tracksByID: { [unowned self] in
+                Dictionary(uniqueKeysWithValues: self.tracks.map { ($0.id, $0) })
+            },
+            runBatchExport: { [unowned self] requests, target, outputURL in
+                try self.exporter.exportMany(
+                    requests,
+                    target: target,
+                    outputDirectory: outputURL,
+                    librarySources: self.librarySources,
+                    detectedVendorTargets: self.detectedVendorTargets
+                )
+            },
+            markCollectionExported: { collectionID in
+                do {
+                    try database.markCollectionExported(id: collectionID)
+                } catch {
+                    AppLogger.shared.error(
+                        "mark_collection_exported_failed id=\(collectionID) error=\(error.localizedDescription)"
+                    )
+                }
             }
         )
     }

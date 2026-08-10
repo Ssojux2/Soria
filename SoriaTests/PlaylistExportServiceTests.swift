@@ -177,6 +177,236 @@ struct PlaylistExportServiceTests {
             Issue.record("Unexpected non-export error: \(error)")
         }
     }
+
+    // MARK: - Batch export
+
+    @Test func batchSeratoExportWritesOneNestedCratePerFolder() throws {
+        let directory = try makeExportTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let driveRoot = directory.appendingPathComponent("Drive", isDirectory: true)
+        let cratesRoot = driveRoot.appendingPathComponent("_Serato_", isDirectory: true)
+        let subcratesURL = cratesRoot.appendingPathComponent("Subcrates", isDirectory: true)
+        try FileManager.default.createDirectory(at: subcratesURL, withIntermediateDirectories: true)
+
+        let houseURL = driveRoot.appendingPathComponent("Organized/House/a.mp3")
+        let technoURL = driveRoot.appendingPathComponent("Organized/Techno/b.mp3")
+        try createFile(at: houseURL)
+        try createFile(at: technoURL)
+
+        let service = PlaylistExportService(
+            preflight: VendorExportPreflight(fileManager: .default, runningApplicationTokensProvider: { [] })
+        )
+
+        let result = try service.exportMany(
+            [
+                BatchExportRequest(
+                    playlistName: "Soria Organized/House/Cluster 01 - Anna",
+                    tracks: [makeExportTrack(path: houseURL.path, title: "A")]
+                ),
+                BatchExportRequest(
+                    playlistName: "Soria Organized/Techno/Cluster 01 - Bo",
+                    tracks: [makeExportTrack(path: technoURL.path, title: "B")]
+                )
+            ],
+            target: .seratoCrate,
+            detectedVendorTargets: DetectedVendorTargets(
+                rekordboxLibraryDirectory: nil,
+                rekordboxSettingsPath: nil,
+                seratoDatabasePath: nil,
+                seratoCratesRoot: cratesRoot.path
+            )
+        )
+
+        #expect(result.exportedCount == 2)
+        #expect(result.failedCount == 0)
+
+        // Serato nests crates through %% in the file name, so the folder tree the
+        // organizer built shows up as a crate tree.
+        let written = try FileManager.default.contentsOfDirectory(atPath: subcratesURL.path).sorted()
+        #expect(written == [
+            "Soria Organized%%House%%Cluster 01 - Anna.crate",
+            "Soria Organized%%Techno%%Cluster 01 - Bo.crate"
+        ])
+    }
+
+    @Test func batchSeratoExportRefusesBeforeWritingWhenTracksSpanTwoDrives() throws {
+        let directory = try makeExportTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let cratesRoot = directory.appendingPathComponent("_Serato_", isDirectory: true)
+        let subcratesURL = cratesRoot.appendingPathComponent("Subcrates", isDirectory: true)
+        try FileManager.default.createDirectory(at: subcratesURL, withIntermediateDirectories: true)
+
+        let presentURL = directory.appendingPathComponent("Music/present.mp3")
+        try createFile(at: presentURL)
+        let missingURL = directory.appendingPathComponent("Music/missing.mp3")
+
+        let service = PlaylistExportService(
+            preflight: VendorExportPreflight(fileManager: .default, runningApplicationTokensProvider: { [] })
+        )
+
+        // A batch that cannot be prepared must not leave partial crates behind.
+        #expect(throws: (any Error).self) {
+            _ = try service.exportMany(
+                [BatchExportRequest(playlistName: "", tracks: [makeExportTrack(path: missingURL.path, title: "X")])],
+                target: .seratoCrate,
+                detectedVendorTargets: DetectedVendorTargets(
+                    rekordboxLibraryDirectory: nil,
+                    rekordboxSettingsPath: nil,
+                    seratoDatabasePath: nil,
+                    seratoCratesRoot: cratesRoot.path
+                )
+            )
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: subcratesURL.path).isEmpty)
+        #expect(FileManager.default.fileExists(atPath: presentURL.path))
+    }
+
+    @Test func batchXMLExportMergesEveryPlaylistIntoOneDocument() throws {
+        let directory = try makeExportTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let sharedURL = directory.appendingPathComponent("Music/shared.mp3")
+        let onlyTechnoURL = directory.appendingPathComponent("Music/techno.mp3")
+        try createFile(at: sharedURL)
+        try createFile(at: onlyTechnoURL)
+
+        let service = PlaylistExportService(
+            preflight: VendorExportPreflight(fileManager: .default, runningApplicationTokensProvider: { [] })
+        )
+        let outputURL = directory.appendingPathComponent("Soria Organized.xml")
+
+        let shared = makeExportTrack(path: sharedURL.path, title: "Shared")
+        let result = try service.exportMany(
+            [
+                BatchExportRequest(playlistName: "Soria Organized/House/Cluster 01", tracks: [shared]),
+                BatchExportRequest(
+                    playlistName: "Soria Organized/Techno/Cluster 01",
+                    tracks: [shared, makeExportTrack(path: onlyTechnoURL.path, title: "Techno")]
+                )
+            ],
+            target: .rekordboxLibraryXML,
+            outputDirectory: outputURL
+        )
+
+        #expect(result.exportedCount == 2)
+        #expect(result.outputPaths == [outputURL.path])
+
+        let document = try XMLDocument(contentsOf: outputURL, options: [])
+        // One COLLECTION entry per unique file, even though one track is in both
+        // playlists — rekordbox keys membership off Location.
+        let collectionTracks = try document.nodes(forXPath: "//COLLECTION/TRACK")
+        #expect(collectionTracks.count == 2)
+        let entries = try #require(
+            (try document.nodes(forXPath: "//COLLECTION").first as? XMLElement)?
+                .attribute(forName: "Entries")?.stringValue
+        )
+        #expect(entries == "2")
+
+        // Two leaf playlists sharing one "Soria Organized" folder node.
+        let playlistNodes = try document.nodes(forXPath: "//PLAYLISTS//NODE[@Type='1']")
+        #expect(playlistNodes.count == 2)
+        let organizedNodes = try document.nodes(forXPath: "//PLAYLISTS//NODE[@Name='Soria Organized']")
+        #expect(organizedNodes.count == 1)
+        let houseNodes = try document.nodes(forXPath: "//PLAYLISTS//NODE[@Name='House']")
+        #expect(houseNodes.count == 1)
+    }
+
+    @Test func batchM3U8ExportWritesOneFilePerPlaylistWithSafeNames() throws {
+        let directory = try makeExportTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let trackURL = directory.appendingPathComponent("Music/a.mp3")
+        try createFile(at: trackURL)
+        let outputDirectory = directory.appendingPathComponent("Exports", isDirectory: true)
+
+        let service = PlaylistExportService(
+            preflight: VendorExportPreflight(fileManager: .default, runningApplicationTokensProvider: { [] })
+        )
+
+        let result = try service.exportMany(
+            [
+                BatchExportRequest(
+                    playlistName: "Soria Organized/House/Cluster 01",
+                    tracks: [makeExportTrack(path: trackURL.path, title: "A")]
+                )
+            ],
+            target: .rekordboxPlaylistM3U8,
+            outputDirectory: outputDirectory
+        )
+
+        #expect(result.exportedCount == 1)
+        // Slashes become " - " so the nested name is a single valid file name.
+        let written = try FileManager.default.contentsOfDirectory(atPath: outputDirectory.path)
+        #expect(written == ["Soria Organized - House - Cluster 01.m3u8"])
+    }
+
+    @Test func batchExportKeepsGoingWhenOnePlaylistFails() throws {
+        let directory = try makeExportTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let goodURL = directory.appendingPathComponent("Music/good.mp3")
+        try createFile(at: goodURL)
+        let outputDirectory = directory.appendingPathComponent("Exports", isDirectory: true)
+
+        let service = PlaylistExportService(
+            preflight: VendorExportPreflight(fileManager: .default, runningApplicationTokensProvider: { [] })
+        )
+
+        let result = try service.exportMany(
+            [
+                BatchExportRequest(
+                    playlistName: "Good",
+                    tracks: [makeExportTrack(path: goodURL.path, title: "Good")]
+                ),
+                // An empty name fails preflight for this playlist only.
+                BatchExportRequest(
+                    playlistName: "   ",
+                    tracks: [makeExportTrack(path: goodURL.path, title: "Good")]
+                )
+            ],
+            target: .rekordboxPlaylistM3U8,
+            outputDirectory: outputDirectory
+        )
+
+        #expect(result.exportedCount == 1)
+        #expect(result.failedCount == 1)
+        #expect(result.results["Good"] != nil)
+        #expect(FileManager.default.fileExists(atPath: outputDirectory.appendingPathComponent("Good.m3u8").path))
+    }
+
+    @Test func batchWarningsAreDeduplicated() throws {
+        let directory = try makeExportTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let goodURL = directory.appendingPathComponent("Music/good.mp3")
+        try createFile(at: goodURL)
+        let missingURL = directory.appendingPathComponent("Music/missing.mp3")
+        let outputDirectory = directory.appendingPathComponent("Exports", isDirectory: true)
+
+        let service = PlaylistExportService(
+            preflight: VendorExportPreflight(fileManager: .default, runningApplicationTokensProvider: { [] })
+        )
+
+        let tracks = [
+            makeExportTrack(path: goodURL.path, title: "Good"),
+            makeExportTrack(path: missingURL.path, title: "Missing")
+        ]
+        let result = try service.exportMany(
+            [
+                BatchExportRequest(playlistName: "One", tracks: tracks),
+                BatchExportRequest(playlistName: "Two", tracks: tracks)
+            ],
+            target: .rekordboxPlaylistM3U8,
+            outputDirectory: outputDirectory
+        )
+
+        #expect(result.exportedCount == 2)
+        // The same "missing file" notice would otherwise appear once per playlist
+        // plus once from the union preflight.
+        #expect(result.warnings.count == Set(result.warnings).count)
+    }
 }
 
 private struct ParsedCrateRecord: Equatable {

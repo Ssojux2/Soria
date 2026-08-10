@@ -250,9 +250,217 @@ final class PlaylistExportService {
         }
     }
 
+    // MARK: - Batch export
+
+    /// Exports many playlists in one action.
+    ///
+    /// This is what turns a folder of organized clusters into a usable Serato or
+    /// rekordbox library: N crates, N m3u8 files, or one XML containing the whole
+    /// tree. Failures are per-playlist so one bad crate does not abort the rest.
+    ///
+    /// - Throws: `multipleSeratoRoots` or `seratoCratesRootUnavailable` up front,
+    ///   before anything is written. Discovering mid-batch that crate 20 of 40
+    ///   belongs on a different drive would leave a half-exported library.
+    func exportMany(
+        _ requests: [BatchExportRequest],
+        target: ExportTarget,
+        outputDirectory: URL? = nil,
+        librarySources: [LibrarySourceRecord] = [],
+        detectedVendorTargets: DetectedVendorTargets? = nil
+    ) throws -> BatchExportResult {
+        let nonEmptyRequests = requests.filter { !$0.tracks.isEmpty }
+        guard !nonEmptyRequests.isEmpty else {
+            throw PlaylistExportError.noTracksToExport
+        }
+
+        // One preflight over the union settles the Serato root, and surfaces
+        // missing/duplicate/invalid files once instead of per playlist.
+        let unionPreflight = try preflight.prepare(
+            playlistName: nonEmptyRequests[0].playlistName,
+            tracks: nonEmptyRequests.flatMap(\.tracks),
+            target: target,
+            librarySources: librarySources,
+            detectedTargetsOverride: detectedVendorTargets
+        )
+
+        switch target {
+        case .seratoCrate:
+            guard let cratesRoot = unionPreflight.seratoCratesRoot else {
+                throw PlaylistExportError.seratoCratesRootUnavailable
+            }
+            return exportEachPlaylist(nonEmptyRequests, warnings: unionPreflight.warnings) { request in
+                let subcratesURL = cratesRoot.appendingPathComponent("Subcrates", isDirectory: true)
+                let crateURL = subcratesURL.appendingPathComponent(
+                    VendorPlaylistNaming.seratoCrateFileName(for: request.playlistName)
+                )
+                return try self.export(
+                    playlistName: request.playlistName,
+                    tracks: request.tracks,
+                    target: target,
+                    outputURL: crateURL,
+                    librarySources: librarySources,
+                    detectedVendorTargets: detectedVendorTargets
+                )
+            }
+
+        case .rekordboxPlaylistM3U8:
+            guard let outputDirectory else {
+                throw PlaylistExportError.missingOutputURL
+            }
+            try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+            return exportEachPlaylist(nonEmptyRequests, warnings: unionPreflight.warnings) { request in
+                let baseName = VendorPlaylistNaming.fileSystemSafeBaseName(for: request.playlistName)
+                let outputURL = outputDirectory
+                    .appendingPathComponent(baseName)
+                    .appendingPathExtension(target.defaultFileExtension)
+                return try self.export(
+                    playlistName: request.playlistName,
+                    tracks: request.tracks,
+                    target: target,
+                    outputURL: outputURL,
+                    librarySources: librarySources,
+                    detectedVendorTargets: detectedVendorTargets
+                )
+            }
+
+        case .rekordboxLibraryXML:
+            // rekordbox imports one XML at a time, so the whole tree is one file.
+            guard let outputDirectory else {
+                throw PlaylistExportError.missingOutputURL
+            }
+            return try exportSingleXML(
+                nonEmptyRequests,
+                outputURL: outputDirectory,
+                unionWarnings: unionPreflight.warnings,
+                librarySources: librarySources,
+                detectedVendorTargets: detectedVendorTargets
+            )
+        }
+    }
+
+    private func exportEachPlaylist(
+        _ requests: [BatchExportRequest],
+        warnings: [String],
+        write: (BatchExportRequest) throws -> ExportJobResult
+    ) -> BatchExportResult {
+        var results: [String: ExportJobResult] = [:]
+        var failures: [String: String] = [:]
+        var collected = warnings
+
+        for request in requests {
+            do {
+                let result = try write(request)
+                results[request.playlistName] = result
+                collected.append(contentsOf: result.warnings)
+            } catch {
+                failures[request.playlistName] = error.localizedDescription
+                AppLogger.shared.error(
+                    "batch_export_failed playlist=\(request.playlistName) error=\(error.localizedDescription)"
+                )
+            }
+        }
+
+        return BatchExportResult(
+            results: results,
+            failures: failures,
+            warnings: dedupedWarnings(collected)
+        )
+    }
+
+    private func exportSingleXML(
+        _ requests: [BatchExportRequest],
+        outputURL: URL,
+        unionWarnings: [String],
+        librarySources: [LibrarySourceRecord],
+        detectedVendorTargets: DetectedVendorTargets?
+    ) throws -> BatchExportResult {
+        var playlists: [RekordboxXMLPlaylist] = []
+        var failures: [String: String] = [:]
+        var collected = unionWarnings
+
+        for request in requests {
+            do {
+                // Reuse the single-playlist preflight for per-playlist name
+                // validation and file filtering, then keep only its tracks.
+                let prepared = try preflight.prepare(
+                    playlistName: request.playlistName,
+                    tracks: request.tracks,
+                    target: .rekordboxLibraryXML,
+                    librarySources: librarySources,
+                    detectedTargetsOverride: detectedVendorTargets
+                )
+                playlists.append(
+                    RekordboxXMLPlaylist(name: prepared.playlistName, tracks: prepared.tracks)
+                )
+                collected.append(contentsOf: prepared.warnings)
+            } catch {
+                failures[request.playlistName] = error.localizedDescription
+            }
+        }
+
+        guard !playlists.isEmpty else {
+            throw PlaylistExportError.noValidTracksToExport
+        }
+
+        let resolvedURL = resolvedOutputURL(outputURL, defaultExtension: ExportTarget.rekordboxLibraryXML.defaultFileExtension)
+        try fileManager.createDirectory(
+            at: resolvedURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let writtenURL = try rekordboxXMLWriter.write(playlists: playlists, to: resolvedURL)
+
+        let result = ExportJobResult(
+            outputPaths: [writtenURL.path],
+            message: "rekordbox XML export complete (\(playlists.count) playlists)",
+            destinationDescription: "Select this XML file from rekordbox Preferences > Bridge > Imported Library.",
+            warnings: dedupedWarnings(collected)
+        )
+
+        return BatchExportResult(
+            results: Dictionary(uniqueKeysWithValues: playlists.map { ($0.name, result) }),
+            failures: failures,
+            warnings: dedupedWarnings(collected)
+        )
+    }
+
+    /// Batch warnings repeat heavily — the same "Serato is running" notice would
+    /// otherwise appear once per playlist.
+    private func dedupedWarnings(_ warnings: [String]) -> [String] {
+        var seen = Set<String>()
+        return warnings.filter { seen.insert($0).inserted }
+    }
+
     private func resolvedOutputURL(_ outputURL: URL, defaultExtension: String) -> URL {
         let standardizedURL = outputURL.standardizedFileURL
         guard standardizedURL.pathExtension.isEmpty else { return standardizedURL }
         return standardizedURL.appendingPathExtension(defaultExtension)
+    }
+}
+
+/// One playlist in a batch export. `playlistName` may be `/`-separated to nest it
+/// under folders (rekordbox NODE tree) or crate levels (Serato `%%` naming).
+struct BatchExportRequest {
+    let playlistName: String
+    let tracks: [Track]
+}
+
+struct BatchExportResult {
+    let results: [String: ExportJobResult]
+    let failures: [String: String]
+    let warnings: [String]
+
+    var exportedCount: Int { results.count }
+    var failedCount: Int { failures.count }
+    /// Distinct files written. Deduplicated because the XML target maps every
+    /// playlist onto one shared result, so a flat map would report the single
+    /// document once per playlist.
+    var outputPaths: [String] { Array(Set(results.values.flatMap(\.outputPaths))).sorted() }
+
+    var summaryMessage: String {
+        var segments = ["Exported \(exportedCount) playlist\(exportedCount == 1 ? "" : "s")."]
+        if failedCount > 0 {
+            segments.append("\(failedCount) failed.")
+        }
+        return segments.joined(separator: " ")
     }
 }
