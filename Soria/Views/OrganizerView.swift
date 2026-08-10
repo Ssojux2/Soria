@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Home for organizing the local library: building a folder plan, and reviewing
-/// what was set aside in the Soria Trash.
+/// Home for organizing the local library: building a folder plan, seeing the library
+/// as a similarity map, and reviewing what was set aside in the Soria Trash.
 ///
 /// A pane rather than a sheet because the workflow is multi-step — scope, preview,
 /// per-move opt-out, apply, review, export — and needs room for a long table.
@@ -24,6 +24,8 @@ struct OrganizerView: View {
             switch viewModel.organizerMode {
             case .plan:
                 OrganizerPlanView(model: viewModel.organizer)
+            case .map:
+                TrackMapView(model: viewModel.trackMap)
             case .quarantine:
                 QuarantineReviewView(viewModel: viewModel)
             }

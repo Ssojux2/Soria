@@ -243,7 +243,15 @@ See [docs/RELEASING.md](docs/RELEASING.md) for the GitHub Releases workflow.
     `.m3u8` per folder. Because organizing moves files, existing crates and
     playlists point at the old paths until you re-export.
 
-15. **Check logs when needed.** If analysis fails, inspect Soria logs and worker
+15. **Compare tracks on the map.** Open **Organizer → Map** to see every prepared
+    track as a dot, placed so similar-sounding tracks sit close together. Colour
+    the dots by genre, by the Soria folder they already belong to, or by BPM band
+    to check whether a grouping really holds together. Click two dots to compare
+    them side by side, drag a box to select a region, then either **Create Folder
+    from Selection** (groups them for export without moving anything) or **Send
+    Selection to Plan** (hands them to step 13, where files do move).
+
+16. **Check logs when needed.** If analysis fails, inspect Soria logs and worker
     stderr. Most failures are missing Python packages, missing API keys, or audio
     files the local decoder cannot read.
 
@@ -302,6 +310,13 @@ not available in every sandboxed environment.
   databases in place.
 - Soria Trash is a Soria-managed folder, not the system Trash, so it does not
   free disk space until you choose **Delete Permanently**.
+- The similarity map shows only prepared tracks, and flattening a 3072-dimension
+  embedding onto two axes keeps a minority of the detail — about 19% on a
+  1,780-track library. Soria prints the exact figure on the map and warns when it
+  is low, so treat closeness as a strong hint and confirm with the two-track
+  comparison.
+- Folders created from a map selection group tracks for export; they do not move
+  any files.
 - Genre detection compares text labels against audio embeddings, which is only
   well-defined in a shared text/audio space. Plans where one folder swallows
   most of the library carry a low-confidence warning.
@@ -568,7 +583,15 @@ GitHub Releases workflow는 [docs/RELEASING.md](docs/RELEASING.md)를 참고하�
     있습니다. 정리는 파일을 이동하므로, 다시 내보내기 전까지 기존 크레이트와
     플레이리스트는 옛 경로를 가리킵니다.
 
-15. **필요하면 로그를 확인합니다.** 분석이 실패하면 Soria log와 worker stderr를
+15. **지도에서 곡을 비교합니다.** **Organizer → Map**을 열면 준비된 트랙이 점
+    하나씩으로 표시되고, 비슷하게 들리는 곡일수록 가까이 배치됩니다. 점 색깔을
+    장르 · 이미 속한 Soria 폴더 · BPM 구간 중에서 골라, 묶음이 실제로 뭉쳐 있는지
+    눈으로 확인할 수 있습니다. 점 두 개를 고르면 나란히 비교하고, 드래그로 영역을
+    선택한 뒤 **Create Folder from Selection**(파일을 옮기지 않고 내보내기용으로
+    묶기) 또는 **Send Selection to Plan**(13단계로 넘겨 실제로 파일 이동)을
+    누릅니다.
+
+16. **필요하면 로그를 확인합니다.** 분석이 실패하면 Soria log와 worker stderr를
     확인합니다. 대부분의 실패는 누락된 Python package, 누락된 API key, 또는 local
     decoder가 읽을 수 없는 오디오 파일 때문입니다.
 
@@ -625,6 +648,11 @@ service가 필요할 수 있습니다.
   vendor sync에서 재매칭하지만, vendor database를 직접 고쳐 쓰지는 않습니다.
 - Soria Trash는 시스템 휴지통이 아니라 Soria가 관리하는 폴더이므로, **Delete
   Permanently**를 누르기 전까지 디스크 용량은 확보되지 않습니다.
+- 유사도 지도에는 준비된 트랙만 표시되며, 3072차원 임베딩을 2개 축으로 누르면
+  세부 정보의 일부만 남습니다(1,780곡 라이브러리 기준 약 19%). Soria는 그 수치를
+  지도에 그대로 표시하고 낮으면 경고하므로, 가까움은 강한 힌트로만 받아들이고 두
+  곡 비교로 확인하세요.
+- 지도에서 만든 폴더는 내보내기용으로 트랙을 묶을 뿐, 파일을 옮기지 않습니다.
 - 장르 판별은 텍스트 라벨과 오디오 임베딩을 비교하는데, 이는 텍스트/오디오가
   공유하는 임베딩 공간에서만 잘 정의됩니다. 한 폴더가 라이브러리 대부분을
   가져가는 플랜에는 저신뢰 경고가 붙습니다.
@@ -885,7 +913,14 @@ GitHub Releases workflowについては[docs/RELEASING.md](docs/RELEASING.md)を
     全体を含むrekordbox XML 1つ、フォルダごとの`.m3u8`のいずれかを選べます。整理は
     ファイルを移動するため、再書き出しまで既存のcrateとplaylistは旧パスを指します。
 
-15. **必要に応じてログを確認します。** 解析が失敗した場合は、Soria logとworker
+15. **マップで曲を比較します。** **Organizer > Map** を開くと、準備済みトラックが
+    点として表示され、似た響きの曲ほど近くに配置されます。点の色をジャンル・すでに
+    所属するSoriaフォルダ・BPM帯から選べるので、まとまりが実際に成立しているかを
+    目で確認できます。点を2つ選ぶと並べて比較でき、ドラッグで範囲を選んでから
+    **Create Folder from Selection**（ファイルを移動せず書き出し用にまとめる）か
+    **Send Selection to Plan**（13番へ渡して実際にファイルを移動）を押します。
+
+16. **必要に応じてログを確認します。** 解析が失敗した場合は、Soria logとworker
     stderrを確認します。多くの失敗は、Python packageの不足、API keyの不足、または
     local decoderが読めないオーディオファイルが原因です。
 
@@ -942,6 +977,12 @@ environmentでは利用できないlocal system servicesを必要とする場合
   ますが、vendor databaseを直接書き換えることはありません。
 - Soria Trashはシステムのゴミ箱ではなくSoriaが管理するフォルダなので、**Delete
   Permanently** を押すまでディスク容量は解放されません。
+- 類似度マップに表示されるのは準備済みトラックだけで、3072次元の埋め込みを2軸に
+  圧縮すると細部の一部しか残りません(1,780曲のライブラリで約19%)。Soriaはその値を
+  マップ上に明示し、低い場合は警告するので、近さは強いヒントとして扱い、2曲比較で
+  確認してください。
+- マップの選択から作成したフォルダは書き出し用にトラックをまとめるだけで、ファイル
+  は移動しません。
 - ジャンル判定はテキストラベルとオーディオ埋め込みを比較しますが、これはテキストと
   オーディオが共有する埋め込み空間でのみ意味を持ちます。1つのフォルダがライブラリ
   の大半を占めるプランには低信頼の警告が付きます。

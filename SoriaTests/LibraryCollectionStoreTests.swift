@@ -40,6 +40,33 @@ struct LibraryCollectionStoreTests {
     }
 
     @Test
+    func mapSelectionCollectionsRoundTripWithoutAFolderPath() throws {
+        // Groups lassoed on the similarity map have no folder on disk — the map never
+        // moves files — so the kind has to survive a round trip with a nil path.
+        let directory = try makeCollectionTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try LibraryDatabase(databaseURL: directory.appendingPathComponent("library.sqlite"))
+
+        let trackA = try insertTrack(into: database, path: directory.appendingPathComponent("a.mp3").path)
+        let trackB = try insertTrack(into: database, path: directory.appendingPathComponent("b.mp3").path)
+
+        let collection = SoriaCollection(
+            name: "Late Night Corner",
+            kind: .mapSelection,
+            origin: .user
+        )
+        try database.upsertCollection(collection)
+        try database.replaceCollectionTracks(collectionID: collection.id, trackIDs: [trackA.id, trackB.id])
+
+        let stored = try #require(try database.fetchCollections().first)
+        #expect(stored.kind == .mapSelection)
+        #expect(stored.origin == .user)
+        #expect(stored.folderPath == nil)
+        #expect(stored.name == "Late Night Corner")
+        #expect(try database.fetchCollectionTrackIDs(collectionID: collection.id) == [trackA.id, trackB.id])
+    }
+
+    @Test
     func collectionUpsertUpdatesInPlaceAndPreservesCreatedAt() throws {
         let directory = try makeCollectionTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

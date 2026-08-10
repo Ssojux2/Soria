@@ -18,6 +18,9 @@ struct SoriaCollection: Identifiable, Codable, Hashable {
         case promptFolder = "prompt_folder"
         /// A container node used only to nest other collections.
         case group = "group"
+        /// A grouping the user lassoed on the similarity map. Has no folder on disk:
+        /// the map never moves files, it only records which tracks belong together.
+        case mapSelection = "map_selection"
     }
 
     enum Origin: String, Codable, CaseIterable {

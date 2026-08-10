@@ -846,6 +846,85 @@ final class LibraryDatabase {
         }
     }
 
+    /// Loads every stored track embedding in one query.
+    ///
+    /// `fetchTrackEmbedding` is fine for a single track, but the callers that need
+    /// hundreds or thousands of vectors currently loop it, which costs one prepared
+    /// statement per track. The similarity map needs the whole library at once, so
+    /// it reads the column in a single scan instead. Pass `nil` for every track.
+    func fetchTrackEmbeddings(trackIDs: Set<UUID>? = nil) throws -> [UUID: [Double]] {
+        if let trackIDs, trackIDs.isEmpty { return [:] }
+
+        let sql = """
+        SELECT id, track_embedding_json
+        FROM tracks
+        WHERE track_embedding_json IS NOT NULL AND track_embedding_json != '';
+        """
+        return try withStatement(sql) { statement in
+            var output: [UUID: [Double]] = [:]
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let idText = sqliteString(statement, index: 0),
+                    let trackID = UUID(uuidString: idText)
+                else { continue }
+                if let trackIDs, !trackIDs.contains(trackID) { continue }
+                guard let vector = optionalDoubles(from: sqliteString(statement, index: 1)) else { continue }
+                output[trackID] = vector
+            }
+            return output
+        }
+    }
+
+    /// Loads the scalar audio features the map plots on its custom axes.
+    ///
+    /// Pulls the individual numbers out with SQLite's JSON1 functions rather than
+    /// decoding `TrackAnalysisSummary` in Swift. That is not a micro-optimization:
+    /// each summary also embeds the track vector, all three segment vectors, and the
+    /// waveform, which comes to roughly 450 MB across a few thousand tracks. Decoding
+    /// that to read three floats takes over ten seconds, while `json_extract` parses
+    /// in C and returns only the scalars in a fraction of one.
+    func fetchMapFeatureRows(trackIDs: Set<UUID>? = nil) throws -> [UUID: TrackMapFeatureRow] {
+        if let trackIDs, trackIDs.isEmpty { return [:] }
+
+        let sql = """
+        SELECT
+            id,
+            json_extract(analysis_summary_json, '$.brightness'),
+            json_extract(analysis_summary_json, '$.onsetDensity'),
+            json_extract(analysis_summary_json, '$.estimatedBPM'),
+            (SELECT AVG(value) FROM json_each(t.analysis_summary_json, '$.energyArc')),
+            duration,
+            analyzed_at,
+            bpm
+        FROM tracks t
+        WHERE analysis_summary_json IS NOT NULL AND analysis_summary_json != '';
+        """
+        return try withStatement(sql) { statement in
+            var output: [UUID: TrackMapFeatureRow] = [:]
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let idText = sqliteString(statement, index: 0),
+                    let trackID = UUID(uuidString: idText)
+                else { continue }
+                if let trackIDs, !trackIDs.contains(trackID) { continue }
+
+                let analyzedAt = sqliteString(statement, index: 6).flatMap { Self.iso8601.date(from: $0) }
+
+                output[trackID] = TrackMapFeatureRow(
+                    trackID: trackID,
+                    // Analysis-derived tempo first, falling back to the tag value.
+                    bpm: sqliteOptionalDouble(statement, index: 3) ?? sqliteOptionalDouble(statement, index: 7),
+                    durationSec: sqlite3_column_double(statement, 5),
+                    brightness: sqliteOptionalDouble(statement, index: 1),
+                    onsetDensity: sqliteOptionalDouble(statement, index: 2),
+                    energy: sqliteOptionalDouble(statement, index: 4),
+                    analyzedAtEpoch: analyzedAt?.timeIntervalSince1970
+                )
+            }
+            return output
+        }
+    }
+
     func fetchWaveformCache(trackID: UUID) throws -> TrackWaveformEnvelope? {
         let sql = "SELECT waveform_cache_json FROM tracks WHERE id = ? LIMIT 1;"
         return try withStatement(sql) { statement in

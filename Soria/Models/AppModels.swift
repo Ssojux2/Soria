@@ -14,6 +14,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
 /// Tabs inside the Organizer pane.
 enum OrganizerMode: String, CaseIterable, Identifiable {
     case plan = "Plan"
+    case map = "Map"
     case quarantine = "Soria Trash"
 
     var id: String { rawValue }

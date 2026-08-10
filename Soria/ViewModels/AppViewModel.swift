@@ -366,6 +366,11 @@ final class AppViewModel: ObservableObject {
     lazy var organizer: LibraryOrganizerModel = LibraryOrganizerModel(
         dependencies: makeOrganizerDependencies()
     )
+    /// Similarity-map state, kept out of this file for the same reason. See
+    /// `TrackMapModel`.
+    lazy var trackMap: TrackMapModel = TrackMapModel(
+        dependencies: makeTrackMapDependencies()
+    )
     private lazy var audioNormalizationService: AudioNormalizationService = {
         injectedAudioNormalizationService
             ?? AudioNormalizationService(worker: worker) { [weak self] url in
@@ -1230,6 +1235,47 @@ final class AppViewModel: ObservableObject {
                         "mark_collection_exported_failed id=\(collectionID) error=\(error.localizedDescription)"
                     )
                 }
+            }
+        )
+    }
+
+    // MARK: - Similarity map
+
+    private func makeTrackMapDependencies() -> TrackMapModel.Dependencies {
+        let database = self.database
+
+        return TrackMapModel.Dependencies(
+            cache: TrackMapCache(),
+            loadTrackEmbeddings: { trackIDs in
+                try database.fetchTrackEmbeddings(trackIDs: trackIDs)
+            },
+            loadMapFeatureRows: { trackIDs in
+                try database.fetchMapFeatureRows(trackIDs: trackIDs)
+            },
+            allTracks: { [unowned self] in self.tracks },
+            readyTrackIDs: { [unowned self] in self.readyTrackIDs },
+            embeddingProfileID: { [unowned self] in self.embeddingProfile.id },
+            tracksByID: { [unowned self] in
+                Dictionary(uniqueKeysWithValues: self.tracks.map { ($0.id, $0) })
+            },
+            loadCollections: { try database.fetchCollections() },
+            loadCollectionTrackIDs: { try database.fetchCollectionTrackIDs(collectionID: $0) },
+            createCollection: { name, trackIDs in
+                let collection = SoriaCollection(
+                    name: name,
+                    kind: .mapSelection,
+                    origin: .user
+                )
+                try database.upsertCollection(collection)
+                try database.replaceCollectionTracks(collectionID: collection.id, trackIDs: trackIDs)
+            },
+            sendSelectionToPlan: { [unowned self] trackIDs in
+                // Hand the map's selection to the existing organize pipeline rather
+                // than duplicating it: the Plan tab already knows how to preview and
+                // apply real file moves for the current library selection.
+                self.updateSelectedTrackIDs(trackIDs)
+                self.organizer.scope = .selectedReadyTracks
+                self.organizerMode = .plan
             }
         )
     }

@@ -110,6 +110,28 @@ final class SoriaUITests: XCTestCase {
         XCTAssertTrue(closeButton.waitForExistence(timeout: 10))
     }
 
+    /// The UI-test fixtures carry no embeddings, so this exercises the map's empty
+    /// path: the tab opens, reports nothing plotted, and offers no action rather than
+    /// showing a blank rectangle.
+    @MainActor
+    func testMapTabShowsEmptyStateWithoutPreparedEmbeddings() throws {
+        let app = launchApp(libraryState: .prepared)
+
+        element(in: app, identifier: "sidebar-organizer").click()
+
+        let modePicker = element(in: app, identifier: "organizer-mode-picker")
+        XCTAssertTrue(modePicker.waitForExistence(timeout: 10))
+        app.radioButtons["Map"].firstMatch.click()
+
+        XCTAssertTrue(element(in: app, identifier: "organizer-map-view").waitForExistence(timeout: 10))
+        XCTAssertTrue(element(in: app, identifier: "map-empty-state").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForLabel(of: marker(in: app, identifier: "map-plotted-count"), toEqual: "0"))
+
+        let createButton = element(in: app, identifier: "map-create-folder-button")
+        XCTAssertTrue(createButton.waitForExistence(timeout: 10))
+        XCTAssertFalse(createButton.isEnabled)
+    }
+
     @MainActor
     func testAdvancedFiltersOpenInspectorFromLibrary() throws {
         let app = launchApp(libraryState: .prepared)

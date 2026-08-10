@@ -112,6 +112,8 @@ key overrides.
 | Local folder organization | Implemented | `LibraryOrganizationPlanner`, `LibraryFileOrganizerService`, `OrganizerPlanView` |
 | Soria collections | Implemented | `soria_collections`, `LibraryOrganizerModel` |
 | Batch vendor export | Implemented | `PlaylistExportService.exportMany`, `RekordboxXMLWriter` |
+| Similarity map | Implemented | `TrackMapProjector`, `TrackMapCache`, `TrackMapView` |
+| Map region to Soria folder | Implemented | `TrackMapModel.createFolderFromSelection` |
 | Prompt-folder organization | Planner implemented, UI gated on a shared text/audio model | `LibraryOrganizationPlanner.makePlan(kind:)` |
 | CLAP local embedding profile | Not implemented; planned as an optional post-install add-on | — |
 | Developer ID signing/notarization | Not implemented | `docs/RELEASING.md` documents later path |
@@ -397,7 +399,54 @@ record `last_exported_at`, and the Organizer warns when organizing happened
 after the last export — the window in which vendor libraries still hold
 pre-move paths.
 
-### 14. Release Packaging
+### 14. Similarity Map
+
+The Organizer's **Map** tab plots prepared tracks as a scatter of dots so cluster
+decisions can be checked by eye rather than read off a table.
+
+**Layout.** Two modes:
+
+- *Similarity Map* projects the 3072-dimension audio embeddings onto a plane with
+  principal component analysis. `TrackMapProjector` runs power iteration for the top
+  two components rather than forming a 3072x3072 covariance matrix, using a fixed
+  seed vector and sign canonicalization so the same library always yields the same
+  picture.
+- *Custom Axes* puts BPM, length, brightness, onset density, or energy on each axis.
+  Tracks missing either value are left off rather than pinned to zero.
+
+**Caching.** The projection basis and per-track coordinates are stored per embedding
+profile at `worker-cache/track-map/<sanitized profile id>.json`. This is not only a
+speed measure: pinning the basis means adding tracks does not reshuffle the map, so a
+cluster stays where the user learned to find it. Newly analyzed tracks are placed with
+two dot products. **Recompute Layout** rebuilds the basis, which may shift positions.
+Rows are invalidated per track when `analyzed_at` moves, with a half-second tolerance
+because the timestamp round-trips through JSON as a double.
+
+**Honesty about the projection.** Two dimensions cannot carry everything a 3072-
+dimension embedding knows. The measured figure on a 1,780-track library is about 19%
+of total variance, which is enough for genre regions and gradients but not crisp
+islands. The screen states the percentage outright and adds an explicit warning below
+15%.
+
+**Colour** groups dots by genre family (via `GenreTaxonomy`), by the Soria collection
+that already contains the track, or by BPM band. There is deliberately no prep-status
+mode: only prepared tracks are plotted, so every dot would be one colour.
+
+**Actions.** Dragging a box selects a region, clicking picks one dot, Shift adds.
+Two selected dots produce a comparison panel showing true cosine similarity — the
+planner's `cosineSimilarity`, not `AppViewModel.similarityScore`, which is a
+`1/(1+distance)` score on a different scale — alongside BPM, key, length, genre,
+energy, and brightness. **Create Folder from Selection** records the group as a
+`SoriaCollection` of kind `map_selection`; **no files move**, and the group is
+immediately available to batch vendor export. **Send Selection to Plan** hands the
+selection to the Plan tab, where applying does move files.
+
+Rendering is AppKit (`TrackMapCanvasView`) rather than SwiftUI `Canvas`, matching the
+waveform: dots are batched into one path per colour, hover uses `NSTrackingArea`, and
+a 4pt slop distinguishes a click from a rubber-band drag. Coordinate maths and hit
+testing live in the view-free `TrackMapLayout` and `TrackMapSpatialIndex`.
+
+### 15. Release Packaging
 
 `make release-dmg` runs `Scripts/create_release_dmg.sh`.
 
@@ -430,6 +479,7 @@ Important local state:
 - Python worker cache directory
 - Chroma vector persistence
 - genre/prompt label embedding cache (`worker-cache/label-embeddings/`)
+- similarity map projection basis and coordinates (`worker-cache/track-map/`)
 - logs
 - generated export helpers
 - UserDefaults settings, including security-scoped bookmarks for library roots
@@ -486,6 +536,17 @@ Relevant coverage found in the repo:
   vendor databases in place.
 - Quarantine is a Soria-managed folder, not the system Trash, so it does not
   free disk space until you use **Delete Permanently**.
+- The similarity map plots only prepared tracks, because unprepared ones have no
+  embedding to project.
+- The map's two axes hold a minority of what the embedding encodes — roughly 19%
+  of total variance on a 1,780-track library — so proximity is a strong hint, not
+  proof that two tracks are alike. The percentage is shown on screen, with an
+  explicit warning below 15%. Use the two-track comparison to confirm.
+- Folders created from a map selection **do not move files**; they group tracks
+  for export. Use **Send Selection to Plan** when the files should actually move.
+- The map's projection basis is cached per embedding profile so positions stay
+  put as the library grows. After a large batch of new analysis, **Recompute
+  Layout** refits it — which may move existing dots.
 - Genre detection compares text label embeddings against audio embeddings. That
   is only well-defined in a shared text/audio embedding space; with the Google
   profile the numbers are usable but unvalidated, which is why lopsided plans
