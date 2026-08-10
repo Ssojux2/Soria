@@ -23,27 +23,12 @@ struct OrganizerView: View {
 
             switch viewModel.organizerMode {
             case .plan:
-                planPlaceholder
+                OrganizerPlanView(model: viewModel.organizer)
             case .quarantine:
                 QuarantineReviewView(viewModel: viewModel)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("organizer-view")
-    }
-
-    // Replaced by the plan builder in the organization-engine phase.
-    private var planPlaceholder: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Folder Plan")
-                .font(.headline)
-            Text("Automatic folder organization is not wired up yet. Use Soria Trash to set unwanted tracks aside in the meantime.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-        .accessibilityIdentifier("organizer-plan-placeholder")
     }
 }

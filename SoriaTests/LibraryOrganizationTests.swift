@@ -373,6 +373,111 @@ struct LibraryOrganizationTests {
     }
 
     @Test
+    func applyingAPlanRecordsCollectionsAndBatchHistory() async throws {
+        let directory = try makeOrganizationTemporaryDirectory()
+        let database = try LibraryDatabase(databaseURL: directory.appendingPathComponent("library.sqlite"))
+
+        let sourceURL = directory.appendingPathComponent("Loose/Track.wav")
+        try FileManager.default.createDirectory(
+            at: sourceURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("audio".utf8).write(to: sourceURL)
+
+        let track = makeOrganizationTrack(path: sourceURL.path, title: "Track", artist: "Anna")
+        try database.upsertTrack(track)
+
+        let planner = LibraryOrganizationPlanner()
+        let plan = planner.makePlan(
+            tracks: [track],
+            readyTrackIDs: [track.id],
+            embeddingsByTrackID: [track.id: [1.0, 0.0]],
+            labelEmbeddingsByFamilyID: ["house": [1.0, 0.0]],
+            destinationRootPath: directory.appendingPathComponent("Organized").path,
+            libraryRoots: [directory.path]
+        )
+        let group = try #require(plan.groups.first)
+
+        let service = LibraryFileOrganizerService(database: database) { _, _, _ in }
+        let result = await service.apply(plan: plan, kind: .genreClusters, embeddingProfileID: "profile")
+
+        #expect(result.movedCount == 1)
+
+        // A genre group node plus the cluster collection underneath it.
+        let collections = try database.fetchCollections()
+        #expect(collections.count == 2)
+        let cluster = try #require(collections.first { $0.id == group.collectionID })
+        #expect(cluster.kind == .organizedFolder)
+        #expect(cluster.genreFamilyID == "house")
+        let genreNode = try #require(collections.first { $0.kind == .group })
+        #expect(genreNode.name == "House")
+        #expect(cluster.parentID == genreNode.id)
+
+        // The hierarchical name is what the Serato and rekordbox writers consume.
+        let byID = Dictionary(uniqueKeysWithValues: collections.map { ($0.id, $0) })
+        #expect(SoriaCollection.hierarchicalName(for: cluster.id, in: byID).hasPrefix("House/Cluster 01"))
+
+        #expect(try database.fetchCollectionTrackIDs(collectionID: cluster.id) == [track.id])
+
+        let batches = try database.fetchOrganizationBatches()
+        #expect(batches.count == 1)
+        #expect(batches.first?.kind == .genreClusters)
+        #expect(batches.first?.embeddingProfileID == "profile")
+        let moves = try database.fetchOrganizationMoves(batchID: try #require(batches.first?.id))
+        #expect(moves.count == 1)
+        #expect(moves.first?.collectionID == cluster.id)
+        #expect(moves.first?.sourcePath == TrackPathNormalizer.normalizedAbsolutePath(sourceURL))
+    }
+
+    @Test
+    func excludedMovesAreNeitherMovedNorRecorded() async throws {
+        let directory = try makeOrganizationTemporaryDirectory()
+        let database = try LibraryDatabase(databaseURL: directory.appendingPathComponent("library.sqlite"))
+
+        var tracks: [Track] = []
+        for index in 1...2 {
+            let url = directory.appendingPathComponent("Loose/T\(index).wav")
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data("audio".utf8).write(to: url)
+            let track = makeOrganizationTrack(path: url.path, title: "T\(index)", artist: "A\(index)")
+            try database.upsertTrack(track)
+            tracks.append(track)
+        }
+
+        let plan = LibraryOrganizationPlanner().makePlan(
+            tracks: tracks,
+            readyTrackIDs: Set(tracks.map(\.id)),
+            embeddingsByTrackID: Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, [1.0, 0.0]) }),
+            labelEmbeddingsByFamilyID: ["house": [1.0, 0.0]],
+            destinationRootPath: directory.appendingPathComponent("Organized").path,
+            libraryRoots: [directory.path]
+        )
+        #expect(plan.moves.count == 2)
+
+        let skipped = try #require(plan.moves.first)
+        let kept = try #require(plan.moves.last)
+        let service = LibraryFileOrganizerService(database: database) { _, _, _ in }
+        let result = await service.apply(plan: plan, excludedMoveIDs: [skipped.id])
+
+        #expect(result.movedCount == 1)
+        // The unchecked track must stay exactly where it was.
+        #expect(FileManager.default.fileExists(atPath: skipped.sourcePath))
+        #expect(!FileManager.default.fileExists(atPath: skipped.targetPath))
+        #expect(FileManager.default.fileExists(atPath: kept.targetPath))
+
+        let batchID = try #require(try database.fetchOrganizationBatches().first?.id)
+        let moves = try database.fetchOrganizationMoves(batchID: batchID)
+        #expect(moves.map(\.trackID) == [kept.trackID])
+
+        // Only the applied track is a collection member.
+        let clusterID = try #require(plan.groups.first?.collectionID)
+        #expect(try database.fetchCollectionTrackIDs(collectionID: clusterID) == [kept.trackID])
+    }
+
+    @Test
     func fileOrganizerMovesTrackAndWarnsWhenVectorRefreshFails() async throws {
         let directory = try makeOrganizationTemporaryDirectory()
         let sourceURL = directory.appendingPathComponent("Source.wav")

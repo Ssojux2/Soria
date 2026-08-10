@@ -361,6 +361,11 @@ final class AppViewModel: ObservableObject {
             libraryRoots: { LibraryRootsStore.loadRoots() }
         )
     )
+    /// Organizer state lives in its own model so this file does not grow another
+    /// twenty published properties. See `LibraryOrganizerModel`.
+    lazy var organizer: LibraryOrganizerModel = LibraryOrganizerModel(
+        dependencies: makeOrganizerDependencies()
+    )
     private lazy var audioNormalizationService: AudioNormalizationService = {
         injectedAudioNormalizationService
             ?? AudioNormalizationService(worker: worker) { [weak self] url in
@@ -1164,6 +1169,44 @@ final class AppViewModel: ObservableObject {
             .joined(separator: " ")
         await refreshTracks()
         refreshQuarantineRows()
+    }
+
+    // MARK: - Organizer
+
+    private func makeOrganizerDependencies() -> LibraryOrganizerModel.Dependencies {
+        let database = self.database
+        let worker = self.worker
+
+        return LibraryOrganizerModel.Dependencies(
+            planner: LibraryOrganizationPlanner(),
+            organizer: LibraryFileOrganizerService(database: database, worker: worker),
+            labelCache: LabelEmbeddingCache(),
+            embedTextLabels: { labels in
+                try await worker.embedTextLabels(labels).labelEmbeddings
+            },
+            loadTrackEmbeddings: { trackIDs in
+                var embeddings: [UUID: [Double]] = [:]
+                for trackID in trackIDs {
+                    guard let vector = try database.fetchTrackEmbedding(trackID: trackID), !vector.isEmpty else {
+                        continue
+                    }
+                    embeddings[trackID] = vector
+                }
+                return embeddings
+            },
+            visibleTracks: { [unowned self] in self.filteredTracks },
+            selectedTracks: { [unowned self] in self.selectedTracks },
+            allTracks: { [unowned self] in self.tracks },
+            readyTrackIDs: { [unowned self] in self.readyTrackIDs },
+            libraryRoots: { [unowned self] in self.libraryRoots },
+            embeddingProfileID: { [unowned self] in self.embeddingProfile.id },
+            hasDurableWriteAccess: { [unowned self] paths in self.hasDurableWriteAccess(toPaths: paths) },
+            addLibraryRoot: { [unowned self] path in self.addLibraryRoots([path]) },
+            onLibraryChanged: { [weak self] in
+                await self?.refreshTracks()
+                self?.refreshQuarantineRows()
+            }
+        )
     }
 
     private func restoreStatusMessage(for result: QuarantineRestoreResult) -> String {
