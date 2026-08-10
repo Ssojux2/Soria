@@ -147,6 +147,8 @@ struct ContentView: View {
         switch section {
         case .library:
             return "music.note.list"
+        case .organizer:
+            return "folder.badge.gearshape"
         case .mixAssistant:
             return "sparkles"
         case .exports:
@@ -163,6 +165,10 @@ struct ContentView: View {
             LibraryView(viewModel: viewModel)
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("right-pane-library")
+        case .organizer:
+            OrganizerView(viewModel: viewModel)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("right-pane-organizer")
         case .mixAssistant:
             MixAssistantView(viewModel: viewModel)
                 .accessibilityElement(children: .contain)

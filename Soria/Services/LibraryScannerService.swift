@@ -10,13 +10,33 @@ final class LibraryScannerService: @unchecked Sendable {
     private let database: LibraryDatabase
     private let invalidateVectorIndex: @Sendable (Track) async -> Void
     private let supportedExtensions: Set<String> = ["mp3", "wav", "aiff", "aif", "m4a", "aac", "flac"]
+    /// Directories the traversal must not descend into.
+    ///
+    /// Quarantine folders live inside library roots so users can inspect them in
+    /// Finder, which means an unfiltered scan would re-index discarded tracks as
+    /// active ones on the next run. Evaluated per scan rather than captured at
+    /// init, because the set derives from library roots the user can change.
+    private let excludedDirectoryPaths: @Sendable () -> Set<String>
 
     init(
         database: LibraryDatabase,
+        excludedDirectoryPaths: @escaping @Sendable () -> Set<String> = { [] },
         invalidateVectorIndex: @escaping @Sendable (Track) async -> Void = { _ in }
     ) {
         self.database = database
+        self.excludedDirectoryPaths = excludedDirectoryPaths
         self.invalidateVectorIndex = invalidateVectorIndex
+    }
+
+    /// Whether `path` sits inside one of the excluded directories.
+    ///
+    /// Component-aware, so excluding `/Music/Soria Quarantine` never also excludes
+    /// `/Music/Soria Quarantine Archive`.
+    static func isExcluded(_ path: String, excludedDirectoryPaths: Set<String>) -> Bool {
+        guard !excludedDirectoryPaths.isEmpty, !path.isEmpty else { return false }
+        return excludedDirectoryPaths.contains { excluded in
+            path == excluded || path.hasPrefix(excluded.hasSuffix("/") ? excluded : excluded + "/")
+        }
     }
 
     func refreshTrack(at fileURL: URL) async throws -> Track {
@@ -138,6 +158,7 @@ final class LibraryScannerService: @unchecked Sendable {
 
     private func discoverFiles(in roots: [URL]) -> [URL] {
         let fm = FileManager.default
+        let excludedDirectoryPaths = Set(self.excludedDirectoryPaths().map(TrackPathNormalizer.normalizedAbsolutePath))
         let resourceKeys: Set<URLResourceKey> = [
             .isDirectoryKey,
             .isRegularFileKey,
@@ -151,6 +172,9 @@ final class LibraryScannerService: @unchecked Sendable {
         while let directory = directoriesToVisit.popLast() {
             let normalizedDirectory = TrackPathNormalizer.normalizedAbsolutePath(directory)
             guard visitedDirectories.insert(normalizedDirectory).inserted else {
+                continue
+            }
+            guard !Self.isExcluded(normalizedDirectory, excludedDirectoryPaths: excludedDirectoryPaths) else {
                 continue
             }
 

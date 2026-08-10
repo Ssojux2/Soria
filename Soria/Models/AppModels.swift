@@ -3,9 +3,18 @@ import Foundation
 
 enum SidebarSection: String, CaseIterable, Identifiable {
     case library = "Library"
+    case organizer = "Organizer"
     case mixAssistant = "Mix Assistant"
     case exports = "Exports"
     case settings = "Settings"
+
+    var id: String { rawValue }
+}
+
+/// Tabs inside the Organizer pane.
+enum OrganizerMode: String, CaseIterable, Identifiable {
+    case plan = "Plan"
+    case quarantine = "Soria Trash"
 
     var id: String { rawValue }
 }

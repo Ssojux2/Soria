@@ -156,6 +156,12 @@ final class AppViewModel: ObservableObject {
     /// Roots the sandbox can no longer write to because they were chosen before
     /// security-scoped bookmarks existed. Always empty in Debug (sandbox off).
     @Published private(set) var libraryRootsNeedingReauthorization: [String] = LibraryRootsStore.rootsMissingDurableAccess()
+    @Published var organizerMode: OrganizerMode = .plan
+    @Published private(set) var quarantineRows: [QuarantineRow] = []
+    @Published private(set) var isQuarantining = false
+    @Published private(set) var isRestoringQuarantine = false
+    @Published var selectedQuarantineTrackIDs: Set<UUID> = []
+    @Published var quarantineStatusMessage: String = ""
     @Published var librarySources: [LibrarySourceRecord] = []
     @Published private(set) var seratoMembershipFacets: [MembershipFacet] = []
     @Published private(set) var rekordboxMembershipFacets: [MembershipFacet] = []
@@ -339,9 +345,22 @@ final class AppViewModel: ObservableObject {
             )
         }
     )
-    private lazy var scanner: LibraryScannerService = LibraryScannerService(database: database) { [weak self] track in
+    private lazy var scanner: LibraryScannerService = LibraryScannerService(
+        database: database,
+        // 한국어: 루트는 UserDefaults에 저장되므로 메인 액터를 건드리지 않고
+        // 스캔 시점마다 최신 격리 폴더 목록을 다시 계산할 수 있습니다.
+        excludedDirectoryPaths: {
+            LibraryQuarantineService.excludedScanPaths(libraryRoots: LibraryRootsStore.loadRoots())
+        }
+    ) { [weak self] track in
         await self?.invalidateTrackVectors(for: track)
     }
+    private lazy var quarantineService: LibraryQuarantineService = LibraryQuarantineService(
+        database: database,
+        quarantineRootResolver: LibraryQuarantineService.defaultRootResolver(
+            libraryRoots: { LibraryRootsStore.loadRoots() }
+        )
+    )
     private lazy var audioNormalizationService: AudioNormalizationService = {
         injectedAudioNormalizationService
             ?? AudioNormalizationService(worker: worker) { [weak self] url in
@@ -1041,6 +1060,119 @@ final class AppViewModel: ObservableObject {
 
     func refreshLibraryRootsNeedingReauthorization() {
         libraryRootsNeedingReauthorization = LibraryRootsStore.rootsMissingDurableAccess(libraryRoots)
+    }
+
+    // MARK: - Soria Trash
+
+    var canQuarantineSelection: Bool {
+        !selectedTrackIDs.isEmpty
+            && !isQuarantining
+            && !isAnalyzing
+            && hasDurableWriteAccess(toPaths: selectedTracks.map(\.filePath))
+    }
+
+    var quarantineCountText: String {
+        let count = quarantineRows.count
+        return count == 1 ? "1 track" : "\(count) tracks"
+    }
+
+    var canRestoreSelectedQuarantine: Bool {
+        !selectedQuarantineTrackIDs.isEmpty && !isRestoringQuarantine
+    }
+
+    var canRestoreAllQuarantine: Bool {
+        !quarantineRows.isEmpty && !isRestoringQuarantine
+    }
+
+    func refreshQuarantineRows() {
+        do {
+            let tracksByID = try Dictionary(
+                uniqueKeysWithValues: database.fetchAllTracks().map { ($0.id, $0) }
+            )
+            quarantineRows = try quarantineService.quarantineRows(tracksByID: tracksByID)
+            selectedQuarantineTrackIDs = selectedQuarantineTrackIDs.intersection(Set(quarantineRows.map(\.id)))
+        } catch {
+            quarantineStatusMessage = "Could not read the Soria Trash: \(error.localizedDescription)"
+        }
+    }
+
+    /// Moves the current library selection into the Soria Trash folder.
+    ///
+    /// Files stay on their own volume and keep their database rows, so this is
+    /// reversible from the Organizer's Soria Trash tab.
+    func quarantineSelectedTracks() async {
+        let targets = selectedTracks
+        guard !targets.isEmpty, !isQuarantining else { return }
+
+        guard hasDurableWriteAccess(toPaths: targets.map(\.filePath)) else {
+            refreshLibraryRootsNeedingReauthorization()
+            quarantineStatusMessage = "Soria needs permission to move these files. Re-select the Music Folder first."
+            return
+        }
+
+        isQuarantining = true
+        defer { isQuarantining = false }
+
+        let result = await quarantineService.quarantine(tracks: targets)
+        quarantineStatusMessage = result.summaryMessage
+        for failure in result.failed {
+            AppLogger.shared.error("quarantine_failed path=\(failure.path) message=\(failure.message)")
+        }
+
+        updateSelectedTrackIDs(selectedTrackIDs.subtracting(Set(result.movedTrackIDs)))
+        await refreshTracks()
+        refreshQuarantineRows()
+    }
+
+    func restoreSelectedQuarantinedTracks() async {
+        let targets = Array(selectedQuarantineTrackIDs)
+        guard !targets.isEmpty, !isRestoringQuarantine else { return }
+
+        isRestoringQuarantine = true
+        defer { isRestoringQuarantine = false }
+
+        let result = await quarantineService.restore(trackIDs: targets)
+        quarantineStatusMessage = restoreStatusMessage(for: result)
+        await refreshTracks()
+        refreshQuarantineRows()
+    }
+
+    func restoreAllQuarantinedTracks() async {
+        guard !quarantineRows.isEmpty, !isRestoringQuarantine else { return }
+
+        isRestoringQuarantine = true
+        defer { isRestoringQuarantine = false }
+
+        let result = await quarantineService.restoreAll()
+        quarantineStatusMessage = restoreStatusMessage(for: result)
+        await refreshTracks()
+        refreshQuarantineRows()
+    }
+
+    /// Hands the selected quarantined files to the system Trash. Unlike restore,
+    /// this is only reversible from Finder's "Put Back".
+    func purgeSelectedQuarantinedTracks() async {
+        let targets = Array(selectedQuarantineTrackIDs)
+        guard !targets.isEmpty, !isRestoringQuarantine else { return }
+
+        isRestoringQuarantine = true
+        defer { isRestoringQuarantine = false }
+
+        let result = await quarantineService.purge(trackIDs: targets)
+        quarantineStatusMessage = ([result.purgeSummaryMessage] + result.warnings)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        await refreshTracks()
+        refreshQuarantineRows()
+    }
+
+    private func restoreStatusMessage(for result: QuarantineRestoreResult) -> String {
+        var segments = [result.summaryMessage]
+        segments.append(contentsOf: result.warnings)
+        if let firstFailure = result.failed.first {
+            segments.append(firstFailure.message)
+        }
+        return segments.filter { !$0.isEmpty }.joined(separator: " ")
     }
 
     var canAnalyzePendingSelection: Bool {
@@ -3440,7 +3572,7 @@ final class AppViewModel: ObservableObject {
             return target == .library
         case .mixAssistant:
             return target == .recommendation
-        case .exports, .settings:
+        case .organizer, .exports, .settings:
             return false
         }
     }

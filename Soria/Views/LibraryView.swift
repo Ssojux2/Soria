@@ -304,11 +304,13 @@ struct LibraryView: View {
             HStack(spacing: 8) {
                 analyzeSelectionButton
                 recommendationSearchButton
+                quarantineSelectionButton
             }
 
             VStack(alignment: .leading, spacing: 8) {
                 analyzeSelectionButton
                 recommendationSearchButton
+                quarantineSelectionButton
             }
         }
     }
@@ -329,6 +331,16 @@ struct LibraryView: View {
         .buttonStyle(.bordered)
         .disabled(!viewModel.canOpenRecommendationSearchFromLibrary)
         .accessibilityIdentifier("library-recommendation-search-button")
+    }
+
+    private var quarantineSelectionButton: some View {
+        Button("Move to Soria Trash") {
+            Task { await viewModel.quarantineSelectedTracks() }
+        }
+        .buttonStyle(.bordered)
+        .disabled(!viewModel.canQuarantineSelection)
+        .help("Moves the selected files into a Soria Trash folder on the same drive. You can restore them from the Organizer.")
+        .accessibilityIdentifier("library-quarantine-selection-button")
     }
 
     private var libraryPreviewStrip: some View {
