@@ -1,0 +1,1068 @@
+<title>Soria Library — Classification Redesign</title>
+
+<style>
+  /* ──────────────────────────────────────────────────────────────
+     Dark-first. DJ software is used in a booth, so dark is the real
+     context and gets the bare :root. Light is a full peer, not an
+     inversion — the SwiftUI build has to ship both.
+     ────────────────────────────────────────────────────────────── */
+  :root {
+    --ground:      #0E1315;
+    --surface:     #151B1E;
+    --raised:      #1D2428;
+    --sunken:      #0A0E10;
+    --line:        #263033;
+    --line-strong: #384448;
+
+    --text:        #E4EAE9;
+    --dim:         #8FA0A3;
+    --faint:       #5D6C70;
+
+    /* Warm bone against the cold panel — a cue lamp, not a hue. */
+    --accent:      #F2E4CC;
+    --accent-ink:  #14191B;
+    --accent-soft: rgba(242, 228, 204, 0.11);
+    --accent-line: rgba(242, 228, 204, 0.32);
+
+    --shadow: 0 1px 2px rgba(0,0,0,.5), 0 8px 28px rgba(0,0,0,.34);
+
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Helvetica Neue", sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+    --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px;
+    --s5: 24px; --s6: 32px; --s7: 48px; --s8: 72px;
+
+    --radius: 6px;
+
+    /* Track label colours. Data, not decoration — identical in both
+       themes so a red track is red on a projector and on a laptop. */
+    --c-pink:   #FA5CA6;
+    --c-red:    #E63836;
+    --c-orange: #F58C26;
+    --c-yellow: #EFC62E;
+    --c-green:  #57BC5C;
+    --c-aqua:   #3FC3C8;
+    --c-blue:   #4A86EE;
+    --c-purple: #A166DE;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --ground:      #F4F6F5;
+      --surface:     #FFFFFF;
+      --raised:      #EBEFEF;
+      --sunken:      #E3E8E8;
+      --line:        #DBE2E2;
+      --line-strong: #B6C1C2;
+
+      --text:        #111819;
+      --dim:         #58676A;
+      --faint:       #869598;
+
+      --accent:      #6B4E17;
+      --accent-ink:  #FFFFFF;
+      --accent-soft: rgba(107, 78, 23, 0.09);
+      --accent-line: rgba(107, 78, 23, 0.34);
+
+      --shadow: 0 1px 2px rgba(20,30,32,.09), 0 8px 24px rgba(20,30,32,.09);
+    }
+  }
+
+  :root[data-theme="light"] {
+    --ground:      #F4F6F5;
+    --surface:     #FFFFFF;
+    --raised:      #EBEFEF;
+    --sunken:      #E3E8E8;
+    --line:        #DBE2E2;
+    --line-strong: #B6C1C2;
+
+    --text:        #111819;
+    --dim:         #58676A;
+    --faint:       #869598;
+
+    --accent:      #6B4E17;
+    --accent-ink:  #FFFFFF;
+    --accent-soft: rgba(107, 78, 23, 0.09);
+    --accent-line: rgba(107, 78, 23, 0.34);
+
+    --shadow: 0 1px 2px rgba(20,30,32,.09), 0 8px 24px rgba(20,30,32,.09);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: var(--s7) var(--s5) var(--s8);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s8);
+  }
+
+  /* ── Type ─────────────────────────────────────────────────── */
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--faint);
+    margin: 0;
+  }
+
+  h1 {
+    font-size: clamp(28px, 4.2vw, 42px);
+    line-height: 1.08;
+    letter-spacing: -.022em;
+    font-weight: 700;
+    margin: var(--s3) 0 0;
+    text-wrap: balance;
+  }
+
+  h2 {
+    font-size: 21px;
+    letter-spacing: -.012em;
+    font-weight: 650;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  h3 {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: -.004em;
+    margin: 0;
+  }
+
+  p { margin: 0; max-width: 66ch; }
+  .lede { color: var(--dim); font-size: 16.5px; margin-top: var(--s4); }
+  .note { color: var(--dim); font-size: 13.5px; }
+
+  section { display: flex; flex-direction: column; gap: var(--s5); }
+  .sec-head { display: flex; flex-direction: column; gap: var(--s2); }
+
+  code, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  code {
+    font-size: .88em;
+    background: var(--raised);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+
+  a { color: inherit; text-decoration-color: var(--accent-line); text-underline-offset: 3px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+  /* ── Theme toggle ─────────────────────────────────────────── */
+
+  .topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--s4); }
+
+  .toggle {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--dim);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 6px 13px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color .15s, border-color .15s;
+  }
+  .toggle:hover { color: var(--text); border-color: var(--line-strong); }
+
+  /* ── The app mockup ───────────────────────────────────────── */
+
+  .app-scroll { overflow-x: auto; padding-bottom: var(--s2); }
+
+  .app {
+    min-width: 940px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+    font-size: 12.5px;
+    line-height: 1.45;
+  }
+
+  /* Toolbar — the one that already follows you into every pane */
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    padding: 9px var(--s3);
+    background: var(--raised);
+    border-bottom: 1px solid var(--line);
+  }
+  .traffic { display: flex; gap: 6px; padding-right: var(--s2); }
+  .traffic i { width: 11px; height: 11px; border-radius: 50%; background: var(--line-strong); display: block; }
+
+  .tbtn {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    color: var(--text);
+    border-radius: 5px;
+    padding: 4px 10px;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .tbtn:hover { border-color: var(--line-strong); }
+  .tbtn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600; }
+
+  .readout {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 7px;
+    font-family: var(--mono); font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    color: var(--dim);
+  }
+  .readout .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--c-green); }
+
+  /* Three panes */
+  .panes { display: grid; grid-template-columns: 208px minmax(0,1fr) 236px; min-height: 486px; }
+  .pane-l { border-right: 1px solid var(--line); background: var(--sunken); padding: var(--s3) 0; overflow: hidden; }
+  .pane-c { display: flex; flex-direction: column; min-width: 0; }
+  .pane-r { border-left: 1px solid var(--line); background: var(--sunken); display: flex; flex-direction: column; }
+
+  /* ── Left: crate tree ─────────────────────────────────────── */
+
+  .tree-sec {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--faint);
+    padding: var(--s3) var(--s3) var(--s1);
+  }
+  .tree-sec:first-child { padding-top: 0; }
+
+  .node {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px var(--s3) 4px 10px;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  .node:hover { background: var(--raised); color: var(--text); }
+  .node[aria-selected="true"] {
+    background: var(--accent-soft);
+    border-left-color: var(--accent);
+    color: var(--text);
+    font-weight: 600;
+  }
+  .node .caret { width: 9px; color: var(--faint); font-size: 9px; flex: none; }
+  .node .label { overflow: hidden; text-overflow: ellipsis; }
+  .node .count {
+    margin-left: auto;
+    font-family: var(--mono); font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    color: var(--faint);
+    flex: none;
+  }
+  .node.d1 { padding-left: 22px; }
+  .node.d2 { padding-left: 34px; }
+  .swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+
+  /* ── Centre: search + table ───────────────────────────────── */
+
+  .cbar {
+    display: flex; align-items: center; gap: var(--s2);
+    padding: var(--s2) var(--s3);
+    border-bottom: 1px solid var(--line);
+  }
+  .search {
+    flex: 1;
+    background: var(--sunken);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 4px 9px;
+    color: var(--faint);
+    display: flex; align-items: center; gap: 6px;
+    min-width: 0;
+  }
+  .segmented { display: flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; flex: none; }
+  .segmented span { padding: 3px 9px; color: var(--dim); border-right: 1px solid var(--line); font-size: 11.5px; }
+  .segmented span:last-child { border-right: 0; }
+  .segmented span.on { background: var(--accent-soft); color: var(--text); font-weight: 600; }
+
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    position: sticky; top: 0;
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+    font-weight: 500;
+    color: var(--faint);
+    padding: 7px 8px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  tbody td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  tbody tr:hover { background: var(--raised); }
+  tbody tr[aria-selected="true"] { background: var(--accent-soft); }
+  tbody tr[aria-selected="true"] td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+
+  .t-title { font-weight: 600; }
+  .t-artist { color: var(--faint); font-size: 11.5px; }
+  .mono-cell { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--dim); white-space: nowrap; }
+
+  /* Stars — outline vs filled, no colour */
+  .stars { display: inline-flex; gap: 1px; color: var(--text); font-size: 11px; letter-spacing: .5px; white-space: nowrap; }
+  .stars .off { color: var(--faint); opacity: .5; }
+
+  /* Energy — ten segments, monochrome. Length is the value. */
+  .energy { display: inline-flex; gap: 1.5px; align-items: center; }
+  .energy i { width: 3px; height: 10px; border-radius: 1px; background: var(--faint); opacity: .35; display: block; }
+  .energy i.on { background: var(--text); opacity: 1; }
+  .energy .n { font-family: var(--mono); font-size: 10.5px; color: var(--dim); margin-left: 5px; font-variant-numeric: tabular-nums; }
+
+  /* Status — filled means ready, hollow means not. No pills. */
+  .status { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--dim); white-space: nowrap; }
+  .status i { width: 7px; height: 7px; border-radius: 50%; display: block; border: 1.5px solid var(--dim); }
+  .status.ready i { background: var(--text); border-color: var(--text); }
+
+  .chip {
+    display: inline-block;
+    font-size: 10.5px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: var(--raised);
+    border: 1px solid var(--line);
+    color: var(--dim);
+    white-space: nowrap;
+  }
+
+  /* ── Right: classifier panel ──────────────────────────────── */
+
+  .tabs { display: flex; border-bottom: 1px solid var(--line); flex: none; }
+  .tabs button {
+    flex: 1;
+    background: none; border: 0; border-bottom: 2px solid transparent;
+    color: var(--faint);
+    font: inherit; font-size: 11.5px; font-weight: 600;
+    padding: 8px 0;
+    cursor: pointer;
+  }
+  .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+
+  .rpane { padding: var(--s3); display: flex; flex-direction: column; gap: var(--s4); overflow: hidden; }
+  .rpane[hidden] { display: none; }
+
+  .selhint { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
+
+  .tag-group { display: flex; flex-direction: column; gap: 6px; }
+  .tag-group h4 {
+    margin: 0;
+    font-family: var(--mono); font-size: 10px; letter-spacing: .11em;
+    text-transform: uppercase; color: var(--faint); font-weight: 500;
+  }
+  .tag-row { display: flex; flex-wrap: wrap; gap: 4px; }
+
+  .tag {
+    font: inherit; font-size: 11.5px;
+    padding: 2.5px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--dim);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .tag:hover { border-color: var(--line-strong); color: var(--text); }
+  .tag[data-state="all"] { background: var(--accent); border-color: transparent; color: var(--accent-ink); font-weight: 600; }
+  /* Mixed: some of the selection carries it. Must never read as "off" —
+     an off checkbox invites a click that would strip the tag from the
+     tracks that had it. */
+  .tag[data-state="partial"] {
+    color: var(--text);
+    border-color: var(--accent);
+    background: linear-gradient(135deg, var(--accent-soft) 0 50%, transparent 50% 100%);
+  }
+  .tag[data-state="partial"]::after { content: "–"; margin-left: 5px; color: var(--accent); font-weight: 700; }
+  .tag[data-state="all"]::after { content: "✓"; margin-left: 5px; }
+
+  .addtag { border-style: dashed; color: var(--faint); }
+
+  .suggest {
+    margin-top: auto;
+    display: flex; align-items: center; justify-content: center; gap: 7px;
+    padding: 8px;
+    border: 1px dashed var(--accent-line);
+    border-radius: var(--radius);
+    background: var(--accent-soft);
+    color: var(--text);
+    font: inherit; font-size: 12px; font-weight: 600;
+    cursor: pointer;
+    width: 100%;
+  }
+  .suggest:hover { border-style: solid; }
+
+  /* Filter controls */
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field > label {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .11em;
+    text-transform: uppercase; color: var(--faint);
+    display: flex; justify-content: space-between; align-items: baseline; gap: var(--s2);
+  }
+  .field > label b { font-family: var(--mono); color: var(--text); font-weight: 600; font-size: 10.5px; }
+
+  .track-rail { position: relative; height: 4px; background: var(--sunken); border: 1px solid var(--line); border-radius: 3px; }
+  .track-fill { position: absolute; top: 0; bottom: 0; background: var(--accent); border-radius: 3px; }
+  .track-rail .knob {
+    position: absolute; top: 50%; width: 11px; height: 11px; margin: -6px 0 0 -6px;
+    border-radius: 50%; background: var(--surface); border: 2px solid var(--accent);
+  }
+
+  .camelot { display: grid; grid-template-columns: repeat(6, 1fr); gap: 3px; }
+  .camelot span {
+    font-family: var(--mono); font-size: 10px;
+    text-align: center; padding: 3px 0;
+    border: 1px solid var(--line); border-radius: 3px;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .camelot span.on { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 700; }
+
+  .colors { display: flex; gap: 5px; flex-wrap: wrap; }
+  .colors button {
+    width: 19px; height: 19px; border-radius: 4px;
+    border: 2px solid transparent; cursor: pointer; padding: 0;
+  }
+  .colors button[aria-pressed="true"] { border-color: var(--text); }
+
+  /* ── Component gallery ────────────────────────────────────── */
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: var(--s4); }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: var(--s4);
+    display: flex; flex-direction: column; gap: var(--s3);
+    min-width: 0;
+  }
+  .card-head { display: flex; flex-direction: column; gap: 3px; }
+  .card-head p { font-size: 12.5px; color: var(--dim); }
+
+  .demo {
+    background: var(--sunken);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: var(--s3);
+    font-size: 12.5px;
+    overflow-x: auto;
+  }
+  .demo-rows { display: flex; flex-direction: column; gap: 9px; }
+  .demo-label { font-family: var(--mono); font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
+
+  /* Rule builder */
+  .rule { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+  .sel {
+    font-family: var(--mono); font-size: 11px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 4px; padding: 3px 8px; color: var(--text);
+    white-space: nowrap;
+  }
+  .sel.op { color: var(--dim); }
+  .rule .x { margin-left: auto; color: var(--faint); cursor: pointer; font-family: var(--mono); }
+
+  /* Suggestion sheet */
+  .sug { display: flex; align-items: center; gap: var(--s2); padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .sug:last-child { border-bottom: 0; }
+  .sug .who { min-width: 0; flex: 1; }
+  .sug .conf { font-family: var(--mono); font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .conf-bar { width: 34px; height: 3px; background: var(--sunken); border-radius: 2px; overflow: hidden; flex: none; }
+  .conf-bar i { display: block; height: 100%; background: var(--accent); }
+  .yn { display: flex; gap: 3px; flex: none; }
+  .yn button {
+    width: 21px; height: 21px; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--surface); color: var(--dim);
+    font-size: 11px; line-height: 1; padding: 0;
+  }
+  .yn button.yes[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+
+  /* ── Decision list ────────────────────────────────────────── */
+
+  .decisions { display: flex; flex-direction: column; gap: 0; border-top: 1px solid var(--line); }
+  .decision {
+    display: grid;
+    grid-template-columns: 132px 1fr;
+    gap: var(--s4);
+    padding: var(--s4) 0;
+    border-bottom: 1px solid var(--line);
+    align-items: start;
+  }
+  .decision dt {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--faint); padding-top: 3px;
+  }
+  .decision dd { margin: 0; display: flex; flex-direction: column; gap: 5px; }
+  .decision strong { font-weight: 650; }
+  .decision p { font-size: 13.5px; color: var(--dim); }
+
+  .phases { display: flex; flex-direction: column; gap: var(--s2); counter-reset: ph; }
+  .phase {
+    display: flex; gap: var(--s3); align-items: baseline;
+    padding: var(--s3) var(--s4);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+  }
+  .phase b {
+    font-family: var(--mono); font-size: 10.5px; color: var(--faint);
+    flex: none; letter-spacing: .08em;
+  }
+  .phase span { font-size: 13.5px; }
+  .phase.done { border-color: var(--accent-line); background: var(--accent-soft); }
+  .phase.done b { color: var(--accent); }
+
+  hr { border: 0; border-top: 1px solid var(--line); margin: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+
+  @media (max-width: 720px) {
+    .page { padding: var(--s5) var(--s4) var(--s7); gap: var(--s7); }
+    .decision { grid-template-columns: 1fr; gap: var(--s2); }
+  }
+</style>
+
+<div class="page">
+
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">Soria · macOS · design spec</p>
+      <h1>Classifying five thousand tracks</h1>
+      <p class="lede">
+        Soria indexes and analyses a local library but gives you nowhere to say what a track
+        <em>is</em>. This is the redesigned Library: a crate tree, a table that shows the
+        attributes you sort by, and a panel that lets you set them. Every number below is live
+        against a <span class="num">5,004</span>-track library.
+      </p>
+    </div>
+    <button class="toggle" id="themeToggle" type="button">Light</button>
+  </header>
+
+  <!-- ── The main event ─────────────────────────────────────── -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">01 — Library</p>
+      <h2>Three panes: navigate, scan, classify</h2>
+      <p class="note">
+        The convention every DJ app converged on, because it matches the work: pick a scope on the
+        left, read the list in the middle, change what you found on the right. Click around — the
+        tree, the tabs, the tag chips and the rows all respond.
+      </p>
+    </div>
+
+    <div class="app-scroll">
+      <div class="app">
+
+        <div class="toolbar">
+          <div class="traffic"><i></i><i></i><i></i></div>
+          <button class="tbtn primary" type="button">▶ Prepare 3,224</button>
+          <button class="tbtn" type="button">⟳ Sync Library</button>
+          <div class="readout"><span class="dot"></span>1,780 / 5,004 ready</div>
+        </div>
+
+        <div class="panes">
+
+          <!-- Left ─ crate tree -->
+          <nav class="pane-l" aria-label="Crates">
+            <p class="tree-sec">Library</p>
+            <div class="node" role="option" tabindex="0"><span class="caret"></span><span class="label">All Tracks</span><span class="count">5,004</span></div>
+            <div class="node" role="option" tabindex="0"><span class="caret"></span><span class="label">Inbox</span><span class="count">312</span></div>
+            <div class="node" role="option" tabindex="0"><span class="caret"></span><span class="label">Needs Prep</span><span class="count">3,224</span></div>
+
+            <p class="tree-sec">Soria Folders</p>
+            <div class="node" role="option" tabindex="0"><span class="caret">▾</span><span class="label">House</span><span class="count">1,142</span></div>
+            <div class="node d1" role="option" tabindex="0" aria-selected="true"><span class="caret"></span><span class="label">Cluster 01 · Deep</span><span class="count">34</span></div>
+            <div class="node d1" role="option" tabindex="0"><span class="caret"></span><span class="label">Cluster 02 · Jackin</span><span class="count">28</span></div>
+            <div class="node" role="option" tabindex="0"><span class="caret">▸</span><span class="label">Techno</span><span class="count">803</span></div>
+            <div class="node" role="option" tabindex="0"><span class="caret">▸</span><span class="label">Disco</span><span class="count">417</span></div>
+
+            <p class="tree-sec">Smart Crates</p>
+            <div class="node" role="option" tabindex="0"><span class="swatch" style="background:var(--c-orange)"></span><span class="label">Peak 124–128</span><span class="count">286</span></div>
+            <div class="node" role="option" tabindex="0"><span class="swatch" style="background:var(--c-aqua)"></span><span class="label">Untagged ★4+</span><span class="count">91</span></div>
+
+            <p class="tree-sec">References</p>
+            <div class="node" role="option" tabindex="0"><span class="caret">▸</span><span class="label">Serato</span><span class="count">2,904</span></div>
+            <div class="node" role="option" tabindex="0"><span class="caret">▸</span><span class="label">rekordbox</span><span class="count">1,655</span></div>
+            <div class="node" role="option" tabindex="0"><span class="caret"></span><span class="label">Soria Trash</span><span class="count">8</span></div>
+          </nav>
+
+          <!-- Centre ─ table -->
+          <div class="pane-c">
+            <div class="cbar">
+              <div class="search">⌕ <span>Search title, artist, album, comment…</span></div>
+              <div class="segmented"><span class="on">All</span><span>Ready</span><span>Needs Prep</span></div>
+            </div>
+
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:64px">Rating</th>
+                  <th>Title</th>
+                  <th style="width:92px">Genre</th>
+                  <th style="width:78px">BPM / Key</th>
+                  <th style="width:74px">Energy</th>
+                  <th style="width:18px"></th>
+                  <th style="width:118px">Tags</th>
+                  <th style="width:82px">Status</th>
+                </tr>
+              </thead>
+              <tbody id="tbody">
+                <tr aria-selected="true" tabindex="0">
+                  <td><span class="stars">★★★★<span class="off">★</span></span></td>
+                  <td><div class="t-title">Nightgrain</div><div class="t-artist">Lower Field</div></td>
+                  <td><span class="chip">House</span></td>
+                  <td class="mono-cell">124.0 · 8A</td>
+                  <td><span class="energy"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><span class="n">7</span></span></td>
+                  <td><span class="swatch" style="background:var(--c-orange)"></span></td>
+                  <td><span class="chip">Peak</span> <span class="chip">Perc</span></td>
+                  <td><span class="status ready"><i></i>Ready</span></td>
+                </tr>
+                <tr tabindex="0">
+                  <td><span class="stars">★★★<span class="off">★★</span></span></td>
+                  <td><div class="t-title">Salt Flats</div><div class="t-artist">Ana Ruiz</div></td>
+                  <td><span class="chip">House</span></td>
+                  <td class="mono-cell">126.0 · 9A</td>
+                  <td><span class="energy"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><i></i><i></i><span class="n">5</span></span></td>
+                  <td><span class="swatch" style="background:var(--c-blue)"></span></td>
+                  <td><span class="chip">Warm</span></td>
+                  <td><span class="status ready"><i></i>Ready</span></td>
+                </tr>
+                <tr tabindex="0">
+                  <td><span class="stars">★★★★★</span></td>
+                  <td><div class="t-title">Understory</div><div class="t-artist">Bertrand Kell</div></td>
+                  <td><span class="chip">Techno</span></td>
+                  <td class="mono-cell">130.0 · 4A</td>
+                  <td><span class="energy"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><span class="n">8</span></span></td>
+                  <td><span class="swatch" style="background:var(--c-red)"></span></td>
+                  <td><span class="chip">Peak</span> <span class="chip">Dark</span></td>
+                  <td><span class="status ready"><i></i>Ready</span></td>
+                </tr>
+                <tr tabindex="0">
+                  <td><span class="stars"><span class="off">★★★★★</span></span></td>
+                  <td><div class="t-title">Copper Hours</div><div class="t-artist">Meridian Tape</div></td>
+                  <td><span class="chip" style="opacity:.5">—</span></td>
+                  <td class="mono-cell">— · —</td>
+                  <td><span class="energy" style="opacity:.35"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></td>
+                  <td></td>
+                  <td></td>
+                  <td><span class="status"><i></i>Needs prep</span></td>
+                </tr>
+                <tr tabindex="0">
+                  <td><span class="stars">★★★★<span class="off">★</span></span></td>
+                  <td><div class="t-title">Sunday Service</div><div class="t-artist">Val Okonjo</div></td>
+                  <td><span class="chip">Disco</span></td>
+                  <td class="mono-cell">118.5 · 11B</td>
+                  <td><span class="energy"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><i></i><span class="n">6</span></span></td>
+                  <td><span class="swatch" style="background:var(--c-yellow)"></span></td>
+                  <td><span class="chip">Opening</span></td>
+                  <td><span class="status ready"><i></i>Ready</span></td>
+                </tr>
+                <tr tabindex="0">
+                  <td><span class="stars">★★<span class="off">★★★</span></span></td>
+                  <td><div class="t-title">Transit Lounge</div><div class="t-artist">Kite Season</div></td>
+                  <td><span class="chip">House</span></td>
+                  <td class="mono-cell">122.0 · 5A</td>
+                  <td><span class="energy"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><i></i><i></i><i></i><span class="n">4</span></span></td>
+                  <td></td>
+                  <td><span class="chip">Warm</span></td>
+                  <td><span class="status ready"><i></i>Ready</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Right ─ classifier -->
+          <aside class="pane-r" aria-label="Classify">
+            <div class="tabs" role="tablist">
+              <button role="tab" aria-selected="true" data-tab="tag" type="button">Tag</button>
+              <button role="tab" aria-selected="false" data-tab="filter" type="button">Filter</button>
+            </div>
+
+            <div class="rpane" id="pane-tag">
+              <p class="selhint">3 tracks selected</p>
+
+              <div class="tag-group">
+                <h4>Vibe</h4>
+                <div class="tag-row">
+                  <button class="tag" data-state="all" type="button">Warm</button>
+                  <button class="tag" data-state="partial" type="button">Dark</button>
+                  <button class="tag" data-state="off" type="button">Euphoric</button>
+                  <button class="tag" data-state="off" type="button">Hypnotic</button>
+                  <button class="tag addtag" type="button">+</button>
+                </div>
+              </div>
+
+              <div class="tag-group">
+                <h4>Situation</h4>
+                <div class="tag-row">
+                  <button class="tag" data-state="off" type="button">Opening</button>
+                  <button class="tag" data-state="all" type="button">Peak</button>
+                  <button class="tag" data-state="off" type="button">Closing</button>
+                  <button class="tag addtag" type="button">+</button>
+                </div>
+              </div>
+
+              <div class="tag-group">
+                <h4>Element</h4>
+                <div class="tag-row">
+                  <button class="tag" data-state="off" type="button">Vocal</button>
+                  <button class="tag" data-state="partial" type="button">Perc</button>
+                  <button class="tag" data-state="off" type="button">Acid</button>
+                  <button class="tag addtag" type="button">+</button>
+                </div>
+              </div>
+
+              <button class="suggest" type="button">✦ Suggest tags for 3,224 untagged</button>
+            </div>
+
+            <div class="rpane" id="pane-filter" hidden>
+              <div class="field">
+                <label>BPM <b>124 – 128</b></label>
+                <div class="track-rail">
+                  <div class="track-fill" style="left:32%;right:26%"></div>
+                  <span class="knob" style="left:32%"></span>
+                  <span class="knob" style="left:74%"></span>
+                </div>
+              </div>
+
+              <div class="field">
+                <label>Key <b>Camelot</b></label>
+                <div class="camelot">
+                  <span>1A</span><span>2A</span><span>3A</span><span>4A</span><span>5A</span><span>6A</span>
+                  <span>7A</span><span class="on">8A</span><span class="on">9A</span><span>10A</span><span>11A</span><span>12A</span>
+                </div>
+              </div>
+
+              <div class="field">
+                <label>Rating <b>★4 and up</b></label>
+                <div class="track-rail"><div class="track-fill" style="left:0;right:20%"></div><span class="knob" style="left:80%"></span></div>
+              </div>
+
+              <div class="field">
+                <label>Energy <b>6 – 9</b></label>
+                <div class="track-rail">
+                  <div class="track-fill" style="left:50%;right:10%"></div>
+                  <span class="knob" style="left:50%"></span>
+                  <span class="knob" style="left:90%"></span>
+                </div>
+              </div>
+
+              <div class="field">
+                <label>Colour</label>
+                <div class="colors">
+                  <button type="button" aria-pressed="false" style="background:var(--c-pink)" aria-label="Pink"></button>
+                  <button type="button" aria-pressed="true"  style="background:var(--c-red)" aria-label="Red"></button>
+                  <button type="button" aria-pressed="false" style="background:var(--c-orange)" aria-label="Orange"></button>
+                  <button type="button" aria-pressed="false" style="background:var(--c-yellow)" aria-label="Yellow"></button>
+                  <button type="button" aria-pressed="false" style="background:var(--c-green)" aria-label="Green"></button>
+                  <button type="button" aria-pressed="false" style="background:var(--c-aqua)" aria-label="Aqua"></button>
+                  <button type="button" aria-pressed="true"  style="background:var(--c-blue)" aria-label="Blue"></button>
+                  <button type="button" aria-pressed="false" style="background:var(--c-purple)" aria-label="Purple"></button>
+                </div>
+              </div>
+
+              <button class="suggest" type="button">Save as Smart Crate · 286 match</button>
+            </div>
+          </aside>
+
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Decisions ──────────────────────────────────────────── -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">02 — Decisions</p>
+      <h2>Why it looks like this</h2>
+    </div>
+
+    <dl class="decisions">
+      <div class="decision">
+        <dt>Colour</dt>
+        <dd>
+          <strong>The chrome is monochrome so the track colours are the only hues on screen.</strong>
+          <p>In a tool whose job is colour-coding, a coloured button competes with the data.
+          Selection is a warm bone rail; status is a filled or hollow dot, never a green pill.
+          The eight label colours are identical in both themes, because a red track has to be red
+          on a laptop and on a projector.</p>
+        </dd>
+      </div>
+
+      <div class="decision">
+        <dt>Energy</dt>
+        <dd>
+          <strong>Ten segments, read as length, not as a number to parse.</strong>
+          <p>Derived from the mean of the analysed energy arc rather than its peak — nearly every
+          dance track peaks near full somewhere, so a peak-based scale collapses the whole library
+          to nines and tens and stops discriminating.</p>
+        </dd>
+      </div>
+
+      <div class="decision">
+        <dt>Mixed tags</dt>
+        <dd>
+          <strong>A tag that only part of a selection carries gets its own state.</strong>
+          <p>Rendering it as "off" would invite a click that strips the tag from the tracks that
+          had it. The half-filled chip with a dash is the safeguard — see <em>Dark</em> and
+          <em>Perc</em> in the panel above.</p>
+        </dd>
+      </div>
+
+      <div class="decision">
+        <dt>Four categories</dt>
+        <dd>
+          <strong>Exactly four, renameable, fifty tags each.</strong>
+          <p>rekordbox exposes exactly four My Tag categories, so four is what survives an export
+          intact. It also keeps the grid hittable without reading. Enforced by the type system —
+          there is no code path that produces a fifth.</p>
+        </dd>
+      </div>
+
+      <div class="decision">
+        <dt>Ownership</dt>
+        <dd>
+          <strong>Ratings and tags live on the track row, never in the vendor mirror.</strong>
+          <p>The Serato/rekordbox metadata table is a cache that gets rebuilt wholesale on every
+          sync. Anything parked there would vanish the next time you pressed Sync Library. Imports
+          seed empty fields and stop there — a value you set outranks every later import.</p>
+        </dd>
+      </div>
+
+      <div class="decision">
+        <dt>Suggestions</dt>
+        <dd>
+          <strong>Nothing is applied without you accepting it.</strong>
+          <p>Soria can score untagged tracks against the tracks you already tagged, which is the one
+          thing rekordbox and Serato cannot do. That earns a proposal, not a write.</p>
+        </dd>
+      </div>
+    </dl>
+  </section>
+
+  <!-- ── Components ─────────────────────────────────────────── -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">03 — Components</p>
+      <h2>States to build against</h2>
+      <p class="note">Each of these becomes a SwiftUI view. The states shown are the ones the tests assert.</p>
+    </div>
+
+    <div class="grid">
+
+      <article class="card">
+        <div class="card-head">
+          <h3>Crate tree node</h3>
+          <p>Depth by indent, count right-aligned and tabular so the column reads as a column.</p>
+        </div>
+        <div class="demo" style="padding:var(--s2) 0">
+          <div class="node"><span class="caret">▾</span><span class="label">House</span><span class="count">1,142</span></div>
+          <div class="node d1" aria-selected="true"><span class="caret"></span><span class="label">Cluster 01 · Deep</span><span class="count">34</span></div>
+          <div class="node d1"><span class="caret"></span><span class="label">Cluster 02 · Jackin</span><span class="count">28</span></div>
+          <div class="node"><span class="swatch" style="background:var(--c-aqua)"></span><span class="label">Untagged ★4+</span><span class="count">91</span></div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <h3>Rating &amp; energy</h3>
+          <p>Both settable in the row. Zero stars means unrated, matching both vendors.</p>
+        </div>
+        <div class="demo demo-rows">
+          <div><span class="demo-label">Rated</span><br><span class="stars">★★★★<span class="off">★</span></span></div>
+          <div><span class="demo-label">Unrated</span><br><span class="stars"><span class="off">★★★★★</span></span></div>
+          <div><span class="demo-label">Energy 7</span><br><span class="energy"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><span class="n">7</span></span></div>
+          <div><span class="demo-label">Not analysed</span><br><span class="energy" style="opacity:.35"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <h3>Tag chip</h3>
+          <p>Three states. The middle one is the one that prevents data loss.</p>
+        </div>
+        <div class="demo">
+          <div class="tag-row">
+            <button class="tag" data-state="off" type="button">Off</button>
+            <button class="tag" data-state="partial" type="button">Mixed</button>
+            <button class="tag" data-state="all" type="button">On</button>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <h3>Source badge</h3>
+          <p>Where a value came from. Editing anything promotes it to <em>You</em>, permanently.</p>
+        </div>
+        <div class="demo demo-rows">
+          <div><span class="stars">★★★★<span class="off">★</span></span> <span class="chip">Serato</span></div>
+          <div><span class="energy"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i><i></i><i></i><i></i><span class="n">6</span></span> <span class="chip">Soria Analysis</span></div>
+          <div><span class="stars">★★★★★</span> <span class="chip" style="border-color:var(--accent-line);color:var(--text)">You</span></div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <h3>Smart crate rules</h3>
+          <p>Field, operator, value. Match all or any, with a live count before you save.</p>
+        </div>
+        <div class="demo demo-rows">
+          <div class="rule"><span class="sel">Match</span><span class="sel op">all</span><span class="sel">of</span></div>
+          <div class="rule"><span class="sel">BPM</span><span class="sel op">between</span><span class="sel">124 – 128</span><span class="x">✕</span></div>
+          <div class="rule"><span class="sel">Rating</span><span class="sel op">≥</span><span class="sel">★4</span><span class="x">✕</span></div>
+          <div class="rule"><span class="sel">Tag</span><span class="sel op">is not</span><span class="sel">Closing</span><span class="x">✕</span></div>
+          <div class="rule"><span class="sel" style="border-style:dashed;color:var(--faint)">+ Add rule</span><span class="conf" style="margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--dim)">286 match</span></div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <h3>Suggestion review</h3>
+          <p>Confidence is shown per row. Nothing is written until you accept.</p>
+        </div>
+        <div class="demo">
+          <div class="sug">
+            <div class="who"><div class="t-title">Copper Hours</div><div class="t-artist">→ Warm, Opening</div></div>
+            <div class="conf-bar"><i style="width:92%"></i></div>
+            <span class="conf">92%</span>
+            <div class="yn"><button class="yes" aria-pressed="true" type="button">✓</button><button type="button">✕</button></div>
+          </div>
+          <div class="sug">
+            <div class="who"><div class="t-title">Transit Lounge</div><div class="t-artist">→ Hypnotic</div></div>
+            <div class="conf-bar"><i style="width:71%"></i></div>
+            <span class="conf">71%</span>
+            <div class="yn"><button class="yes" aria-pressed="false" type="button">✓</button><button type="button">✕</button></div>
+          </div>
+          <div class="sug">
+            <div class="who"><div class="t-title">Salt Flats</div><div class="t-artist">→ Perc</div></div>
+            <div class="conf-bar"><i style="width:58%"></i></div>
+            <span class="conf">58%</span>
+            <div class="yn"><button class="yes" aria-pressed="false" type="button">✓</button><button type="button">✕</button></div>
+          </div>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ── Build order ────────────────────────────────────────── -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">04 — Build order</p>
+      <h2>Each phase ships on its own</h2>
+    </div>
+    <div class="phases">
+      <div class="phase done"><b>PHASE 1 · DONE</b><span>Rating, energy, colour, genre family and tag tables persisted — with vendor and analysis seeding, and arbitration that never overwrites what you set.</span></div>
+      <div class="phase"><b>PHASE 2</b><span>The three panes above: crate tree, extended table, classifier panel.</span></div>
+      <div class="phase"><b>PHASE 3</b><span>Smart crates — save the filter as a rule set that keeps matching new tracks.</span></div>
+      <div class="phase"><b>PHASE 4</b><span>Suggestions from embeddings, reviewed before anything is written.</span></div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+  (function () {
+    var root = document.documentElement;
+    var toggle = document.getElementById('themeToggle');
+
+    function currentIsDark() {
+      var stamped = root.getAttribute('data-theme');
+      if (stamped) return stamped === 'dark';
+      return !window.matchMedia('(prefers-color-scheme: light)').matches;
+    }
+    function syncLabel() {
+      toggle.textContent = currentIsDark() ? 'Light' : 'Dark';
+    }
+    toggle.addEventListener('click', function () {
+      root.setAttribute('data-theme', currentIsDark() ? 'light' : 'dark');
+      syncLabel();
+    });
+    syncLabel();
+
+    // Crate tree — single selection.
+    var nodes = document.querySelectorAll('.pane-l .node');
+    nodes.forEach(function (node) {
+      node.addEventListener('click', function () {
+        nodes.forEach(function (n) { n.removeAttribute('aria-selected'); });
+        node.setAttribute('aria-selected', 'true');
+      });
+    });
+
+    // Table rows — click to select, shift-click to extend.
+    var rows = document.querySelectorAll('#tbody tr');
+    rows.forEach(function (row) {
+      row.addEventListener('click', function (event) {
+        if (!event.shiftKey) {
+          rows.forEach(function (r) { r.removeAttribute('aria-selected'); });
+        }
+        row.setAttribute('aria-selected', 'true');
+        var count = document.querySelectorAll('#tbody tr[aria-selected="true"]').length;
+        var hint = document.querySelector('.selhint');
+        hint.textContent = count === 1 ? '1 track selected' : count + ' tracks selected';
+      });
+    });
+
+    // Classifier tabs.
+    var tabs = document.querySelectorAll('.tabs button');
+    tabs.forEach(function (tab) {
+      tab.addEventListener('click', function () {
+        tabs.forEach(function (t) { t.setAttribute('aria-selected', 'false'); });
+        tab.setAttribute('aria-selected', 'true');
+        document.getElementById('pane-tag').hidden = tab.dataset.tab !== 'tag';
+        document.getElementById('pane-filter').hidden = tab.dataset.tab !== 'filter';
+      });
+    });
+
+    // Tag chips — a mixed chip resolves to "on" first, never straight to off,
+    // so one click can't strip a tag from the tracks that already carry it.
+    document.querySelectorAll('.tag[data-state]').forEach(function (chip) {
+      chip.addEventListener('click', function () {
+        var state = chip.getAttribute('data-state');
+        chip.setAttribute('data-state', state === 'all' ? 'off' : 'all');
+      });
+    });
+
+    // Colour filter swatches.
+    document.querySelectorAll('.colors button').forEach(function (swatch) {
+      swatch.addEventListener('click', function () {
+        var on = swatch.getAttribute('aria-pressed') === 'true';
+        swatch.setAttribute('aria-pressed', on ? 'false' : 'true');
+      });
+    });
+
+    // Suggestion accept toggles.
+    document.querySelectorAll('.yn .yes').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var on = button.getAttribute('aria-pressed') === 'true';
+        button.setAttribute('aria-pressed', on ? 'false' : 'true');
+      });
+    });
+  })();
+</script>

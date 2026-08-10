@@ -791,6 +791,16 @@ final class DJLibrarySyncService: @unchecked Sendable {
             let existingMetadata = try database.fetchExternalMetadata(trackID: trackID)
             let updatedTrack = enrich(track: localTrack, with: records)
             try database.upsertTrack(updatedTrack)
+            // Classification needs its own write: `upsertTrack` deliberately
+            // leaves those columns alone on conflict so a rescan cannot wipe
+            // ratings and tags. `enrich` has already merged by source priority,
+            // so anything the user set is preserved in the value being stored.
+            if updatedTrack.classification != localTrack.classification {
+                try database.updateTrackClassification(
+                    trackID: trackID,
+                    classification: updatedTrack.classification
+                )
+            }
             localTracksByID[trackID] = updatedTrack
 
             for source in ExternalDJMetadata.Source.allCases {
@@ -918,7 +928,43 @@ final class DJLibrarySyncService: @unchecked Sendable {
         applyPreferredBPMAndKey(to: &updatedTrack, records: seratoRecords, source: .serato)
         applyPreferredBPMAndKey(to: &updatedTrack, records: rekordboxRecords, source: .rekordbox)
 
+        applyVendorClassification(to: &updatedTrack, records: seratoRecords, source: .serato)
+        applyVendorClassification(to: &updatedTrack, records: rekordboxRecords, source: .rekordbox)
+
         return updatedTrack
+    }
+
+    /// Seeds Soria's own rating and colour from what the DJ software already
+    /// knows, so a user with a rated Serato library sees their stars on first
+    /// launch instead of an empty column.
+    ///
+    /// Merging goes through `TrackClassification`, which consults source
+    /// priority — a value the user typed in Soria outranks the import and stays
+    /// put.
+    private func applyVendorClassification(
+        to track: inout Track,
+        records: [VendorLibraryTrackRecord],
+        source: ExternalDJMetadata.Source
+    ) {
+        guard !records.isEmpty else { return }
+        let metadataSource: TrackMetadataSource = source == .serato ? .serato : .rekordbox
+
+        let importedRating = records
+            .compactMap(\.metadata.rating)
+            .first
+            .map { TrackRating(vendorValue: $0) }
+
+        let importedColor = records
+            .compactMap(\.metadata.color)
+            .lazy
+            .compactMap(TrackColorLabel.nearest(toHex:))
+            .first
+
+        track.classification = track.classification.mergingVendor(
+            rating: importedRating,
+            colorLabel: importedColor,
+            from: metadataSource
+        )
     }
 
     private func applyPreferredBPMAndKey(

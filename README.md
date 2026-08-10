@@ -212,30 +212,38 @@ See [docs/RELEASING.md](docs/RELEASING.md) for the GitHub Releases workflow.
    waveform-derived previews, analysis confidence, cue information, and segment
    structure.
 
-9. **Generate recommendations.** Select a seed track and ask Soria for compatible
+9. **Classify your library.** The Library is a three-pane browser: crates on the
+   left, tracks in the middle, a classifier on the right. Rate a track, set its
+   energy and colour, and tag it from four categories you can rename. Filter by
+   BPM, Camelot key, rating, energy, colour, or tag, then **Save as Smart Crate**
+   to keep that filter as a crate new tracks join automatically. **Suggest tags**
+   scores untagged tracks against the ones you already tagged; you review every
+   suggestion before anything is written.
+
+10. **Generate recommendations.** Select a seed track and ask Soria for compatible
    next-track candidates. Scores combine segment similarity, tempo/key context,
    energy shape, and available DJ metadata.
 
-10. **Normalize audio when needed.** Suggested normalization replaces the active
+11. **Normalize audio when needed.** Suggested normalization replaces the active
    library file with the normalized copy. The original file is moved to macOS
    Trash with its original file name, so Finder's **Put Back** can restore it
    more naturally. If Trash is unavailable, Soria keeps a timestamped backup
    next to the track and shows a warning.
 
-11. **Build playlist paths.** Use recommendations to assemble a candidate path
+12. **Build playlist paths.** Use recommendations to assemble a candidate path
    through your library, then refine the order manually before export.
 
-12. **Export for DJ software.** Export Rekordbox XML or the Serato-safe package.
+13. **Export for DJ software.** Export Rekordbox XML or the Serato-safe package.
    Serato export is intentionally non-destructive and does not directly rewrite
    local crate files.
 
-13. **Set unwanted tracks aside.** Select tracks in the Library and choose
+14. **Set unwanted tracks aside.** Select tracks in the Library and choose
     **Move to Soria Trash**. Files move into a `Soria Quarantine` folder on the
     same drive and leave the library list, but nothing is deleted. Review and
     restore them individually or all at once from the Organizer's **Soria
     Trash** tab, or use **Delete Permanently** to hand them to the system Trash.
 
-14. **Organize your library into folders.** Open **Organizer > Plan**, choose a
+15. **Organize your library into folders.** Open **Organizer > Plan**, choose a
     scope and a destination folder, then **Build Preview**. Soria detects a
     genre per prepared track from its embedding and clusters similar tracks
     inside each genre, proposing
@@ -243,13 +251,13 @@ See [docs/RELEASING.md](docs/RELEASING.md) for the GitHub Releases workflow.
     with, then **Apply Selected**. Files are moved, not copied, and the old
     paths are remembered so the next Serato/rekordbox sync still matches them.
 
-15. **Export the organized folders.** Use **Export Organized Folders** to send
+16. **Export the organized folders.** Use **Export Organized Folders** to send
     every folder to your DJ software in one action: one Serato crate per folder
     (nested via `%%`), a single rekordbox XML containing the whole tree, or one
     `.m3u8` per folder. Because organizing moves files, existing crates and
     playlists point at the old paths until you re-export.
 
-16. **Compare tracks on the map.** Open **Organizer → Map** to see every prepared
+17. **Compare tracks on the map.** Open **Organizer → Map** to see every prepared
     track as a dot, placed so similar-sounding tracks sit close together. Colour
     the dots by genre, by the Soria folder they already belong to, or by BPM band
     to check whether a grouping really holds together. Click two dots to compare
@@ -257,7 +265,7 @@ See [docs/RELEASING.md](docs/RELEASING.md) for the GitHub Releases workflow.
     from Selection** (groups them for export without moving anything) or **Send
     Selection to Plan** (hands them to step 13, where files do move).
 
-17. **Check logs when needed.** If analysis fails, inspect Soria logs and worker
+18. **Check logs when needed.** If analysis fails, inspect Soria logs and worker
     stderr. Most failures are missing Python packages, missing API keys, or audio
     files the local decoder cannot read.
 
@@ -333,6 +341,8 @@ not available in every sandboxed environment.
 - Home runs the pipeline actions that fit on one screen. The organization plan
   table, the similarity map, and curated mix results still open in their own
   panes because they need the width.
+- Tag suggestions learn from your own tags, so a tag needs at least three
+  example tracks before Soria can propose it for anything else.
 
 ### Privacy and Security
 
@@ -561,30 +571,38 @@ GitHub Releases workflow는 [docs/RELEASING.md](docs/RELEASING.md)를 참고하�
 8. **트랙 세부 정보를 검토합니다.** Library에서 트랙을 선택해 metadata, waveform-derived
    preview, analysis confidence, cue information, segment structure를 확인합니다.
 
-9. **추천을 생성합니다.** seed track을 선택하고 Soria에 호환되는 다음 트랙 후보를
+9. **라이브러리를 분류합니다.** Library는 3분할 브라우저입니다. 왼쪽에 크레이트,
+   가운데에 트랙, 오른쪽에 분류 패널이 있습니다. 별점과 에너지, 색상을 지정하고
+   이름을 바꿀 수 있는 4개 카테고리로 태그를 답니다. BPM · Camelot 키 · 별점 ·
+   에너지 · 색상 · 태그로 걸러낸 뒤 **Save as Smart Crate**를 누르면 새로 들어오는
+   곡도 자동으로 포함되는 크레이트가 됩니다. **Suggest tags**는 이미 태그를 단
+   곡들과 비교해 태그 없는 곡을 추천하며, 확인하고 수락하기 전까지 아무것도
+   저장되지 않습니다.
+
+10. **추천을 생성합니다.** seed track을 선택하고 Soria에 호환되는 다음 트랙 후보를
    요청합니다. 점수는 segment similarity, tempo/key context, energy shape,
    사용 가능한 DJ metadata를 결합합니다.
 
-10. **필요하면 오디오를 normalize합니다.** 제안된 normalization은 활성 라이브러리 파일을
+11. **필요하면 오디오를 normalize합니다.** 제안된 normalization은 활성 라이브러리 파일을
    정규화된 파일로 교체하고, 원본 파일은 원래 파일명 그대로 macOS 휴지통으로
    보냅니다. 그래서 Finder의 **Put Back**으로 더 자연스럽게 복구할 수 있습니다.
    휴지통 이동을 사용할 수 없는 경우에는 트랙 옆에 timestamp backup을 남기고
    경고를 표시합니다.
 
-11. **플레이리스트 경로를 만듭니다.** 추천을 사용해 라이브러리 안의 candidate path를
+12. **플레이리스트 경로를 만듭니다.** 추천을 사용해 라이브러리 안의 candidate path를
     조립하고, export 전에 순서를 직접 다듬습니다.
 
-12. **DJ software용으로 내보냅니다.** Rekordbox XML 또는 Serato-safe package를
+13. **DJ software용으로 내보냅니다.** Rekordbox XML 또는 Serato-safe package를
     내보냅니다. Serato export는 의도적으로 비파괴적이며 local crate file을 직접
     rewrite하지 않습니다.
 
-13. **원치 않는 음원을 따로 치웁니다.** Library에서 트랙을 선택하고 **Move to
+14. **원치 않는 음원을 따로 치웁니다.** Library에서 트랙을 선택하고 **Move to
     Soria Trash**를 누르면 같은 드라이브의 `Soria Quarantine` 폴더로 옮겨지고
     라이브러리 목록에서 사라지지만 삭제되지는 않습니다. Organizer의 **Soria
     Trash** 탭에서 개별 또는 일괄 복원할 수 있고, **Delete Permanently**를 누르면
     macOS 휴지통으로 넘어갑니다.
 
-14. **라이브러리를 폴더로 정리합니다.** **Organizer > Plan**에서 범위와 대상
+15. **라이브러리를 폴더로 정리합니다.** **Organizer > Plan**에서 범위와 대상
     폴더를 고르고 **Build Preview**를 누릅니다. 준비된 트랙마다 임베딩으로 장르를
     판별하고 장르 안에서 유사한 트랙을 클러스터링해
     `<대상>/<장르>/Cluster NN - <아티스트>/` 구조를 제안합니다. 마음에 들지 않는
@@ -592,13 +610,13 @@ GitHub Releases workflow는 [docs/RELEASING.md](docs/RELEASING.md)를 참고하�
     이동되며, 옛 경로를 기록해 두므로 다음 Serato/rekordbox 동기화에서 계속
     매칭됩니다.
 
-15. **정리한 폴더를 내보냅니다.** **Export Organized Folders**로 모든 폴더를 한
+16. **정리한 폴더를 내보냅니다.** **Export Organized Folders**로 모든 폴더를 한
     번에 DJ 소프트웨어로 보냅니다. 폴더당 Serato 크레이트 하나(`%%`로 중첩), 전체
     트리를 담은 rekordbox XML 하나, 또는 폴더당 `.m3u8` 하나 중에서 고를 수
     있습니다. 정리는 파일을 이동하므로, 다시 내보내기 전까지 기존 크레이트와
     플레이리스트는 옛 경로를 가리킵니다.
 
-16. **지도에서 곡을 비교합니다.** **Organizer → Map**을 열면 준비된 트랙이 점
+17. **지도에서 곡을 비교합니다.** **Organizer → Map**을 열면 준비된 트랙이 점
     하나씩으로 표시되고, 비슷하게 들리는 곡일수록 가까이 배치됩니다. 점 색깔을
     장르 · 이미 속한 Soria 폴더 · BPM 구간 중에서 골라, 묶음이 실제로 뭉쳐 있는지
     눈으로 확인할 수 있습니다. 점 두 개를 고르면 나란히 비교하고, 드래그로 영역을
@@ -606,7 +624,7 @@ GitHub Releases workflow는 [docs/RELEASING.md](docs/RELEASING.md)를 참고하�
     묶기) 또는 **Send Selection to Plan**(13단계로 넘겨 실제로 파일 이동)을
     누릅니다.
 
-17. **필요하면 로그를 확인합니다.** 분석이 실패하면 Soria log와 worker stderr를
+18. **필요하면 로그를 확인합니다.** 분석이 실패하면 Soria log와 worker stderr를
     확인합니다. 대부분의 실패는 누락된 Python package, 누락된 API key, 또는 local
     decoder가 읽을 수 없는 오디오 파일 때문입니다.
 
@@ -676,6 +694,8 @@ service가 필요할 수 있습니다.
   접근을 다시 허용하기 전까지 정리 기능이 비활성화됩니다.
 - Home은 한 화면에 들어가는 동작만 실행합니다. 정리 계획 표, 유사도 지도, 큐레이션된
   믹스 결과는 넓이가 필요해서 각자의 화면에서 열립니다.
+- 태그 추천은 사용자가 직접 단 태그에서 학습하므로, 같은 태그가 붙은 곡이
+  최소 3개는 있어야 그 태그를 다른 곡에 제안할 수 있습니다.
 
 ### 개인정보 보호 및 보안
 
@@ -902,48 +922,56 @@ GitHub Releases workflowについては[docs/RELEASING.md](docs/RELEASING.md)を
 8. **トラック詳細を確認します。** Libraryでトラックを選択し、metadata、waveform-derived
    preview、analysis confidence、cue information、segment structureを確認します。
 
-9. **推薦を生成します。** seed trackを選択し、互換性のある次の候補曲をSoriaに
+9. **ライブラリを分類します。** Libraryは3ペインのブラウザです。左にクレート、
+   中央にトラック、右に分類パネルがあります。レーティング、エナジー、カラーを
+   設定し、名前を変更できる4つのカテゴリでタグを付けられます。BPM・Camelotキー・
+   レーティング・エナジー・カラー・タグで絞り込んだ後、**Save as Smart Crate** を
+   押すと、新しく追加された曲も自動で含まれるクレートになります。**Suggest tags**
+   は既にタグを付けた曲と比較して未タグの曲を提案し、確認して受け入れるまで
+   何も保存されません。
+
+10. **推薦を生成します。** seed trackを選択し、互換性のある次の候補曲をSoriaに
    生成させます。スコアはsegment similarity、tempo/key context、energy shape、
    利用可能なDJ metadataを組み合わせます。
 
-10. **必要に応じてオーディオをnormalizeします。** 提案されたnormalizationはアクティブな
+11. **必要に応じてオーディオをnormalizeします。** 提案されたnormalizationはアクティブな
    ライブラリファイルを正規化済みファイルに置き換え、元ファイルは元の
    ファイル名のままmacOSのTrashへ移動します。そのためFinderの**Put Back**で
    より自然に復元できます。Trashを使えない場合は、トラックの横にtimestamp
    backupを残して警告を表示します。
 
-11. **プレイリストの流れを作ります。** 推薦を使ってライブラリ内のcandidate pathを
+12. **プレイリストの流れを作ります。** 推薦を使ってライブラリ内のcandidate pathを
     組み立て、export前に順序を手動で調整します。
 
-12. **DJ software向けに書き出します。** Rekordbox XMLまたはSerato-safe packageを
+13. **DJ software向けに書き出します。** Rekordbox XMLまたはSerato-safe packageを
     書き出します。Serato exportは意図的に非破壊で、local crate fileを直接rewrite
     しません。
 
-13. **不要なトラックを脇に寄せます。** Libraryでトラックを選び **Move to Soria
+14. **不要なトラックを脇に寄せます。** Libraryでトラックを選び **Move to Soria
     Trash** を押すと、同じドライブの`Soria Quarantine`フォルダへ移動してライブラリ
     一覧から消えますが、削除はされません。Organizerの **Soria Trash** タブから
     個別または一括で復元でき、**Delete Permanently** でmacOSのゴミ箱へ送れます。
 
-14. **ライブラリをフォルダへ整理します。** **Organizer > Plan** で範囲と保存先
+15. **ライブラリをフォルダへ整理します。** **Organizer > Plan** で範囲と保存先
     フォルダを選び **Build Preview** を押します。準備済みトラックごとに埋め込みから
     ジャンルを判定し、ジャンル内で類似トラックをクラスタリングして
     `<保存先>/<ジャンル>/Cluster NN - <アーティスト>/` を提案します。納得できない
     移動はチェックを外してから **Apply Selected** を押します。ファイルはコピーでは
     なく移動され、旧パスを記録するため次のSerato/rekordbox同期でも照合されます。
 
-15. **整理したフォルダを書き出します。** **Export Organized Folders** で全フォルダ
+16. **整理したフォルダを書き出します。** **Export Organized Folders** で全フォルダ
     を一度にDJソフトへ渡せます。フォルダごとのSerato crate（`%%`でネスト）、ツリー
     全体を含むrekordbox XML 1つ、フォルダごとの`.m3u8`のいずれかを選べます。整理は
     ファイルを移動するため、再書き出しまで既存のcrateとplaylistは旧パスを指します。
 
-16. **マップで曲を比較します。** **Organizer > Map** を開くと、準備済みトラックが
+17. **マップで曲を比較します。** **Organizer > Map** を開くと、準備済みトラックが
     点として表示され、似た響きの曲ほど近くに配置されます。点の色をジャンル・すでに
     所属するSoriaフォルダ・BPM帯から選べるので、まとまりが実際に成立しているかを
     目で確認できます。点を2つ選ぶと並べて比較でき、ドラッグで範囲を選んでから
     **Create Folder from Selection**（ファイルを移動せず書き出し用にまとめる）か
     **Send Selection to Plan**（13番へ渡して実際にファイルを移動）を押します。
 
-17. **必要に応じてログを確認します。** 解析が失敗した場合は、Soria logとworker
+18. **必要に応じてログを確認します。** 解析が失敗した場合は、Soria logとworker
     stderrを確認します。多くの失敗は、Python packageの不足、API keyの不足、または
     local decoderが読めないオーディオファイルが原因です。
 
@@ -1014,6 +1042,8 @@ environmentでは利用できないlocal system servicesを必要とする場合
   再選択バナーが表示され、アクセスを再許可するまで整理機能は無効のままです。
 - Homeは1画面に収まる操作のみを実行します。整理プランの表、類似度マップ、キュレーション
   済みのミックス結果は幅が必要なため、引き続き専用画面で開きます。
+- タグ提案はユーザー自身が付けたタグから学習するため、同じタグが付いた曲が
+  最低3曲ないと、そのタグを他の曲に提案できません。
 
 ### プライバシーとセキュリティ
 

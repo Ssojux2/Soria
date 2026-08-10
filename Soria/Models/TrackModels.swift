@@ -1,6 +1,10 @@
 import Foundation
 
 enum TrackMetadataSource: String, Codable, CaseIterable {
+    /// The user typed it. Outranks everything, including Soria's own analysis —
+    /// once someone has decided a track is 4 stars, no later import gets to
+    /// disagree.
+    case user
     case soriaAnalysis = "soria_analysis"
     case serato
     case rekordbox
@@ -9,6 +13,8 @@ enum TrackMetadataSource: String, Codable, CaseIterable {
 
     var displayName: String {
         switch self {
+        case .user:
+            return "You"
         case .soriaAnalysis:
             return "Soria Analysis"
         case .serato:
@@ -24,6 +30,8 @@ enum TrackMetadataSource: String, Codable, CaseIterable {
 
     var priority: Int {
         switch self {
+        case .user:
+            return 5
         case .soriaAnalysis:
             return 4
         case .serato, .rekordbox:
@@ -61,6 +69,14 @@ struct Track: Identifiable, Codable, Hashable {
     var bpmSource: TrackMetadataSource?
     var keySource: TrackMetadataSource?
     var lastSeenInLocalScanAt: Date? = nil
+
+    /// Rating, energy, colour, and the inferred genre family — everything the
+    /// user classifies a track by. Kept as one nested value rather than nine more
+    /// stored properties so vendor merges and user edits have a single thing to
+    /// operate on. Declared last, with a default, so existing memberwise-init
+    /// call sites keep compiling.
+    var classification: TrackClassification = TrackClassification()
+
     var bpmSortValue: Double { bpm ?? 0 }
 
     func hasCurrentEmbedding(profileID: String, pipelineID: String) -> Bool {

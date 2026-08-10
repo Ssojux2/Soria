@@ -31,6 +31,10 @@ segment payloads and text queries to Google for embedding.
   readout on every pane.
 - `Soria/Views/HomeDashboardView.swift` is the default landing screen and runs
   the pipeline actions that do not need a full-width table.
+- `Soria/Views/LibraryView.swift` is a three-pane browser: `LibraryCrateTreeView`
+  on the left, the track table in the middle, and `TrackClassifierPanel` on the
+  right. `LibraryBrowserModel` holds the crate selection, tag catalog, and
+  classification filter.
 - `Soria/ViewModels/AppViewModel.swift` coordinates setup, scan, analysis,
   recommendations, queue normalization, and export.
 - `Soria/Services/LibraryDatabase.swift` persists tracks, segments, external
@@ -93,6 +97,12 @@ key overrides.
 | --- | --- | --- |
 | Home dashboard | Implemented | `WorkspaceDashboardState.make`, `HomeDashboardView` |
 | Cross-pane toolbar | Implemented | `WorkspaceToolbar` |
+| Three-pane Library browser | Implemented | `LibraryCrateTreeView`, `TrackClassifierPanel`, `LibraryBrowserModel` |
+| Track classification (rating, energy, colour) | Implemented | `TrackClassificationModels`, `LibraryDatabase.updateTrackClassification` |
+| User tag vocabulary | Implemented, four fixed categories | `TagCatalogModels`, `tag_catalog`, `track_tags` |
+| Classification filtering | Implemented | `LibraryClassificationFilter`, `CamelotKey` |
+| Rule-based smart crates | Implemented | `SmartCrateModels`, `SmartCrateRuleBuilderView` |
+| Embedding-based tag suggestions | Implemented, review required before writing | `ClassificationSuggestionEngine`, `ClassificationSuggestionSheet` |
 | First-run setup | Implemented | `AppViewModel.completeInitialSetup`, `ContentView.InitialSetupSheet` |
 | Music folder scan | Implemented | `LibraryScannerService.scan` |
 | Incremental scan skip | Implemented | `LibraryScannerService.scan`, `LibraryScannerService.refreshTrack` |
@@ -157,7 +167,54 @@ it the Organize card would report zero folders on a library that has plenty.
 `WorkspaceToolbar` mirrors the Prepare card's primary action from the same
 `preparationOverview`, so preparation stays visible and stoppable from any pane.
 
-### 2. First-Run Setup
+### 2. Library Classification
+
+The Library is a three-pane browser. `LibraryCrateTreeView` picks the scope,
+the table shows it, and `TrackClassifierPanel` changes it.
+
+**Left pane -- crate tree.** `LibraryCrateTree.makeSections(from:)` builds five
+sections from a plain `CrateTreeContext`:
+
+- Library: All Tracks, plus Inbox and Needs Prep when they are non-empty.
+- Soria Folders: the `soria_collections` hierarchy, nested by `parentID`, with
+  counts rolled up so a collapsed genre folder reports what is under it. This
+  tree existed in the database since the organizer shipped but had no UI before.
+- Smart Crates: `kind = 'smart'` collections, evaluated live.
+- References: Serato crates and rekordbox playlists, nested by path.
+- Maintenance: Soria Trash.
+
+**Centre pane -- the table.** Adds Rating, Energy, colour, genre family, and
+Tags columns to the existing Title/Artist/BPM-Key/Comment/Status set. Rating is
+editable in the row; everything else is set from the right pane.
+
+**Right pane -- classifier.** Two tabs. Tag applies rating, energy, colour, and
+the four tag categories across the selection. Filter narrows the table by BPM,
+Camelot key, rating, energy, colour, and tags, and can save that filter as a
+smart crate.
+
+**Data ownership.** Rating, energy, colour, genre family, and `date_added` are
+columns on `tracks`. Tags live in `tag_categories`, `tag_catalog`, and
+`track_tags`. Vendor values seed them on sync; `TrackMetadataSource.user`
+outranks every other source, so an imported rating never overwrites one the
+user set.
+
+**Keys.** `CamelotKey` normalizes Camelot (`8A`), note names (`Am`, `F# minor`),
+and Open Key (`1m`) onto one wheel, so a filter written in one notation matches
+a track stored in another. `compatibleKeys` implements the standard harmonic
+rule: same key, one step either way, and the relative major/minor.
+
+**Smart crates.** `SmartCrateRuleSet` is field/operator/value with all-or-any
+matching, stored in `soria_collections.rules_json` and evaluated per track
+rather than materialized -- that is what keeps a crate correct as the library
+grows. An empty rule set matches nothing, not everything.
+
+**Suggestions.** `ClassificationSuggestionEngine` averages the embeddings of the
+tracks carrying each tag and scores untagged tracks against those centroids. A
+tag needs at least three examples before it can be suggested from. Results are
+proposals: `ClassificationSuggestionSheet` reviews them and only the accepted
+rows are written.
+
+### 3. First-Run Setup
 
 The first-run sheet asks for a Gemini API key when the active embedding profile
 requires one. It also asks for a local music folder when no library source is
@@ -169,7 +226,7 @@ sources, and refreshes vendor metadata when available.
 
 If validation fails, setup remains open and surfaces the worker/API-key error.
 
-### 3. Library Scanning
+### 4. Library Scanning
 
 The scanner discovers regular audio files under the configured roots. Supported
 extensions are:
@@ -194,7 +251,7 @@ Incremental behavior:
 - Tracks no longer seen in scanned roots are removed from active local-scan
   membership queries.
 
-### 4. External DJ Metadata
+### 5. External DJ Metadata
 
 Soria can enrich scanned local tracks with vendor metadata.
 
@@ -214,7 +271,7 @@ available.
 Playlist and crate memberships are normalized into `membership_catalog` and
 `track_memberships`, which power the Library and Mix Assistant reference filters.
 
-### 5. Track Analysis
+### 6. Track Analysis
 
 Analysis runs through `PythonWorkerClient` and `analysis-worker/main.py`.
 
@@ -238,7 +295,7 @@ and embedded segment vectors.
 If an audio file changes later, `LibraryScannerService.refreshTrack` clears the
 stale analysis and invalidates vector entries.
 
-### 6. Worker Health and Vector Repair
+### 7. Worker Health and Vector Repair
 
 Settings validation calls `validate_embedding_profile`. The worker healthcheck
 reports dependency availability, embedding profile support, API-key presence,
@@ -248,7 +305,7 @@ When the SQLite ready-track set and Chroma vector index drift apart, Soria can
 automatically rebuild the vector index from stored track and segment embeddings.
 This is handled in `AppViewModel.repairVectorIndexIfNeeded`.
 
-### 7. Library Preview
+### 8. Library Preview
 
 Selecting one track in Library enables the preview strip when the file is
 playable. The preview supports:
@@ -261,7 +318,7 @@ playable. The preview supports:
 Waveform envelope backfill is handled through the worker when stored envelope
 data is missing.
 
-### 8. Recommendation Generation
+### 9. Recommendation Generation
 
 Mix Assistant can generate recommendations from:
 
@@ -288,7 +345,7 @@ Generated recommendations are persisted as score sessions. The database keeps
 the latest sessions per profile/kind and stores score snapshots for later
 debugging.
 
-### 9. Recommendation Curation and Playlist Path
+### 10. Recommendation Curation and Playlist Path
 
 Generated matches can be hidden and restored before building a path. The path
 builder starts from the current seed and repeatedly chooses the next best
@@ -298,7 +355,7 @@ queue.
 The final ordered tracks are copied into the export playlist queue and the app
 navigates to Exports.
 
-### 10. Queue Normalization
+### 11. Queue Normalization
 
 Exports have a playlist queue panel that inspects normalization state.
 
@@ -332,7 +389,7 @@ Mutation safety:
 Because the original is sent to Trash with the same file name, Finder's
 **Put Back** action can restore it more naturally.
 
-### 11. Export
+### 12. Export
 
 Exports run from `PlaylistExportService` after `VendorExportPreflight` prepares
 and validates the queue.
@@ -354,7 +411,7 @@ and warnings are shown through the Exports view.
 Exports do not automatically run normalization. The user explicitly reviews and
 runs "Normalize Suggested" from the queue.
 
-### 12. Soria Trash (Quarantine)
+### 13. Soria Trash (Quarantine)
 
 Selecting tracks in the Library and choosing **Move to Soria Trash** hands them
 to `LibraryQuarantineService`, which moves each file into a
@@ -383,7 +440,7 @@ Quarantine is deliberately not the system Trash: macOS gives an app no way to
 list or selectively restore its own trashed items, and reviewing a cull is the
 point of the feature.
 
-### 13. Local Folder Organization
+### 14. Local Folder Organization
 
 The Organizer's **Plan** tab turns prepared tracks into a folder tree.
 
@@ -419,7 +476,7 @@ Plans carry a low-confidence warning when more than 85% of tracks land in one
 folder, which is what an embedding model without a shared text/audio space looks
 like.
 
-### 14. Batch Vendor Export
+### 15. Batch Vendor Export
 
 **Export Organized Folders** sends every organized collection to Serato or
 rekordbox in one action through `PlaylistExportService.exportMany`.
@@ -436,7 +493,7 @@ record `last_exported_at`, and the Organizer warns when organizing happened
 after the last export — the window in which vendor libraries still hold
 pre-move paths.
 
-### 15. Similarity Map
+### 16. Similarity Map
 
 The Organizer's **Map** tab plots prepared tracks as a scatter of dots so cluster
 decisions can be checked by eye rather than read off a table.
@@ -483,7 +540,7 @@ waveform: dots are batched into one path per colour, hover uses `NSTrackingArea`
 a 4pt slop distinguishes a click from a rubber-band drag. Coordinate maths and hit
 testing live in the view-free `TrackMapLayout` and `TrackMapSpatialIndex`.
 
-### 16. Release Packaging
+### 17. Release Packaging
 
 `make release-dmg` runs `Scripts/create_release_dmg.sh`.
 
@@ -573,6 +630,33 @@ Relevant coverage found in the repo:
   would silently read zero.
 - The app opens on Home. UI tests deep-link with `UITEST_START_IN_LIBRARY` or
   `UITEST_START_IN_MIX_ASSISTANT` instead of navigating from Home.
+- **Soria's own annotations never live in `external_metadata`.** That table is a
+  replaceable import cache: `DJLibrarySyncService` rebuilds it wholesale on every
+  vendor sync, so a rating or tag stored there disappears the next time the user
+  presses Sync Library. Rating, energy, colour, and genre family are columns on
+  `tracks`; tags are in `track_tags`.
+- `upsertTrack` writes classification **on insert only** and deliberately omits
+  those columns from its `ON CONFLICT` clause. Every rescan and vendor sync calls
+  it with a freshly built `Track` whose classification is empty, so updating them
+  there would erase the user's work. Use `updateTrackClassification` instead —
+  passing a modified `track.classification` to `upsertTrack` silently does
+  nothing for a row that already exists.
+- Tag suggestions are proposals. `ClassificationSuggestionEngine` never writes;
+  `applySuggestions` writes only the rows the user ticked. A suggestion engine
+  that retags a five-thousand-track library on its own is worse than one that
+  suggests nothing.
+- Tag categories are fixed at four by `TagCategorySlot` having four cases, not by
+  a runtime check. rekordbox exposes exactly four My Tag categories, so four is
+  what survives an export intact.
+- Sorting has one implementation. `LibraryTrackSortComparator` backs both the
+  table header and `AppViewModel.sortLibraryTracks`; the second copy that used to
+  live in `AppViewModel` was removed because adding a column to one and not the
+  other produced two silently different orderings of the same list.
+- The Library scope inspector still exists alongside the crate tree. They are
+  different operations — the inspector scopes to a union of several vendor
+  crates, the tree drills into one — and they compose with AND.
+- A tag needs at least three examples before it can be suggested from. One
+  example is an anecdote: its centroid is just that track.
 - Early release artifacts are not notarized.
 - The DMG/ZIP path ships arch-specific Python worker runtimes, not a universal
   merged Python runtime.

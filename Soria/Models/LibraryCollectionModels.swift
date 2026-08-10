@@ -21,6 +21,10 @@ struct SoriaCollection: Identifiable, Codable, Hashable {
         /// A grouping the user lassoed on the similarity map. Has no folder on disk:
         /// the map never moves files, it only records which tracks belong together.
         case mapSelection = "map_selection"
+        /// A crate defined by rules rather than by membership. Its tracks are
+        /// evaluated from `rulesJSON`, so `soria_collection_tracks` holds nothing
+        /// for it and neither does the disk.
+        case smart = "smart"
     }
 
     enum Origin: String, Codable, CaseIterable {
@@ -38,6 +42,11 @@ struct SoriaCollection: Identifiable, Codable, Hashable {
     var genreFamilyID: String?
     var clusterID: String?
     var promptText: String?
+    /// The encoded `SmartCrateRuleSet` for `.smart` collections, nil otherwise.
+    ///
+    /// A column of its own rather than a second meaning for `promptText`, which
+    /// already carries the natural-language prompt a prompt folder was built from.
+    var rulesJSON: String?
     var sortIndex: Int
     var createdAt: Date
     var updatedAt: Date
@@ -55,6 +64,7 @@ struct SoriaCollection: Identifiable, Codable, Hashable {
         genreFamilyID: String? = nil,
         clusterID: String? = nil,
         promptText: String? = nil,
+        rulesJSON: String? = nil,
         sortIndex: Int = 0,
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
@@ -69,6 +79,7 @@ struct SoriaCollection: Identifiable, Codable, Hashable {
         self.genreFamilyID = genreFamilyID
         self.clusterID = clusterID
         self.promptText = promptText
+        self.rulesJSON = rulesJSON
         self.sortIndex = sortIndex
         self.createdAt = createdAt
         self.updatedAt = updatedAt

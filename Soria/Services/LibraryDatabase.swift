@@ -107,13 +107,26 @@ final class LibraryDatabase {
         }
     }
 
+    /// Writes the scanner-owned fields of a track.
+    ///
+    /// Classification (rating, energy, colour, genre family, `date_added`) is
+    /// written **on insert only** and is deliberately absent from the conflict
+    /// clause below. Every rescan and every vendor sync funnels through here with
+    /// a freshly-built `Track` whose classification is empty, so updating those
+    /// columns here would erase the user's ratings and tags on the next Sync
+    /// Library. Use `updateTrackClassification(trackID:classification:)` to change
+    /// them — passing a modified `track.classification` to this method does
+    /// nothing for a row that already exists.
     func upsertTrack(_ track: Track) throws {
         let sql = """
         INSERT INTO tracks (
             id, file_path, file_name, title, artist, album, genre, comment, duration, sample_rate, bpm, musical_key,
             modified_time, content_hash, analyzed_at, embedding_profile_id, embedding_pipeline_id, embedding_updated_at,
-            has_serato, has_rekordbox, genre_source, bpm_source, key_source, last_seen_in_local_scan_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            has_serato, has_rekordbox, genre_source, bpm_source, key_source, last_seen_in_local_scan_at,
+            rating, rating_source, energy, energy_source, color_label, color_source,
+            genre_family_id, genre_family_score, date_added
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(file_path) DO UPDATE SET
             file_name = excluded.file_name,
             title = excluded.title,
@@ -163,6 +176,57 @@ final class LibraryDatabase {
             bind(statement, index: 22, text: track.bpmSource?.rawValue)
             bind(statement, index: 23, text: track.keySource?.rawValue)
             bind(statement, index: 24, text: track.lastSeenInLocalScanAt.map { Self.iso8601.string(from: $0) })
+
+            let classification = track.classification
+            bind(statement, index: 25, int: classification.rating?.stars)
+            bind(statement, index: 26, text: classification.ratingSource?.rawValue)
+            bind(statement, index: 27, int: classification.energy?.level)
+            bind(statement, index: 28, text: classification.energySource?.rawValue)
+            bind(statement, index: 29, text: classification.colorLabel?.rawValue)
+            bind(statement, index: 30, text: classification.colorSource?.rawValue)
+            bind(statement, index: 31, text: classification.genreFamilyID)
+            bind(statement, index: 32, double: classification.genreFamilyScore)
+            // Stamped on first insert so "recently added" means something for
+            // tracks scanned from now on. Rows that predate this column keep a
+            // NULL, which reads as "not new" — correct, they aren't.
+            bind(statement, index: 33, text: Self.iso8601.string(from: classification.dateAdded ?? Date()))
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
+        }
+    }
+
+    /// The only way classification reaches the database for an existing track.
+    ///
+    /// Separate from `upsertTrack` on purpose — see the note there. Callers merge
+    /// through `TrackClassification` so source priority decides what wins, rather
+    /// than last-write.
+    func updateTrackClassification(trackID: UUID, classification: TrackClassification) throws {
+        let sql = """
+        UPDATE tracks
+        SET rating = ?,
+            rating_source = ?,
+            energy = ?,
+            energy_source = ?,
+            color_label = ?,
+            color_source = ?,
+            genre_family_id = ?,
+            genre_family_score = ?,
+            date_added = COALESCE(date_added, ?)
+        WHERE id = ?;
+        """
+        try withStatement(sql) { statement in
+            bind(statement, index: 1, int: classification.rating?.stars)
+            bind(statement, index: 2, text: classification.ratingSource?.rawValue)
+            bind(statement, index: 3, int: classification.energy?.level)
+            bind(statement, index: 4, text: classification.energySource?.rawValue)
+            bind(statement, index: 5, text: classification.colorLabel?.rawValue)
+            bind(statement, index: 6, text: classification.colorSource?.rawValue)
+            bind(statement, index: 7, text: classification.genreFamilyID)
+            bind(statement, index: 8, double: classification.genreFamilyScore)
+            bind(statement, index: 9, text: Self.iso8601.string(from: classification.dateAdded ?? Date()))
+            bind(statement, index: 10, text: trackID.uuidString)
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 throw DatabaseError.writeFailed
             }
@@ -293,8 +357,8 @@ final class LibraryDatabase {
         let sql = """
         INSERT INTO soria_collections (
             id, parent_id, name, kind, origin, folder_path, genre_family_id,
-            cluster_id, prompt_text, sort_index, created_at, updated_at, last_exported_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            cluster_id, prompt_text, sort_index, created_at, updated_at, last_exported_at, rules_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             parent_id = excluded.parent_id,
             name = excluded.name,
@@ -306,7 +370,8 @@ final class LibraryDatabase {
             prompt_text = excluded.prompt_text,
             sort_index = excluded.sort_index,
             updated_at = excluded.updated_at,
-            last_exported_at = excluded.last_exported_at;
+            last_exported_at = excluded.last_exported_at,
+            rules_json = excluded.rules_json;
         """
         try withStatement(sql) { statement in
             bind(statement, index: 1, text: collection.id.uuidString)
@@ -322,6 +387,7 @@ final class LibraryDatabase {
             bind(statement, index: 11, text: Self.iso8601.string(from: collection.createdAt))
             bind(statement, index: 12, text: Self.iso8601.string(from: collection.updatedAt))
             bind(statement, index: 13, text: collection.lastExportedAt.map { Self.iso8601.string(from: $0) })
+            bind(statement, index: 14, text: collection.rulesJSON)
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 throw DatabaseError.writeFailed
             }
@@ -331,7 +397,8 @@ final class LibraryDatabase {
     func fetchCollections() throws -> [SoriaCollection] {
         let sql = """
         SELECT id, parent_id, name, kind, origin, folder_path, genre_family_id,
-               cluster_id, prompt_text, sort_index, created_at, updated_at, last_exported_at
+               cluster_id, prompt_text, sort_index, created_at, updated_at, last_exported_at,
+               rules_json
         FROM soria_collections
         ORDER BY sort_index, name;
         """
@@ -365,6 +432,7 @@ final class LibraryDatabase {
                         genreFamilyID: sqliteString(statement, index: 6),
                         clusterID: sqliteString(statement, index: 7),
                         promptText: sqliteString(statement, index: 8),
+                        rulesJSON: sqliteString(statement, index: 13),
                         sortIndex: Int(sqlite3_column_int64(statement, 9)),
                         createdAt: createdAt,
                         updatedAt: updatedAt,
@@ -402,6 +470,26 @@ final class LibraryDatabase {
                 }
             }
         }
+    }
+
+    /// Direct membership counts for every collection at once.
+    ///
+    /// One grouped query rather than `fetchCollectionTrackIDs` per node: the
+    /// crate tree needs a count for each of potentially hundreds of folders every
+    /// time the Library refreshes.
+    func fetchCollectionTrackCounts() throws -> [UUID: Int] {
+        let sql = "SELECT collection_id, COUNT(track_id) FROM soria_collection_tracks GROUP BY collection_id;"
+        var counts: [UUID: Int] = [:]
+        try withStatement(sql) { statement in
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let idText = sqliteString(statement, index: 0),
+                    let id = UUID(uuidString: idText)
+                else { continue }
+                counts[id] = Int(sqlite3_column_int64(statement, 1))
+            }
+        }
+        return counts
     }
 
     func fetchCollectionTrackIDs(collectionID: UUID) throws -> [UUID] {
@@ -1858,8 +1946,67 @@ final class LibraryDatabase {
         );
         """)
 
+        // 한국어: 사용자가 직접 매기는 분류입니다. external_metadata에 두면 안 됩니다 —
+        // 그 테이블은 벤더 동기화마다 통째로 다시 만들어지는 캐시라 사용자의 별점과
+        // 태그가 Sync Library 한 번에 사라집니다.
+        try exec("""
+        CREATE TABLE IF NOT EXISTS tag_categories (
+            slot TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        );
+        """)
+        try exec("""
+        CREATE TABLE IF NOT EXISTS tag_catalog (
+            id TEXT PRIMARY KEY,
+            slot TEXT NOT NULL,
+            name TEXT NOT NULL,
+            sort_index INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(slot) REFERENCES tag_categories(slot)
+        );
+        """)
+        try exec("""
+        CREATE TABLE IF NOT EXISTS track_tags (
+            track_id TEXT NOT NULL,
+            tag_id TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'user',
+            assigned_at TEXT NOT NULL,
+            PRIMARY KEY (track_id, tag_id),
+            FOREIGN KEY(track_id) REFERENCES tracks(id),
+            FOREIGN KEY(tag_id) REFERENCES tag_catalog(id)
+        );
+        """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_track_tags_tag ON track_tags(tag_id);")
+
         if try !columnExists(table: "tracks", column: "track_embedding_json") {
             try exec("ALTER TABLE tracks ADD COLUMN track_embedding_json TEXT;")
+        }
+        if try !columnExists(table: "tracks", column: "rating") {
+            try exec("ALTER TABLE tracks ADD COLUMN rating INTEGER;")
+        }
+        if try !columnExists(table: "tracks", column: "rating_source") {
+            try exec("ALTER TABLE tracks ADD COLUMN rating_source TEXT;")
+        }
+        if try !columnExists(table: "tracks", column: "energy") {
+            try exec("ALTER TABLE tracks ADD COLUMN energy INTEGER;")
+        }
+        if try !columnExists(table: "tracks", column: "energy_source") {
+            try exec("ALTER TABLE tracks ADD COLUMN energy_source TEXT;")
+        }
+        if try !columnExists(table: "tracks", column: "color_label") {
+            try exec("ALTER TABLE tracks ADD COLUMN color_label TEXT;")
+        }
+        if try !columnExists(table: "tracks", column: "color_source") {
+            try exec("ALTER TABLE tracks ADD COLUMN color_source TEXT;")
+        }
+        if try !columnExists(table: "tracks", column: "genre_family_id") {
+            try exec("ALTER TABLE tracks ADD COLUMN genre_family_id TEXT;")
+        }
+        if try !columnExists(table: "tracks", column: "genre_family_score") {
+            try exec("ALTER TABLE tracks ADD COLUMN genre_family_score REAL;")
+        }
+        if try !columnExists(table: "tracks", column: "date_added") {
+            try exec("ALTER TABLE tracks ADD COLUMN date_added TEXT;")
         }
         if try !columnExists(table: "tracks", column: "analysis_summary_json") {
             try exec("ALTER TABLE tracks ADD COLUMN analysis_summary_json TEXT;")
@@ -1909,6 +2056,9 @@ final class LibraryDatabase {
         if try !columnExists(table: "external_metadata", column: "cue_points_json") {
             try exec("ALTER TABLE external_metadata ADD COLUMN cue_points_json TEXT NOT NULL DEFAULT '[]';")
         }
+        if try !columnExists(table: "soria_collections", column: "rules_json") {
+            try exec("ALTER TABLE soria_collections ADD COLUMN rules_json TEXT;")
+        }
         if try !columnExists(table: "soria_collections", column: "last_exported_at") {
             try exec("ALTER TABLE soria_collections ADD COLUMN last_exported_at TEXT;")
         }
@@ -1929,9 +2079,184 @@ final class LibraryDatabase {
         try exec("CREATE INDEX IF NOT EXISTS idx_track_quarantine_batch ON track_quarantine(batch_id);")
         try exec("CREATE INDEX IF NOT EXISTS idx_organization_moves_batch ON organization_moves(batch_id);")
         try exec("CREATE INDEX IF NOT EXISTS idx_organization_moves_track ON organization_moves(track_id);")
+        try seedTagCategoriesIfNeeded()
         try migrateLegacyEmbeddingProfileState()
         try invalidateIncompleteEmbeddingState()
         try rebuildNormalizedMembershipTables()
+    }
+
+    // MARK: - Tag catalog
+    //
+    // Lives here rather than in a `LibraryDatabase+Tags.swift` extension because
+    // the statement helpers below (`withStatement`, `bind`, `sqliteString`) are
+    // file-private; splitting this type up is a refactor of its own.
+
+    /// Creates the four category rows if they are missing. Idempotent, and run on
+    /// every open so a library migrated before the tag tables existed still ends
+    /// up with a complete set of slots.
+    private func seedTagCategoriesIfNeeded() throws {
+        let sql = "INSERT OR IGNORE INTO tag_categories (slot, name) VALUES (?, ?);"
+        for slot in TagCategorySlot.allCases {
+            try withStatement(sql) { statement in
+                bind(statement, index: 1, text: slot.rawValue)
+                bind(statement, index: 2, text: slot.defaultName)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.writeFailed
+                }
+            }
+        }
+    }
+
+    func fetchTagCatalog() throws -> TagCatalog {
+        var categories: [TagCategory] = []
+        try withStatement("SELECT slot, name FROM tag_categories;") { statement in
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let rawSlot = sqliteString(statement, index: 0),
+                    let slot = TagCategorySlot(rawValue: rawSlot)
+                else { continue }
+                categories.append(TagCategory(slot: slot, name: sqliteString(statement, index: 1)))
+            }
+        }
+
+        var tags: [Tag] = []
+        let tagSQL = "SELECT id, slot, name, sort_index FROM tag_catalog ORDER BY slot, sort_index;"
+        try withStatement(tagSQL) { statement in
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let idText = sqliteString(statement, index: 0),
+                    let id = UUID(uuidString: idText),
+                    let rawSlot = sqliteString(statement, index: 1),
+                    let slot = TagCategorySlot(rawValue: rawSlot),
+                    let name = sqliteString(statement, index: 2)
+                else { continue }
+                tags.append(
+                    Tag(
+                        id: id,
+                        slot: slot,
+                        name: name,
+                        sortIndex: Int(sqlite3_column_int64(statement, 3))
+                    )
+                )
+            }
+        }
+
+        return TagCatalog(categories: categories, tags: tags)
+    }
+
+    func saveTagCategory(_ category: TagCategory) throws {
+        let sql = """
+        INSERT INTO tag_categories (slot, name) VALUES (?, ?)
+        ON CONFLICT(slot) DO UPDATE SET name = excluded.name;
+        """
+        try withStatement(sql) { statement in
+            bind(statement, index: 1, text: category.slot.rawValue)
+            bind(statement, index: 2, text: category.name)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
+        }
+    }
+
+    func saveTag(_ tag: Tag) throws {
+        let sql = """
+        INSERT INTO tag_catalog (id, slot, name, sort_index, created_at) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            slot = excluded.slot,
+            name = excluded.name,
+            sort_index = excluded.sort_index;
+        """
+        try withStatement(sql) { statement in
+            bind(statement, index: 1, text: tag.id.uuidString)
+            bind(statement, index: 2, text: tag.slot.rawValue)
+            bind(statement, index: 3, text: tag.name)
+            bind(statement, index: 4, int: tag.sortIndex)
+            bind(statement, index: 5, text: Self.iso8601.string(from: Date()))
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
+        }
+    }
+
+    /// Removes a tag from the vocabulary and from every track carrying it.
+    ///
+    /// One transaction, because a catalog without its assignments would leave
+    /// `track_tags` rows pointing at nothing and those rows are what the Library
+    /// filters on.
+    func deleteTag(id: UUID) throws {
+        try withTransaction {
+            try withStatement("DELETE FROM track_tags WHERE tag_id = ?;") { statement in
+                bind(statement, index: 1, text: id.uuidString)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.writeFailed
+                }
+            }
+            try withStatement("DELETE FROM tag_catalog WHERE id = ?;") { statement in
+                bind(statement, index: 1, text: id.uuidString)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.writeFailed
+                }
+            }
+        }
+    }
+
+    /// Loads every assignment at once.
+    ///
+    /// The Library re-filters on each keystroke over thousands of tracks, so tag
+    /// membership has to be an in-memory set lookup; querying per row per
+    /// keystroke is what this avoids.
+    func fetchTrackTagIndex() throws -> TrackTagIndex {
+        var index: [UUID: Set<UUID>] = [:]
+        try withStatement("SELECT track_id, tag_id FROM track_tags;") { statement in
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let trackText = sqliteString(statement, index: 0),
+                    let trackID = UUID(uuidString: trackText),
+                    let tagText = sqliteString(statement, index: 1),
+                    let tagID = UUID(uuidString: tagText)
+                else { continue }
+                index[trackID, default: []].insert(tagID)
+            }
+        }
+        return TrackTagIndex(tagIDsByTrack: index)
+    }
+
+    func assignTag(_ tagID: UUID, to trackIDs: [UUID], source: TrackMetadataSource = .user) throws {
+        guard !trackIDs.isEmpty else { return }
+        let sql = """
+        INSERT INTO track_tags (track_id, tag_id, source, assigned_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(track_id, tag_id) DO UPDATE SET source = excluded.source;
+        """
+        let timestamp = Self.iso8601.string(from: Date())
+        try withTransaction {
+            for trackID in trackIDs {
+                try withStatement(sql) { statement in
+                    bind(statement, index: 1, text: trackID.uuidString)
+                    bind(statement, index: 2, text: tagID.uuidString)
+                    bind(statement, index: 3, text: source.rawValue)
+                    bind(statement, index: 4, text: timestamp)
+                    guard sqlite3_step(statement) == SQLITE_DONE else {
+                        throw DatabaseError.writeFailed
+                    }
+                }
+            }
+        }
+    }
+
+    func removeTag(_ tagID: UUID, from trackIDs: [UUID]) throws {
+        guard !trackIDs.isEmpty else { return }
+        let sql = "DELETE FROM track_tags WHERE tag_id = ? AND track_id = ?;"
+        try withTransaction {
+            for trackID in trackIDs {
+                try withStatement(sql) { statement in
+                    bind(statement, index: 1, text: tagID.uuidString)
+                    bind(statement, index: 2, text: trackID.uuidString)
+                    guard sqlite3_step(statement) == SQLITE_DONE else {
+                        throw DatabaseError.writeFailed
+                    }
+                }
+            }
+        }
     }
 
     private func track(from statement: OpaquePointer?) -> Track? {
@@ -1978,7 +2303,26 @@ final class LibraryDatabase {
             genreSource: sqliteString(statement, index: 20).flatMap(TrackMetadataSource.init(rawValue:)),
             bpmSource: sqliteString(statement, index: 21).flatMap(TrackMetadataSource.init(rawValue:)),
             keySource: sqliteString(statement, index: 22).flatMap(TrackMetadataSource.init(rawValue:)),
-            lastSeenInLocalScanAt: lastSeenInLocalScanAt
+            lastSeenInLocalScanAt: lastSeenInLocalScanAt,
+            classification: classification(from: statement)
+        )
+    }
+
+    /// Reads the classification columns, which start at index 24 in
+    /// `trackSelectColumns`.
+    private func classification(from statement: OpaquePointer?) -> TrackClassification {
+        TrackClassification(
+            // Stored values are already normalized, so these use the plain
+            // clamping initializer rather than the vendor-scale one.
+            rating: sqliteOptionalInt(statement, index: 24).map { TrackRating($0) },
+            ratingSource: sqliteString(statement, index: 25).flatMap(TrackMetadataSource.init(rawValue:)),
+            energy: sqliteOptionalInt(statement, index: 26).map { TrackEnergy($0) },
+            energySource: sqliteString(statement, index: 27).flatMap(TrackMetadataSource.init(rawValue:)),
+            colorLabel: sqliteString(statement, index: 28).flatMap(TrackColorLabel.init(rawValue:)),
+            colorSource: sqliteString(statement, index: 29).flatMap(TrackMetadataSource.init(rawValue:)),
+            genreFamilyID: sqliteString(statement, index: 30),
+            genreFamilyScore: sqliteOptionalDouble(statement, index: 31),
+            dateAdded: sqliteString(statement, index: 32).flatMap { Self.iso8601.date(from: $0) }
         )
     }
 
@@ -2476,10 +2820,15 @@ final class LibraryDatabase {
         return !trimmed.isEmpty && trimmed != "[]" && trimmed != "{}" && trimmed != "null"
     }
 
+    /// `track(from:)` reads by position, so this list is the contract for those
+    /// indices. Append new columns at the end and read them at the next index —
+    /// never reorder, or every field shifts one column to the left in silence.
     private let trackSelectColumns = """
     id, file_path, file_name, title, artist, album, genre, comment, duration, sample_rate, bpm, musical_key,
     modified_time, content_hash, analyzed_at, embedding_profile_id, embedding_pipeline_id, embedding_updated_at,
-    has_serato, has_rekordbox, genre_source, bpm_source, key_source, last_seen_in_local_scan_at
+    has_serato, has_rekordbox, genre_source, bpm_source, key_source, last_seen_in_local_scan_at,
+    rating, rating_source, energy, energy_source, color_label, color_source,
+    genre_family_id, genre_family_score, date_added
     """
 }
 

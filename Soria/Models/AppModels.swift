@@ -282,6 +282,9 @@ enum LibraryTrackSortColumn: String, Equatable {
     case comment
     case bpm
     case status
+    case rating
+    case energy
+    case colorLabel
 }
 
 struct LibraryTrackSortState: Equatable {
@@ -417,6 +420,40 @@ struct LibraryTrackSortComparator: SortComparator {
             let lhsStatus = statusValues[lhs.id] ?? ""
             let rhsStatus = statusValues[rhs.id] ?? ""
             return reordered(lhsStatus.localizedStandardCompare(rhsStatus))
+        case .rating:
+            return compareOptionalValues(lhs.classification.rating?.stars, rhs.classification.rating?.stars)
+        case .energy:
+            return compareOptionalValues(lhs.classification.energy?.level, rhs.classification.energy?.level)
+        case .colorLabel:
+            // Sorted around the palette rather than alphabetically: the swatches
+            // are shown in wheel order, so "sort by colour" has to group them the
+            // way the eye already reads them.
+            return compareOptionalValues(
+                lhs.classification.colorLabel.flatMap { TrackColorLabel.allCases.firstIndex(of: $0) },
+                rhs.classification.colorLabel.flatMap { TrackColorLabel.allCases.firstIndex(of: $0) }
+            )
+        }
+    }
+
+    /// Orders a nullable value, always sinking the empties to the bottom.
+    ///
+    /// Unset values ignore the sort direction on purpose — reversing the column
+    /// should bring the highest ratings to the top, not float a thousand unrated
+    /// tracks there. Same rule `compareBPM` has always used.
+    private func compareOptionalValues<Value: Comparable>(_ lhs: Value?, _ rhs: Value?) -> ComparisonResult {
+        switch (lhs, rhs) {
+        case let (left?, right?):
+            if left == right { return .orderedSame }
+            if order == .forward {
+                return left < right ? .orderedAscending : .orderedDescending
+            }
+            return left > right ? .orderedAscending : .orderedDescending
+        case (nil, nil):
+            return .orderedSame
+        case (nil, _?):
+            return .orderedDescending
+        case (_?, nil):
+            return .orderedAscending
         }
     }
 

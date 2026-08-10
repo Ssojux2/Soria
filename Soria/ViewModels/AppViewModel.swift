@@ -378,6 +378,11 @@ final class AppViewModel: ObservableObject {
     lazy var trackMap: TrackMapModel = TrackMapModel(
         dependencies: makeTrackMapDependencies()
     )
+    /// Crate tree, tag catalog, and classification filter for the Library pane.
+    /// Same reasoning again. See `LibraryBrowserModel`.
+    lazy var libraryBrowser: LibraryBrowserModel = LibraryBrowserModel(
+        dependencies: makeLibraryBrowserDependencies()
+    )
     private lazy var audioNormalizationService: AudioNormalizationService = {
         injectedAudioNormalizationService
             ?? AudioNormalizationService(worker: worker) { [weak self] url in
@@ -1237,6 +1242,62 @@ final class AppViewModel: ObservableObject {
     }
 
     // MARK: - Organizer
+
+    private func makeLibraryBrowserDependencies() -> LibraryBrowserModel.Dependencies {
+        let database = self.database
+
+        return LibraryBrowserModel.Dependencies(
+            loadTagCatalog: { try database.fetchTagCatalog() },
+            saveTagCategory: { try database.saveTagCategory($0) },
+            saveTag: { try database.saveTag($0) },
+            deleteTag: { try database.deleteTag(id: $0) },
+            loadTrackTagIndex: { try database.fetchTrackTagIndex() },
+            assignTag: { try database.assignTag($0, to: $1) },
+            removeTag: { try database.removeTag($0, from: $1) },
+            updateClassification: { try database.updateTrackClassification(trackID: $0, classification: $1) },
+            loadTrackEmbeddings: { trackIDs in
+                var embeddings: [UUID: [Double]] = [:]
+                for trackID in trackIDs {
+                    guard let vector = try database.fetchTrackEmbedding(trackID: trackID), !vector.isEmpty else {
+                        continue
+                    }
+                    embeddings[trackID] = vector
+                }
+                return embeddings
+            },
+            loadCollections: { try database.fetchCollections() },
+            saveCollection: { try database.upsertCollection($0) },
+            deleteCollection: { try database.deleteCollection(id: $0) },
+            loadCollectionTrackCounts: { try database.fetchCollectionTrackCounts() },
+            loadCollectionTrackIDs: { try database.fetchCollectionTrackIDs(collectionID: $0) },
+            loadMembershipTrackIDs: { [unowned self] source, path in
+                // Reuses the scope resolution the inspector already relies on, so
+                // selecting a crate in the tree and scoping to it in the Mix
+                // Assistant can never disagree about what is inside it.
+                var filter = LibraryScopeFilter()
+                filter.setSelectedPaths([path], for: source)
+                return self.scopedTrackIDs(for: filter)
+            },
+            allTracks: { [unowned self] in self.tracks },
+            selectedTracks: { [unowned self] in self.selectedTracks },
+            readyTrackIDs: { [unowned self] in self.readyTrackIDs },
+            quarantinedTrackCount: { [unowned self] in self.quarantineRows.count },
+            membershipFacets: { [unowned self] source in self.membershipFacets(for: source) },
+            applyTrackEdits: { [unowned self] edited in self.applyEditedTracks(edited) }
+        )
+    }
+
+    /// Folds edited tracks back into the published list in place.
+    ///
+    /// Cheaper and less disruptive than `refreshTracks()`: rating a track should
+    /// not re-query the database, rebuild the membership snapshot, and reset the
+    /// user's scroll position.
+    private func applyEditedTracks(_ edited: [Track]) {
+        guard !edited.isEmpty else { return }
+
+        let editsByID = Dictionary(uniqueKeysWithValues: edited.map { ($0.id, $0) })
+        tracks = tracks.map { editsByID[$0.id] ?? $0 }
+    }
 
     private func makeOrganizerDependencies() -> LibraryOrganizerModel.Dependencies {
         let database = self.database
@@ -7075,14 +7136,15 @@ final class AppViewModel: ObservableObject {
         guard let sort = libraryTrackSortState else { return candidateTracks }
 
         let originalIndexByID = Dictionary(uniqueKeysWithValues: tracks.enumerated().map { ($1.id, $0) })
+        // Built once, outside the comparison closure: this is the same comparator
+        // the table header uses, so the two orderings cannot drift apart.
+        let comparator = Self.libraryTrackComparator(
+            for: sort,
+            statusValues: libraryTrackStatusSortValues()
+        )
 
         return candidateTracks.sorted { lhs, rhs in
-            let comparison = Self.compareLibraryTracks(
-                lhs,
-                rhs,
-                sort: sort,
-                readyTrackIDs: readyTrackIDs
-            )
+            let comparison = comparator.compare(lhs, rhs)
             if comparison == .orderedSame {
                 return (originalIndexByID[lhs.id] ?? 0) < (originalIndexByID[rhs.id] ?? 0)
             }
@@ -7090,14 +7152,23 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    /// The one place the Library's filters compose.
+    ///
+    /// Order matters for cost, not for correctness: the cheap set and token tests
+    /// run before the crate and classification predicates, which touch the tag
+    /// index and parse musical keys.
     private func libraryTracksMatchingCurrentFilters(trackFilter: LibraryTrackFilter) -> [Track] {
         let scopedIDs = scopedTrackIDs(for: libraryScopeFilter)
         let searchTokens = Self.librarySearchTokens(from: librarySearchText)
+        let browser = libraryBrowser
+        let readyIDs = readyTrackIDs
 
         return tracks.filter { track in
             (libraryScopeFilter.isEmpty || scopedIDs.contains(track.id))
                 && Self.libraryTrackMatchesSearch(track, searchTokens: searchTokens)
                 && trackFilter.matches(trackWorkflowStatus(for: track))
+                && browser.matchesCrate(track, readyTrackIDs: readyIDs)
+                && browser.matchesClassificationFilter(track)
         }
     }
 
@@ -7168,81 +7239,6 @@ final class AppViewModel: ObservableObject {
         )
     }
 
-    private static func compareLibraryTracks(
-        _ lhs: Track,
-        _ rhs: Track,
-        sort: LibraryTrackSortState,
-        readyTrackIDs: Set<UUID>
-    ) -> ComparisonResult {
-        switch sort.column {
-        case .title:
-            return reorderComparison(lhs.title.localizedStandardCompare(rhs.title), direction: sort.direction)
-        case .artist:
-            return reorderComparison(lhs.artist.localizedStandardCompare(rhs.artist), direction: sort.direction)
-        case .genre:
-            return reorderComparison(lhs.genre.localizedStandardCompare(rhs.genre), direction: sort.direction)
-        case .comment:
-            return reorderComparison(lhs.comment.localizedStandardCompare(rhs.comment), direction: sort.direction)
-        case .bpm:
-            return compareLibraryTrackBPM(lhs.bpm, rhs.bpm, direction: sort.direction)
-        case .status:
-            return reorderComparison(
-                libraryTrackWorkflowStatus(lhs, readyTrackIDs: readyTrackIDs)
-                    .displayName
-                    .localizedStandardCompare(libraryTrackWorkflowStatus(rhs, readyTrackIDs: readyTrackIDs).displayName),
-                direction: sort.direction
-            )
-        }
-    }
-
-    private static func libraryTrackWorkflowStatus(
-        _ track: Track,
-        readyTrackIDs: Set<UUID>
-    ) -> TrackWorkflowStatus {
-        if readyTrackIDs.contains(track.id) {
-            return .ready
-        }
-        if track.analyzedAt == nil {
-            return .needsAnalysis
-        }
-        return .needsRefresh
-    }
-
-    private static func reorderComparison(_ comparison: ComparisonResult, direction: SortOrder) -> ComparisonResult {
-        guard direction == .reverse else { return comparison }
-
-        switch comparison {
-        case .orderedAscending:
-            return .orderedDescending
-        case .orderedDescending:
-            return .orderedAscending
-        case .orderedSame:
-            return .orderedSame
-        }
-    }
-
-    private static func compareLibraryTrackBPM(
-        _ lhs: Double?,
-        _ rhs: Double?,
-        direction: SortOrder
-    ) -> ComparisonResult {
-        switch (lhs, rhs) {
-        case let (left?, right?):
-            if left == right {
-                return .orderedSame
-            }
-            if direction == .forward {
-                return left < right ? .orderedAscending : .orderedDescending
-            }
-            return left > right ? .orderedAscending : .orderedDescending
-        case (nil, nil):
-            return .orderedSame
-        case (nil, _?):
-            return .orderedDescending
-        case (_?, nil):
-            return .orderedAscending
-        }
-    }
 
     static func shouldShowInitialSetup(
         hasTracks: Bool,

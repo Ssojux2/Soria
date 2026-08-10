@@ -99,6 +99,18 @@ actor AnalysisCommitActor {
             updatedTrack.musicalKey = result.estimatedKey
             updatedTrack.keySource = .soriaAnalysis
         }
+        // Energy is inferred from the analysed arc, but only fills a gap: a level
+        // the user set outranks `.soriaAnalysis` and is left alone.
+        let inferredEnergy = TrackEnergy(energyArc: result.energyArc)
+        let resolvedEnergy = TrackClassification.merged(
+            incoming: inferredEnergy,
+            incomingSource: .soriaAnalysis,
+            current: updatedTrack.classification.energy,
+            currentSource: updatedTrack.classification.energySource
+        )
+        updatedTrack.classification.energy = resolvedEnergy.value
+        updatedTrack.classification.energySource = resolvedEnergy.source
+
         updatedTrack.analyzedAt = Date()
         updatedTrack.embeddingProfileID = nil
         updatedTrack.embeddingPipelineID = nil
@@ -106,6 +118,12 @@ actor AnalysisCommitActor {
 
         let upsertTrackStartedAt = Date()
         try database.upsertTrack(updatedTrack)
+        // `upsertTrack` leaves classification untouched on conflict so rescans
+        // cannot erase user ratings, so the inferred energy needs its own write.
+        try database.updateTrackClassification(
+            trackID: updatedTrack.id,
+            classification: updatedTrack.classification
+        )
         log(
             "database_upsert_track_completed",
             workItem: workItem,

@@ -3,13 +3,59 @@ import SwiftUI
 
 struct LibraryView: View {
     @ObservedObject var viewModel: AppViewModel
+    /// Observed as well as `viewModel` because the table's contents now depend on
+    /// it. `filteredTracks` consults the crate selection and the classification
+    /// filter, and SwiftUI does not forward a nested `ObservableObject`'s changes
+    /// to its parent — without this the tree would highlight a new crate and the
+    /// table would keep showing the old one.
+    @ObservedObject private var browser: LibraryBrowserModel
     @State private var controlsContentHeight: CGFloat = 0
     @FocusState private var isLibrarySearchFieldFocused: Bool
+
+    init(viewModel: AppViewModel) {
+        _viewModel = ObservedObject(wrappedValue: viewModel)
+        _browser = ObservedObject(wrappedValue: viewModel.libraryBrowser)
+    }
 
     private let controlsPanelMinHeight: CGFloat = 248
     private let controlsPanelMaxHeightCap: CGFloat = 460
 
+    /// Three panes: pick a scope, read the list, change what you found.
+    ///
+    /// The convention every DJ app converged on, because it matches the work. The
+    /// centre column is what this view used to be in its entirety; the tree and
+    /// the classifier are new neighbours rather than a rewrite of it.
     var body: some View {
+        HSplitView {
+            LibraryCrateTreeView(model: browser)
+
+            centerPane
+
+            TrackClassifierPanel(model: browser, viewModel: viewModel)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .overlay(alignment: .topLeading) {
+            AccessibilityMarker(identifier: "library-view", label: "Library View")
+        }
+        .overlay(alignment: .bottomLeading) {
+            librarySearchAccessibilitySummary
+        }
+        .onAppear {
+            // The crate counts come from tables the organizer and the quarantine
+            // pane write to independently, so they are read on entry rather than
+            // held live — otherwise the tree reports zero folders on a library
+            // that has plenty.
+            browser.refresh()
+        }
+        .onDisappear {
+            viewModel.setLibrarySearchFieldFocused(false)
+        }
+        .onChange(of: isLibrarySearchFieldFocused) { _, isFocused in
+            viewModel.setLibrarySearchFieldFocused(isFocused)
+        }
+    }
+
+    private var centerPane: some View {
         GeometryReader { proxy in
             VStack(alignment: .leading, spacing: 12) {
                 libraryControlsPanel(availableHeight: proxy.size.height)
@@ -21,19 +67,7 @@ struct LibraryView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .overlay(alignment: .topLeading) {
-            AccessibilityMarker(identifier: "library-view", label: "Library View")
-        }
-        .overlay(alignment: .bottomLeading) {
-            librarySearchAccessibilitySummary
-        }
-        .onDisappear {
-            viewModel.setLibrarySearchFieldFocused(false)
-        }
-        .onChange(of: isLibrarySearchFieldFocused) { _, isFocused in
-            viewModel.setLibrarySearchFieldFocused(isFocused)
-        }
+        .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var libraryTracksTable: some View {
@@ -43,6 +77,16 @@ struct LibraryView: View {
                 selection: viewModel.libraryTableSelection,
                 sortOrder: viewModel.libraryTrackSortOrderBinding
             ) {
+                TableColumn("★", sortUsing: LibraryTrackSortComparator(column: .rating)) { track in
+                    // Settable in the row: rating a stack of tracks is a rhythm,
+                    // and making it a trip to the side panel each time breaks it.
+                    RatingStarsView(rating: track.classification.rating) { newRating in
+                        browser.setRating(newRating, on: [track])
+                    }
+                    .accessibilityIdentifier("library-rating-\(accessibilitySlug(for: track.title))")
+                }
+                .width(62)
+
                 TableColumn("Title", sortUsing: LibraryTrackSortComparator(column: .title)) { track in
                     Text(track.title)
                         .contentShape(Rectangle())
@@ -55,17 +99,30 @@ struct LibraryView: View {
                     Text(track.artist)
                 }
                 TableColumn("Genre", sortUsing: LibraryTrackSortComparator(column: .genre)) { track in
-                    Text(track.genre)
-                        .foregroundStyle(track.genre.isEmpty ? .secondary : .primary)
+                    genreCell(for: track)
+                }
+                TableColumn("BPM / Key", sortUsing: LibraryTrackSortComparator(column: .bpm)) { track in
+                    Text(bpmKeySummary(for: track))
+                        .font(.body.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                TableColumn("Energy", sortUsing: LibraryTrackSortComparator(column: .energy)) { track in
+                    EnergyMeterView(energy: track.classification.energy)
+                }
+                .width(66)
+
+                TableColumn("", sortUsing: LibraryTrackSortComparator(column: .colorLabel)) { track in
+                    ColorLabelDot(color: track.classification.colorLabel)
+                }
+                .width(18)
+
+                TableColumn("Tags") { track in
+                    tagsCell(for: track)
                 }
                 TableColumn("Comment", sortUsing: LibraryTrackSortComparator(column: .comment)) { track in
                     Text(track.comment)
                         .foregroundStyle(track.comment.isEmpty ? .secondary : .primary)
                         .lineLimit(2)
-                }
-                TableColumn("BPM / Key", sortUsing: LibraryTrackSortComparator(column: .bpm)) { track in
-                    Text(bpmKeySummary(for: track))
-                        .foregroundStyle(.secondary)
                 }
                 TableColumn("Status", sortUsing: LibraryTrackSortComparator(column: .status)) { track in
                     statusBadge(for: track)
@@ -116,7 +173,48 @@ struct LibraryView: View {
                 AccessibilityMarker(identifier: "library-column-comment", label: "Comment Column")
                 AccessibilityMarker(identifier: "library-column-bpm-key", label: "BPM and Key Column")
                 AccessibilityMarker(identifier: "library-column-status", label: "Status Column")
+                AccessibilityMarker(identifier: "library-column-rating", label: "Rating Column")
+                AccessibilityMarker(identifier: "library-column-energy", label: "Energy Column")
+                AccessibilityMarker(identifier: "library-column-color", label: "Colour Column")
+                AccessibilityMarker(identifier: "library-column-tags", label: "Tags Column")
             }
+        }
+    }
+
+    /// Prefers the genre family Soria inferred from the embedding over the raw
+    /// tag string, because the inferred one is consistent across the library
+    /// while file tags are whatever each release happened to ship with.
+    @ViewBuilder
+    private func genreCell(for track: Track) -> some View {
+        if let familyID = track.classification.genreFamilyID {
+            Text(GenreTaxonomy.displayName(for: familyID))
+                .font(.callout)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 3))
+        } else {
+            Text(track.genre)
+                .foregroundStyle(track.genre.isEmpty ? .secondary : .primary)
+        }
+    }
+
+    @ViewBuilder
+    private func tagsCell(for track: Track) -> some View {
+        let catalog = browser.tagCatalog
+        let names = browser.tagIndex
+            .tagIDs(for: track.id)
+            .compactMap { catalog.tag(id: $0)?.name }
+            .sorted()
+
+        if names.isEmpty {
+            Text("")
+        } else {
+            Text(names.joined(separator: ", "))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(names.joined(separator: ", "))
         }
     }
 
@@ -651,13 +749,6 @@ struct LibraryView: View {
         }
     }
 
-    private func accessibilitySlug(for text: String) -> String {
-        let segments = text
-            .lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { !$0.isEmpty }
-        return segments.isEmpty ? "empty" : segments.joined(separator: "-")
-    }
 }
 
 private struct LibraryPreviewStripView: View {

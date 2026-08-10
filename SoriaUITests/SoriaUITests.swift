@@ -36,6 +36,33 @@ final class SoriaUITests: XCTestCase {
         XCTAssertFalse(element(in: app, identifier: "library-preparation-card").exists)
     }
 
+    /// The Library is a three-pane browser now. This checks all three are present
+    /// and that the classifier's two tabs both render, since a broken pane there
+    /// would leave the user able to see their library but not classify it.
+    @MainActor
+    func testLibraryShowsCrateTreeTableAndClassifierPanel() throws {
+        let app = launchApp(libraryState: .prepared)
+
+        XCTAssertTrue(element(in: app, identifier: "library-crate-tree").waitForExistence(timeout: 10))
+        XCTAssertTrue(element(in: app, identifier: "library-table").waitForExistence(timeout: 10))
+        XCTAssertTrue(element(in: app, identifier: "library-classifier-panel").waitForExistence(timeout: 10))
+
+        // Every library has All Tracks, so the tree is never empty.
+        XCTAssertTrue(element(in: app, identifier: "crate-node-all-tracks").waitForExistence(timeout: 10))
+
+        let tabPicker = element(in: app, identifier: "classifier-tab-picker")
+        XCTAssertTrue(tabPicker.waitForExistence(timeout: 10))
+
+        forceClick(app.buttons["Filter"].firstMatch)
+        XCTAssertTrue(element(in: app, identifier: "filter-bpm-min").waitForExistence(timeout: 10))
+        XCTAssertTrue(element(in: app, identifier: "filter-key-8a").waitForExistence(timeout: 10))
+
+        // Nothing is filtered yet, so there is no crate to save.
+        let saveCrateButton = element(in: app, identifier: "save-smart-crate-button")
+        XCTAssertTrue(saveCrateButton.waitForExistence(timeout: 10))
+        XCTAssertFalse(saveCrateButton.isEnabled)
+    }
+
     @MainActor
     func testInfoPaneStaysAboveLibraryAndShowsSelectedTabContent() throws {
         let app = launchApp(libraryState: .prepared, startInMixAssistant: true)
