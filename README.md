@@ -223,7 +223,27 @@ See [docs/RELEASING.md](docs/RELEASING.md) for the GitHub Releases workflow.
    Serato export is intentionally non-destructive and does not directly rewrite
    local crate files.
 
-12. **Check logs when needed.** If analysis fails, inspect Soria logs and worker
+12. **Set unwanted tracks aside.** Select tracks in the Library and choose
+    **Move to Soria Trash**. Files move into a `Soria Quarantine` folder on the
+    same drive and leave the library list, but nothing is deleted. Review and
+    restore them individually or all at once from the Organizer's **Soria
+    Trash** tab, or use **Delete Permanently** to hand them to the system Trash.
+
+13. **Organize your library into folders.** Open **Organizer > Plan**, choose a
+    scope and a destination folder, then **Build Preview**. Soria detects a
+    genre per prepared track from its embedding and clusters similar tracks
+    inside each genre, proposing
+    `<destination>/<Genre>/Cluster NN - <Artist>/`. Untick any move you disagree
+    with, then **Apply Selected**. Files are moved, not copied, and the old
+    paths are remembered so the next Serato/rekordbox sync still matches them.
+
+14. **Export the organized folders.** Use **Export Organized Folders** to send
+    every folder to your DJ software in one action: one Serato crate per folder
+    (nested via `%%`), a single rekordbox XML containing the whole tree, or one
+    `.m3u8` per folder. Because organizing moves files, existing crates and
+    playlists point at the old paths until you re-export.
+
+15. **Check logs when needed.** If analysis fails, inspect Soria logs and worker
     stderr. Most failures are missing Python packages, missing API keys, or audio
     files the local decoder cannot read.
 
@@ -276,6 +296,19 @@ not available in every sandboxed environment.
 - Serato export is deliberately conservative and non-destructive.
 - Recommendation quality depends on local metadata quality and embedding
   availability.
+- Organizing **moves** files, so existing Serato crates and rekordbox playlists
+  point at the old paths until you export again. Soria records the old paths and
+  re-matches them on the next vendor sync, but never rewrites the vendor
+  databases in place.
+- Soria Trash is a Soria-managed folder, not the system Trash, so it does not
+  free disk space until you choose **Delete Permanently**.
+- Genre detection compares text labels against audio embeddings, which is only
+  well-defined in a shared text/audio space. Plans where one folder swallows
+  most of the library carry a low-confidence warning.
+- In sandboxed release builds, moving files needs a security-scoped bookmark
+  minted when you picked the folder. Music Folders added before this existed
+  show a re-selection banner, and organizing stays disabled for them until you
+  re-grant access.
 
 ### Privacy and Security
 
@@ -515,7 +548,27 @@ GitHub Releases workflow는 [docs/RELEASING.md](docs/RELEASING.md)를 참고하�
     내보냅니다. Serato export는 의도적으로 비파괴적이며 local crate file을 직접
     rewrite하지 않습니다.
 
-12. **필요하면 로그를 확인합니다.** 분석이 실패하면 Soria log와 worker stderr를
+12. **원치 않는 음원을 따로 치웁니다.** Library에서 트랙을 선택하고 **Move to
+    Soria Trash**를 누르면 같은 드라이브의 `Soria Quarantine` 폴더로 옮겨지고
+    라이브러리 목록에서 사라지지만 삭제되지는 않습니다. Organizer의 **Soria
+    Trash** 탭에서 개별 또는 일괄 복원할 수 있고, **Delete Permanently**를 누르면
+    macOS 휴지통으로 넘어갑니다.
+
+13. **라이브러리를 폴더로 정리합니다.** **Organizer > Plan**에서 범위와 대상
+    폴더를 고르고 **Build Preview**를 누릅니다. 준비된 트랙마다 임베딩으로 장르를
+    판별하고 장르 안에서 유사한 트랙을 클러스터링해
+    `<대상>/<장르>/Cluster NN - <아티스트>/` 구조를 제안합니다. 마음에 들지 않는
+    이동은 체크를 해제한 뒤 **Apply Selected**를 누릅니다. 파일은 복사가 아니라
+    이동되며, 옛 경로를 기록해 두므로 다음 Serato/rekordbox 동기화에서 계속
+    매칭됩니다.
+
+14. **정리한 폴더를 내보냅니다.** **Export Organized Folders**로 모든 폴더를 한
+    번에 DJ 소프트웨어로 보냅니다. 폴더당 Serato 크레이트 하나(`%%`로 중첩), 전체
+    트리를 담은 rekordbox XML 하나, 또는 폴더당 `.m3u8` 하나 중에서 고를 수
+    있습니다. 정리는 파일을 이동하므로, 다시 내보내기 전까지 기존 크레이트와
+    플레이리스트는 옛 경로를 가리킵니다.
+
+15. **필요하면 로그를 확인합니다.** 분석이 실패하면 Soria log와 worker stderr를
     확인합니다. 대부분의 실패는 누락된 Python package, 누락된 API key, 또는 local
     decoder가 읽을 수 없는 오디오 파일 때문입니다.
 
@@ -567,6 +620,17 @@ service가 필요할 수 있습니다.
   version은 추가 adapter가 필요할 수 있습니다.
 - Serato export는 의도적으로 보수적이고 비파괴적입니다.
 - 추천 품질은 local metadata quality와 embedding availability에 따라 달라집니다.
+- 정리는 파일을 **이동**하므로, 다시 내보내기 전까지 기존 Serato 크레이트와
+  rekordbox 플레이리스트는 옛 경로를 가리킵니다. Soria는 옛 경로를 기록해 다음
+  vendor sync에서 재매칭하지만, vendor database를 직접 고쳐 쓰지는 않습니다.
+- Soria Trash는 시스템 휴지통이 아니라 Soria가 관리하는 폴더이므로, **Delete
+  Permanently**를 누르기 전까지 디스크 용량은 확보되지 않습니다.
+- 장르 판별은 텍스트 라벨과 오디오 임베딩을 비교하는데, 이는 텍스트/오디오가
+  공유하는 임베딩 공간에서만 잘 정의됩니다. 한 폴더가 라이브러리 대부분을
+  가져가는 플랜에는 저신뢰 경고가 붙습니다.
+- 샌드박스 릴리스 빌드에서 파일을 옮기려면 폴더를 고를 때 발급된 security-scoped
+  bookmark가 필요합니다. 이 기능 이전에 추가한 Music Folder는 재선택 배너가 뜨고,
+  접근을 다시 허용하기 전까지 정리 기능이 비활성화됩니다.
 
 ### 개인정보 보호 및 보안
 
@@ -804,7 +868,24 @@ GitHub Releases workflowについては[docs/RELEASING.md](docs/RELEASING.md)を
     書き出します。Serato exportは意図的に非破壊で、local crate fileを直接rewrite
     しません。
 
-12. **必要に応じてログを確認します。** 解析が失敗した場合は、Soria logとworker
+12. **不要なトラックを脇に寄せます。** Libraryでトラックを選び **Move to Soria
+    Trash** を押すと、同じドライブの`Soria Quarantine`フォルダへ移動してライブラリ
+    一覧から消えますが、削除はされません。Organizerの **Soria Trash** タブから
+    個別または一括で復元でき、**Delete Permanently** でmacOSのゴミ箱へ送れます。
+
+13. **ライブラリをフォルダへ整理します。** **Organizer > Plan** で範囲と保存先
+    フォルダを選び **Build Preview** を押します。準備済みトラックごとに埋め込みから
+    ジャンルを判定し、ジャンル内で類似トラックをクラスタリングして
+    `<保存先>/<ジャンル>/Cluster NN - <アーティスト>/` を提案します。納得できない
+    移動はチェックを外してから **Apply Selected** を押します。ファイルはコピーでは
+    なく移動され、旧パスを記録するため次のSerato/rekordbox同期でも照合されます。
+
+14. **整理したフォルダを書き出します。** **Export Organized Folders** で全フォルダ
+    を一度にDJソフトへ渡せます。フォルダごとのSerato crate（`%%`でネスト）、ツリー
+    全体を含むrekordbox XML 1つ、フォルダごとの`.m3u8`のいずれかを選べます。整理は
+    ファイルを移動するため、再書き出しまで既存のcrateとplaylistは旧パスを指します。
+
+15. **必要に応じてログを確認します。** 解析が失敗した場合は、Soria logとworker
     stderrを確認します。多くの失敗は、Python packageの不足、API keyの不足、または
     local decoderが読めないオーディオファイルが原因です。
 
@@ -856,6 +937,17 @@ environmentでは利用できないlocal system servicesを必要とする場合
   versionには追加adapterが必要になる場合があります。
 - Serato exportは意図的に保守的かつ非破壊です。
 - 推薦品質はlocal metadata qualityとembedding availabilityに依存します。
+- 整理はファイルを**移動**するため、再書き出しまで既存のSerato crateとrekordbox
+  playlistは旧パスを指します。Soriaは旧パスを記録して次のvendor syncで照合し直し
+  ますが、vendor databaseを直接書き換えることはありません。
+- Soria Trashはシステムのゴミ箱ではなくSoriaが管理するフォルダなので、**Delete
+  Permanently** を押すまでディスク容量は解放されません。
+- ジャンル判定はテキストラベルとオーディオ埋め込みを比較しますが、これはテキストと
+  オーディオが共有する埋め込み空間でのみ意味を持ちます。1つのフォルダがライブラリ
+  の大半を占めるプランには低信頼の警告が付きます。
+- sandbox化されたreleaseビルドでファイルを移動するには、フォルダ選択時に発行された
+  security-scoped bookmarkが必要です。この機能より前に追加したMusic Folderには
+  再選択バナーが表示され、アクセスを再許可するまで整理機能は無効のままです。
 
 ### プライバシーとセキュリティ
 

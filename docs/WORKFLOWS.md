@@ -107,6 +107,13 @@ key overrides.
 | Rekordbox M3U8 export | Implemented | `PlaylistExportService`, `RekordboxPlaylistWriter` |
 | Rekordbox XML export | Implemented | `PlaylistExportService`, `RekordboxXMLWriter` |
 | Serato crate export | Implemented, marked experimental | `PlaylistExportService`, `SeratoCrateWriter` |
+| Durable folder access in sandboxed builds | Implemented | `SecurityScopedBookmarkStore`, `LibraryRootsStore.rememberAccess` |
+| Soria Trash quarantine and restore | Implemented | `LibraryQuarantineService`, `QuarantineReviewView` |
+| Local folder organization | Implemented | `LibraryOrganizationPlanner`, `LibraryFileOrganizerService`, `OrganizerPlanView` |
+| Soria collections | Implemented | `soria_collections`, `LibraryOrganizerModel` |
+| Batch vendor export | Implemented | `PlaylistExportService.exportMany`, `RekordboxXMLWriter` |
+| Prompt-folder organization | Planner implemented, UI gated on a shared text/audio model | `LibraryOrganizationPlanner.makePlan(kind:)` |
+| CLAP local embedding profile | Not implemented; planned as an optional post-install add-on | — |
 | Developer ID signing/notarization | Not implemented | `docs/RELEASING.md` documents later path |
 
 ## Detailed Workflows
@@ -308,7 +315,89 @@ and warnings are shown through the Exports view.
 Exports do not automatically run normalization. The user explicitly reviews and
 runs "Normalize Suggested" from the queue.
 
-### 11. Release Packaging
+### 11. Soria Trash (Quarantine)
+
+Selecting tracks in the Library and choosing **Move to Soria Trash** hands them
+to `LibraryQuarantineService`, which moves each file into a
+`Soria Quarantine/<timestamp>/` folder and records the move in
+`track_quarantine`.
+
+The quarantine folder is chosen on the track's own volume — the containing
+library root first, then the volume root, and only as a last resort
+`Application Support/Soria/quarantine`. Staying on one volume keeps the move an
+atomic rename instead of a copy of a potentially huge library.
+
+Quarantining nulls `tracks.last_seen_in_local_scan_at`, which is what removes
+the track from the library list, and `LibraryScannerService` is told to skip
+quarantine folders so a later scan does not re-index discarded files. The
+pre-quarantine timestamp is stored on the quarantine row and replayed on
+restore, so a restored track reappears without a rescan.
+
+The Organizer's **Soria Trash** tab lists everything set aside, with:
+
+- **Restore Selected** / **Restore All** — moves files back to their original
+  paths. Restore is refused when another file already occupies that path.
+- **Delete Permanently** — hands the files to the system Trash. This is the only
+  path that leaves Soria's control, and it never calls `removeItem`.
+
+Quarantine is deliberately not the system Trash: macOS gives an app no way to
+list or selectively restore its own trashed items, and reviewing a cull is the
+point of the feature.
+
+### 12. Local Folder Organization
+
+The Organizer's **Plan** tab turns prepared tracks into a folder tree.
+
+Planning (`LibraryOrganizationPlanner`) is pure — it takes track embeddings and
+genre-label embeddings as inputs and touches no files:
+
+1. Each genre family in `GenreTaxonomy` is embedded as a short text label
+   through the worker's `embed_text_labels` command. Vectors are cached per
+   embedding profile in `worker-cache/label-embeddings/`, so only labels missing
+   from the cache cost an API call.
+2. Every track is assigned the family whose label vector is closest to its
+   track embedding. Genre tags and folder names only break near-ties within
+   0.025.
+3. Tracks are clustered by similarity inside each family, producing
+   `<destination>/<Genre>/Cluster NN - <Representative Artist>/`.
+
+The preview table lists every proposed move with a checkbox. Unchecked moves are
+neither applied nor recorded — this is the main thing the earlier, unshipped
+folder-organization workflow lacked.
+
+Applying (`LibraryFileOrganizerService`) moves files one at a time. Each move
+refuses to overwrite an existing target, checks readability, and rolls the file
+back if the database write fails — unless something reappeared at the source
+path, in which case rollback is refused rather than clobbering it. A failed move
+becomes a warning and the batch continues.
+
+Successful moves record the old path in `track_path_aliases`, so the next vendor
+sync still matches Serato and rekordbox entries that point at pre-move paths.
+They also write the `soria_collections` tree mirroring the folders created, plus
+`organization_batches` / `organization_moves` history.
+
+Plans carry a low-confidence warning when more than 85% of tracks land in one
+folder, which is what an embedding model without a shared text/audio space looks
+like.
+
+### 13. Batch Vendor Export
+
+**Export Organized Folders** sends every organized collection to Serato or
+rekordbox in one action through `PlaylistExportService.exportMany`.
+
+- Serato: one `.crate` per collection, named with `%%` separators so the folder
+  tree becomes a crate tree.
+- rekordbox XML: one document with a single deduplicated `COLLECTION` and a
+  merged `PLAYLISTS` tree whose folder nodes are shared between playlists.
+- rekordbox M3U8: one file per collection in the chosen output folder.
+
+The Serato crate root is resolved once over the union of all tracks, so a
+selection spanning two drives fails before anything is written. Collections
+record `last_exported_at`, and the Organizer warns when organizing happened
+after the last export — the window in which vendor libraries still hold
+pre-move paths.
+
+### 14. Release Packaging
 
 `make release-dmg` runs `Scripts/create_release_dmg.sh`.
 
@@ -335,13 +424,21 @@ Soria stores app data under Application Support through `AppPaths`.
 
 Important local state:
 
-- SQLite library database
+- SQLite library database, including `soria_collections`,
+  `soria_collection_tracks`, `track_quarantine`, `organization_batches`, and
+  `organization_moves`
 - Python worker cache directory
 - Chroma vector persistence
+- genre/prompt label embedding cache (`worker-cache/label-embeddings/`)
 - logs
 - generated export helpers
-- UserDefaults settings
+- UserDefaults settings, including security-scoped bookmarks for library roots
+  under `security.bookmarks.v1`
 - Gemini API key in Keychain
+
+Quarantined audio is **not** stored under Application Support in the normal
+case: it stays on its own volume in a `Soria Quarantine/` folder so moves remain
+atomic renames.
 
 Soria does not upload full source audio files or the SQLite library database.
 Embedding workflows can send short derived audio segment payloads and
@@ -383,3 +480,18 @@ Relevant coverage found in the repo:
 - Serato crate export is intentionally conservative and marked experimental.
 - Normalization mutates the active library file only after writing a separate
   normalized output and preserving the original in Trash or a fallback backup.
+- Organizing **moves** files. Existing Serato crates and rekordbox playlists
+  keep pointing at the old paths until you export again. `track_path_aliases`
+  lets the next vendor sync re-match those entries, but Soria never rewrites the
+  vendor databases in place.
+- Quarantine is a Soria-managed folder, not the system Trash, so it does not
+  free disk space until you use **Delete Permanently**.
+- Genre detection compares text label embeddings against audio embeddings. That
+  is only well-defined in a shared text/audio embedding space; with the Google
+  profile the numbers are usable but unvalidated, which is why lopsided plans
+  carry a low-confidence warning and why prompt folders are not exposed in the
+  UI yet.
+- In sandboxed Release builds, moving files requires a security-scoped bookmark
+  minted when the folder was selected. Music Folders chosen before bookmarks
+  existed show a re-authorization banner; organizing and quarantining stay
+  disabled for those roots until the user re-selects them.
