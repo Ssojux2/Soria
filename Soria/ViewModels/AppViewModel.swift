@@ -153,6 +153,9 @@ final class AppViewModel: ObservableObject {
     @Published var selectedRecommendationID: UUID?
     @Published var scanProgress = ScanJobProgress()
     @Published var libraryRoots: [String] = LibraryRootsStore.loadRoots().map(TrackPathNormalizer.normalizedAbsolutePath)
+    /// Roots the sandbox can no longer write to because they were chosen before
+    /// security-scoped bookmarks existed. Always empty in Debug (sandbox off).
+    @Published private(set) var libraryRootsNeedingReauthorization: [String] = LibraryRootsStore.rootsMissingDurableAccess()
     @Published var librarySources: [LibrarySourceRecord] = []
     @Published private(set) var seratoMembershipFacets: [MembershipFacet] = []
     @Published private(set) var rekordboxMembershipFacets: [MembershipFacet] = []
@@ -996,6 +999,48 @@ final class AppViewModel: ObservableObject {
 
     var librarySetupPromptActionTitle: String {
         libraryRoots.isEmpty ? "Library Setup" : "Scan Music Folders"
+    }
+
+    var shouldShowLibraryReauthorizationPrompt: Bool {
+        !libraryRootsNeedingReauthorization.isEmpty
+    }
+
+    var libraryReauthorizationMessage: String {
+        let names = libraryRootsNeedingReauthorization
+            .map { URL(fileURLWithPath: $0).lastPathComponent }
+            .joined(separator: ", ")
+        return "Soria can read these Music Folders but cannot move files in them: \(names). "
+            + "Re-select them to grant lasting access — organizing and Soria Trash stay disabled until you do."
+    }
+
+    /// Whether every path can still be written to after a relaunch. Organizing and
+    /// quarantining are gated on this so a sandboxed Release build fails loudly
+    /// with a re-authorization prompt instead of silently doing nothing.
+    func hasDurableWriteAccess(toPaths paths: [String]) -> Bool {
+        paths.allSatisfy { SecurityScopedBookmarkStore.hasDurableAccess(toPath: $0) }
+    }
+
+    func reauthorizeLibraryRoots() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Grant Access"
+        panel.message = "Re-select your Music Folders so Soria can move files in them."
+        if let first = libraryRootsNeedingReauthorization.first {
+            panel.directoryURL = URL(fileURLWithPath: first, isDirectory: true)
+        }
+
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls {
+            LibraryRootsStore.rememberAccess(to: url)
+        }
+        addLibraryRoots(panel.urls.map(\.path))
+        refreshLibraryRootsNeedingReauthorization()
+    }
+
+    func refreshLibraryRootsNeedingReauthorization() {
+        libraryRootsNeedingReauthorization = LibraryRootsStore.rootsMissingDurableAccess(libraryRoots)
     }
 
     var canAnalyzePendingSelection: Bool {
@@ -2271,7 +2316,11 @@ final class AppViewModel: ObservableObject {
         panel.allowsMultipleSelection = true
         panel.prompt = "Use Folder"
         if panel.runModal() == .OK {
+            for url in panel.urls {
+                LibraryRootsStore.rememberAccess(to: url)
+            }
             addLibraryRoots(panel.urls.map(\.path))
+            refreshLibraryRootsNeedingReauthorization()
         }
     }
 
@@ -2290,7 +2339,9 @@ final class AppViewModel: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url {
+            LibraryRootsStore.rememberAccess(to: url)
             initialSetupLibraryRoot = TrackPathNormalizer.normalizedAbsolutePath(url)
+            refreshLibraryRootsNeedingReauthorization()
         }
     }
 
@@ -4035,6 +4086,14 @@ final class AppViewModel: ObservableObject {
         for url in candidateURLs where seenPaths.insert(url.path).inserted {
             if url.startAccessingSecurityScopedResource() {
                 startedURLs.append(url)
+                continue
+            }
+            // 한국어: 패널이 준 URL은 재실행 후 스코프가 끊깁니다. 저장해 둔
+            // security-scoped 북마크로 폴백해야 Release 빌드에서 내보내기가 동작합니다.
+            if let bookmarked = SecurityScopedBookmarkStore.resolveURL(forPath: url.path),
+               seenPaths.insert(bookmarked.path).inserted,
+               bookmarked.startAccessingSecurityScopedResource() {
+                startedURLs.append(bookmarked)
             }
         }
 

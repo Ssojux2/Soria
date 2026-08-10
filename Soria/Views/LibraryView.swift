@@ -183,6 +183,10 @@ struct LibraryView: View {
                 librarySetupPrompt
             }
 
+            if viewModel.shouldShowLibraryReauthorizationPrompt {
+                libraryReauthorizationPrompt
+            }
+
             if viewModel.shouldShowLibraryAnalysisProgress {
                 libraryAnalysisProgressCard
             } else {
@@ -370,6 +374,28 @@ struct LibraryView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .accessibilityIdentifier("library-setup-card")
+    }
+
+    private var libraryReauthorizationPrompt: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Folder Access Needed", systemImage: "lock.open.trianglebadge.exclamationmark")
+                    .font(.headline)
+
+                Text(viewModel.libraryReauthorizationMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("Re-select Music Folders") {
+                    viewModel.reauthorizeLibraryRoots()
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("library-reauthorize-button")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier("library-reauthorize-card")
     }
 
     private var libraryAnalysisProgressCard: some View {
