@@ -2,6 +2,7 @@ import Combine
 import Foundation
 
 enum SidebarSection: String, CaseIterable, Identifiable {
+    case home = "Home"
     case library = "Library"
     case organizer = "Organizer"
     case mixAssistant = "Mix Assistant"

@@ -15,6 +15,9 @@ enum LibraryPreviewInteractionPhase: Equatable {
 @MainActor
 final class AppViewModel: ObservableObject {
     private static let uiTestMixAssistantArgument = "UITEST_START_IN_MIX_ASSISTANT"
+    /// UI tests deep-link to the pane under test rather than walking there from
+    /// Home, the same way `UITEST_START_IN_MIX_ASSISTANT` already does.
+    private static let uiTestLibraryArgument = "UITEST_START_IN_LIBRARY"
     private static let uiTestLibraryStatePrefix = "UITEST_LIBRARY_STATE="
     private static let uiTestForceInitialSetupArgument = "UITEST_FORCE_INITIAL_SETUP"
 
@@ -107,7 +110,7 @@ final class AppViewModel: ObservableObject {
         var url: URL { action.url }
     }
 
-    @Published var selectedSection: SidebarSection = .library {
+    @Published var selectedSection: SidebarSection = .home {
         didSet {
             if !allowsScopeInspector(for: activeScopeInspectorTarget, in: selectedSection) {
                 closeScopeInspector()
@@ -158,6 +161,10 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var libraryRootsNeedingReauthorization: [String] = LibraryRootsStore.rootsMissingDurableAccess()
     @Published var organizerMode: OrganizerMode = .plan
     @Published private(set) var quarantineRows: [QuarantineRow] = []
+    /// When the most recent organization batch ran, for the Home Organize card.
+    /// Refreshed by `refreshWorkspaceSnapshot()` rather than read from the database
+    /// on every render.
+    @Published private(set) var latestOrganizationDate: Date?
     @Published private(set) var isQuarantining = false
     @Published private(set) var isRestoringQuarantine = false
     @Published var selectedQuarantineTrackIDs: Set<UUID> = []
@@ -412,6 +419,8 @@ final class AppViewModel: ObservableObject {
 
         if processArguments.contains(Self.uiTestMixAssistantArgument) {
             selectedSection = .mixAssistant
+        } else if processArguments.contains(Self.uiTestLibraryArgument) {
+            selectedSection = .library
         }
 
         let loadedAPIKey = AppSettingsStore.loadGoogleAIAPIKey(
@@ -835,6 +844,57 @@ final class AppViewModel: ObservableObject {
 
     var preparationOverview: PreparationOverviewState {
         Self.makePreparationOverview(from: preparationOverviewContext)
+    }
+
+    /// Inputs for the Home dashboard.
+    ///
+    /// Every `can…` flag is forwarded from the property the owning pane already
+    /// uses, so a button on Home is enabled under exactly the same conditions as
+    /// the same button in its own pane. Home is not allowed to decide this itself.
+    var workspaceDashboardContext: WorkspaceDashboardContext {
+        WorkspaceDashboardContext(
+            totalTrackCount: tracks.count,
+            readyTrackCount: activeEmbeddingTrackCount,
+            needsPreparationCount: tracks.count - activeEmbeddingTrackCount,
+            libraryRootCount: libraryRoots.count,
+            isValidated: validationStatus.isValidated,
+            validationSummary: validationStatus.summaryText,
+            embeddingProfileName: embeddingProfile.displayName,
+            hasResolvedWorkerPaths: !pythonExecutablePath.isEmpty && !workerScriptPath.isEmpty,
+            enabledVendorSourceNames: librarySources
+                .filter { $0.enabled && $0.kind != .folderFallback }
+                .map { $0.kind.displayName },
+            soriaFolderCount: organizer.exportableCollectionCount,
+            quarantinedTrackCount: quarantineRows.count,
+            latestOrganizationDate: latestOrganizationDate,
+            canExportFolders: organizer.canExportCollections,
+            readyReferenceCount: selectionReadiness.readyCount,
+            generatedRecommendationCount: recommendations.count,
+            canGenerateRecommendations: canRunRecommendationActions,
+            playlistQueueCount: playlistTracks.count,
+            exportTargetName: selectedExportTarget.displayName,
+            canExportQueue: canExportPlaylist
+        )
+    }
+
+    var workspaceDashboard: WorkspaceDashboardState {
+        .make(from: workspaceDashboardContext)
+    }
+
+    /// Refreshes the counts Home shows that nothing else keeps current.
+    ///
+    /// `exportableCollectionCount` and the quarantine rows are only recomputed when
+    /// their own panes ask for them, so without this the Home cards would report
+    /// zero folders and an empty trash on a library that has plenty of both.
+    func refreshWorkspaceSnapshot() {
+        organizer.refreshExportableCollections()
+        refreshQuarantineRows()
+        latestOrganizationDate = (try? database.fetchOrganizationBatches(limit: 1).first?.createdAt) ?? nil
+    }
+
+    func openOrganizer(mode: OrganizerMode) {
+        organizerMode = mode
+        selectedSection = .organizer
     }
 
     var selectionReadiness: SelectionReadiness {
@@ -3686,7 +3746,7 @@ final class AppViewModel: ObservableObject {
             return target == .library
         case .mixAssistant:
             return target == .recommendation
-        case .organizer, .exports, .settings:
+        case .home, .organizer, .exports, .settings:
             return false
         }
     }

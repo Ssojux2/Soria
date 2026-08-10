@@ -25,8 +25,12 @@ segment payloads and text queries to Google for embedding.
 
 ## Main Entry Points
 
-- `Soria/ContentView.swift` defines the macOS sidebar: Library, Mix Assistant,
-  Exports, and Settings.
+- `Soria/ContentView.swift` defines the macOS sidebar: Home, Library, Organizer,
+  Mix Assistant, Exports, and Settings. It also hosts `WorkspaceToolbar`, which
+  puts the current preparation step, a library sync action, and a ready-track
+  readout on every pane.
+- `Soria/Views/HomeDashboardView.swift` is the default landing screen and runs
+  the pipeline actions that do not need a full-width table.
 - `Soria/ViewModels/AppViewModel.swift` coordinates setup, scan, analysis,
   recommendations, queue normalization, and export.
 - `Soria/Services/LibraryDatabase.swift` persists tracks, segments, external
@@ -87,6 +91,8 @@ key overrides.
 
 | Workflow | Status in app | Primary code |
 | --- | --- | --- |
+| Home dashboard | Implemented | `WorkspaceDashboardState.make`, `HomeDashboardView` |
+| Cross-pane toolbar | Implemented | `WorkspaceToolbar` |
 | First-run setup | Implemented | `AppViewModel.completeInitialSetup`, `ContentView.InitialSetupSheet` |
 | Music folder scan | Implemented | `LibraryScannerService.scan` |
 | Incremental scan skip | Implemented | `LibraryScannerService.scan`, `LibraryScannerService.refreshTrack` |
@@ -120,7 +126,38 @@ key overrides.
 
 ## Detailed Workflows
 
-### 1. First-Run Setup
+### 1. Home Dashboard
+
+`SidebarSection.home` is the default landing screen. It exists because the object
+almost every action operates on -- the track selection -- lives in Library, while
+the actions themselves were spread across four other panes. Home puts the four
+pipeline stages on one screen with their live counts.
+
+`AppViewModel.workspaceDashboardContext` gathers plain values and
+`WorkspaceDashboardState.make(from:)` turns them into display state. That function
+is pure and covered by `SoriaTests/WorkspaceDashboardTests.swift`.
+
+Cards, and what each runs without leaving the screen:
+
+- **Setup** -- rendered only when `setupIssues` is non-empty. Library setup,
+  choose folder, scan, validate API key.
+- **1 Prepare** -- renders `AppViewModel.preparationOverview`, the same tested
+  state machine the toolbar uses. Runs `performPreparationAction` and
+  `cancelAnalysis`.
+- **2 Organize** -- Soria folder count, last organization date, Soria Trash
+  count. Runs `LibraryOrganizerModel.exportCollections` and
+  `restoreAllQuarantinedTracks`; navigates for the plan table and the map.
+- **3 Mix** -- reference count and query field. Runs `generateRecommendations`.
+- **4 Export** -- queue count and target picker. Runs `exportPlaylist`.
+
+`refreshWorkspaceSnapshot()` runs on appear. `exportableCollectionCount` and the
+quarantine rows are only recomputed when their own panes ask for them, so without
+it the Organize card would report zero folders on a library that has plenty.
+
+`WorkspaceToolbar` mirrors the Prepare card's primary action from the same
+`preparationOverview`, so preparation stays visible and stoppable from any pane.
+
+### 2. First-Run Setup
 
 The first-run sheet asks for a Gemini API key when the active embedding profile
 requires one. It also asks for a local music folder when no library source is
@@ -132,7 +169,7 @@ sources, and refreshes vendor metadata when available.
 
 If validation fails, setup remains open and surfaces the worker/API-key error.
 
-### 2. Library Scanning
+### 3. Library Scanning
 
 The scanner discovers regular audio files under the configured roots. Supported
 extensions are:
@@ -157,7 +194,7 @@ Incremental behavior:
 - Tracks no longer seen in scanned roots are removed from active local-scan
   membership queries.
 
-### 3. External DJ Metadata
+### 4. External DJ Metadata
 
 Soria can enrich scanned local tracks with vendor metadata.
 
@@ -177,7 +214,7 @@ available.
 Playlist and crate memberships are normalized into `membership_catalog` and
 `track_memberships`, which power the Library and Mix Assistant reference filters.
 
-### 4. Track Analysis
+### 5. Track Analysis
 
 Analysis runs through `PythonWorkerClient` and `analysis-worker/main.py`.
 
@@ -201,7 +238,7 @@ and embedded segment vectors.
 If an audio file changes later, `LibraryScannerService.refreshTrack` clears the
 stale analysis and invalidates vector entries.
 
-### 5. Worker Health and Vector Repair
+### 6. Worker Health and Vector Repair
 
 Settings validation calls `validate_embedding_profile`. The worker healthcheck
 reports dependency availability, embedding profile support, API-key presence,
@@ -211,7 +248,7 @@ When the SQLite ready-track set and Chroma vector index drift apart, Soria can
 automatically rebuild the vector index from stored track and segment embeddings.
 This is handled in `AppViewModel.repairVectorIndexIfNeeded`.
 
-### 6. Library Preview
+### 7. Library Preview
 
 Selecting one track in Library enables the preview strip when the file is
 playable. The preview supports:
@@ -224,7 +261,7 @@ playable. The preview supports:
 Waveform envelope backfill is handled through the worker when stored envelope
 data is missing.
 
-### 7. Recommendation Generation
+### 8. Recommendation Generation
 
 Mix Assistant can generate recommendations from:
 
@@ -251,7 +288,7 @@ Generated recommendations are persisted as score sessions. The database keeps
 the latest sessions per profile/kind and stores score snapshots for later
 debugging.
 
-### 8. Recommendation Curation and Playlist Path
+### 9. Recommendation Curation and Playlist Path
 
 Generated matches can be hidden and restored before building a path. The path
 builder starts from the current seed and repeatedly chooses the next best
@@ -261,7 +298,7 @@ queue.
 The final ordered tracks are copied into the export playlist queue and the app
 navigates to Exports.
 
-### 9. Queue Normalization
+### 10. Queue Normalization
 
 Exports have a playlist queue panel that inspects normalization state.
 
@@ -295,7 +332,7 @@ Mutation safety:
 Because the original is sent to Trash with the same file name, Finder's
 **Put Back** action can restore it more naturally.
 
-### 10. Export
+### 11. Export
 
 Exports run from `PlaylistExportService` after `VendorExportPreflight` prepares
 and validates the queue.
@@ -317,7 +354,7 @@ and warnings are shown through the Exports view.
 Exports do not automatically run normalization. The user explicitly reviews and
 runs "Normalize Suggested" from the queue.
 
-### 11. Soria Trash (Quarantine)
+### 12. Soria Trash (Quarantine)
 
 Selecting tracks in the Library and choosing **Move to Soria Trash** hands them
 to `LibraryQuarantineService`, which moves each file into a
@@ -346,7 +383,7 @@ Quarantine is deliberately not the system Trash: macOS gives an app no way to
 list or selectively restore its own trashed items, and reviewing a cull is the
 point of the feature.
 
-### 12. Local Folder Organization
+### 13. Local Folder Organization
 
 The Organizer's **Plan** tab turns prepared tracks into a folder tree.
 
@@ -382,7 +419,7 @@ Plans carry a low-confidence warning when more than 85% of tracks land in one
 folder, which is what an embedding model without a shared text/audio space looks
 like.
 
-### 13. Batch Vendor Export
+### 14. Batch Vendor Export
 
 **Export Organized Folders** sends every organized collection to Serato or
 rekordbox in one action through `PlaylistExportService.exportMany`.
@@ -399,7 +436,7 @@ record `last_exported_at`, and the Organizer warns when organizing happened
 after the last export — the window in which vendor libraries still hold
 pre-move paths.
 
-### 14. Similarity Map
+### 15. Similarity Map
 
 The Organizer's **Map** tab plots prepared tracks as a scatter of dots so cluster
 decisions can be checked by eye rather than read off a table.
@@ -446,7 +483,7 @@ waveform: dots are batched into one path per colour, hover uses `NSTrackingArea`
 a 4pt slop distinguishes a click from a rubber-band drag. Coordinate maths and hit
 testing live in the view-free `TrackMapLayout` and `TrackMapSpatialIndex`.
 
-### 15. Release Packaging
+### 16. Release Packaging
 
 `make release-dmg` runs `Scripts/create_release_dmg.sh`.
 
@@ -520,6 +557,22 @@ Relevant coverage found in the repo:
 
 ## Current Gaps and Guardrails
 
+- Home renders state and calls existing methods; it never derives its own
+  "can this run" answer. Every `can…` flag in `WorkspaceDashboardContext` is
+  forwarded from the property the owning pane already uses. Adding a button to
+  Home that computes its own enabled state is how the dashboard starts
+  disagreeing with the pane that owns the action.
+- Home deliberately does not embed the organization plan table, the similarity
+  map, or curated mix results. They need full width; a cramped copy is worse than
+  a button that navigates.
+- Home has no preview player. Switching sidebar sections stops playback
+  (`AppViewModel.selectedSection` `didSet`), so a transport there would die on
+  the first navigation.
+- `refreshWorkspaceSnapshot()` must stay wired to Home's `onAppear`. The Soria
+  folder count and quarantine rows are not otherwise kept current, and the cards
+  would silently read zero.
+- The app opens on Home. UI tests deep-link with `UITEST_START_IN_LIBRARY` or
+  `UITEST_START_IN_MIX_ASSISTANT` instead of navigating from Home.
 - Early release artifacts are not notarized.
 - The DMG/ZIP path ships arch-specific Python worker runtimes, not a universal
   merged Python runtime.

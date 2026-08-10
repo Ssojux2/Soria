@@ -29,6 +29,9 @@ struct ContentView: View {
                     EmptyView()
                 }
             }
+            .toolbar {
+                WorkspaceToolbar(viewModel: viewModel)
+            }
         }
         .frame(minWidth: 1280, minHeight: 800)
         .background(
@@ -145,6 +148,8 @@ struct ContentView: View {
 
     private func icon(for section: SidebarSection) -> String {
         switch section {
+        case .home:
+            return "square.grid.2x2"
         case .library:
             return "music.note.list"
         case .organizer:
@@ -161,6 +166,10 @@ struct ContentView: View {
     @ViewBuilder
     private var selectedDetailPane: some View {
         switch viewModel.selectedSection {
+        case .home:
+            HomeDashboardView(viewModel: viewModel)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("right-pane-home")
         case .library:
             LibraryView(viewModel: viewModel)
                 .accessibilityElement(children: .contain)

@@ -133,6 +133,31 @@ final class SoriaUITests: XCTestCase {
     }
 
     @MainActor
+    func testHomeDashboardShowsEveryPipelineStageAndItsActions() throws {
+        let app = launchApp(libraryState: .prepared, startInHome: true)
+
+        XCTAssertTrue(element(in: app, identifier: "home-dashboard-view").waitForExistence(timeout: 10))
+
+        // All four stages are reachable without leaving this screen.
+        for card in ["home-prepare-card", "home-organize-card", "home-mix-card", "home-export-card"] {
+            XCTAssertTrue(element(in: app, identifier: card).waitForExistence(timeout: 10), card)
+        }
+
+        // The prepared fixture has a track needing analysis, so preparation is
+        // offered right here rather than only in the Library pane.
+        let prepareButton = element(in: app, identifier: "home-prepare-primary-button")
+        XCTAssertTrue(prepareButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForEnabled(prepareButton))
+
+        // Nothing has been queued, so exporting stays blocked.
+        XCTAssertTrue(waitForLabel(of: marker(in: app, identifier: "home-queue-count"), toEqual: "0"))
+        XCTAssertFalse(element(in: app, identifier: "home-export-button").isEnabled)
+
+        // The toolbar carries the same primary action into every other pane.
+        XCTAssertTrue(element(in: app, identifier: "toolbar-primary-button").waitForExistence(timeout: 10))
+    }
+
+    @MainActor
     func testAdvancedFiltersOpenInspectorFromLibrary() throws {
         let app = launchApp(libraryState: .prepared)
 
@@ -561,11 +586,13 @@ final class SoriaUITests: XCTestCase {
     private func launchApp(
         libraryState: LibraryState = .prepared,
         startInMixAssistant: Bool = false,
+        startInHome: Bool = false,
         forceInitialSetup: Bool = false
     ) -> XCUIApplication {
         let app = configuredApp(
             libraryState: libraryState,
             startInMixAssistant: startInMixAssistant,
+            startInHome: startInHome,
             forceInitialSetup: forceInitialSetup
         )
         app.launch()
@@ -577,6 +604,7 @@ final class SoriaUITests: XCTestCase {
     private func configuredApp(
         libraryState: LibraryState,
         startInMixAssistant: Bool = false,
+        startInHome: Bool = false,
         forceInitialSetup: Bool = false
     ) -> XCUIApplication {
         let app = XCUIApplication()
@@ -587,8 +615,13 @@ final class SoriaUITests: XCTestCase {
             "YES"
         ]
 
+        // The app now opens on Home. These tests deep-link to the pane they
+        // exercise instead of navigating there first, so Library stays the default
+        // here and only the Home test opts out.
         if startInMixAssistant {
             app.launchArguments.append("UITEST_START_IN_MIX_ASSISTANT")
+        } else if !startInHome {
+            app.launchArguments.append("UITEST_START_IN_LIBRARY")
         }
 
         if forceInitialSetup {
