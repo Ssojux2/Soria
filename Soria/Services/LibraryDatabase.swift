@@ -169,16 +169,28 @@ final class LibraryDatabase {
         }
     }
 
+    /// Moves a track's on-disk location, recording the old path as an alias so
+    /// Serato and rekordbox entries still re-match after the file moved.
+    ///
+    /// - Parameters:
+    ///   - expectedCurrentPath: when supplied, the UPDATE also matches on
+    ///     `file_path`, so a concurrent scan or a second organize pass that already
+    ///     moved this track fails the write instead of silently clobbering it.
+    ///     Pass `nil` to update by id alone.
+    ///   - aliasSource: recorded in `track_path_aliases.source` for provenance.
     func updateTrackFileLocation(
         trackID: UUID,
         fileURL: URL,
         modifiedTime: Date,
         contentHash: String,
-        lastSeenInLocalScanAt: Date?
+        lastSeenInLocalScanAt: Date?,
+        expectedCurrentPath: String? = nil,
+        aliasSource: String = "folder_organization_move"
     ) throws -> Track {
         let normalizedURL = fileURL.standardizedFileURL
         let normalizedPath = TrackPathNormalizer.normalizedAbsolutePath(normalizedURL)
         let previousPath = try fetchTrack(id: trackID)?.filePath
+        let expectedPath = expectedCurrentPath.map(TrackPathNormalizer.normalizedAbsolutePath)
         let sql = """
         UPDATE tracks
         SET file_path = ?,
@@ -186,7 +198,7 @@ final class LibraryDatabase {
             modified_time = ?,
             content_hash = ?,
             last_seen_in_local_scan_at = ?
-        WHERE id = ?;
+        WHERE id = ?\(expectedPath == nil ? "" : " AND file_path = ?");
         """
         try withTransaction {
             if let previousPath, previousPath != normalizedPath {
@@ -194,7 +206,7 @@ final class LibraryDatabase {
                 try upsertTrackPathAlias(
                     trackID: trackID,
                     path: previousPath,
-                    source: "folder_organization_move"
+                    source: aliasSource
                 )
             }
 
@@ -205,6 +217,9 @@ final class LibraryDatabase {
                 bind(statement, index: 4, text: contentHash)
                 bind(statement, index: 5, text: lastSeenInLocalScanAt.map { Self.iso8601.string(from: $0) })
                 bind(statement, index: 6, text: trackID.uuidString)
+                if let expectedPath {
+                    bind(statement, index: 7, text: expectedPath)
+                }
                 guard sqlite3_step(statement) == SQLITE_DONE, sqlite3_changes(db) == 1 else {
                     throw DatabaseError.writeFailed
                 }
@@ -270,6 +285,400 @@ final class LibraryDatabase {
 
     func lookupTrack(path: String) throws -> Track? {
         try fetchTrack(path: path)
+    }
+
+    // MARK: - Soria collections
+
+    func upsertCollection(_ collection: SoriaCollection) throws {
+        let sql = """
+        INSERT INTO soria_collections (
+            id, parent_id, name, kind, origin, folder_path, genre_family_id,
+            cluster_id, prompt_text, sort_index, created_at, updated_at, last_exported_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            parent_id = excluded.parent_id,
+            name = excluded.name,
+            kind = excluded.kind,
+            origin = excluded.origin,
+            folder_path = excluded.folder_path,
+            genre_family_id = excluded.genre_family_id,
+            cluster_id = excluded.cluster_id,
+            prompt_text = excluded.prompt_text,
+            sort_index = excluded.sort_index,
+            updated_at = excluded.updated_at,
+            last_exported_at = excluded.last_exported_at;
+        """
+        try withStatement(sql) { statement in
+            bind(statement, index: 1, text: collection.id.uuidString)
+            bind(statement, index: 2, text: collection.parentID?.uuidString)
+            bind(statement, index: 3, text: collection.name)
+            bind(statement, index: 4, text: collection.kind.rawValue)
+            bind(statement, index: 5, text: collection.origin.rawValue)
+            bind(statement, index: 6, text: collection.folderPath)
+            bind(statement, index: 7, text: collection.genreFamilyID)
+            bind(statement, index: 8, text: collection.clusterID)
+            bind(statement, index: 9, text: collection.promptText)
+            bind(statement, index: 10, int: collection.sortIndex)
+            bind(statement, index: 11, text: Self.iso8601.string(from: collection.createdAt))
+            bind(statement, index: 12, text: Self.iso8601.string(from: collection.updatedAt))
+            bind(statement, index: 13, text: collection.lastExportedAt.map { Self.iso8601.string(from: $0) })
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
+        }
+    }
+
+    func fetchCollections() throws -> [SoriaCollection] {
+        let sql = """
+        SELECT id, parent_id, name, kind, origin, folder_path, genre_family_id,
+               cluster_id, prompt_text, sort_index, created_at, updated_at, last_exported_at
+        FROM soria_collections
+        ORDER BY sort_index, name;
+        """
+        return try withStatement(sql) { statement in
+            var collections: [SoriaCollection] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let idText = sqliteString(statement, index: 0),
+                    let id = UUID(uuidString: idText),
+                    let name = sqliteString(statement, index: 2),
+                    let kindText = sqliteString(statement, index: 3),
+                    let kind = SoriaCollection.Kind(rawValue: kindText),
+                    let originText = sqliteString(statement, index: 4),
+                    let origin = SoriaCollection.Origin(rawValue: originText),
+                    let createdAtText = sqliteString(statement, index: 10),
+                    let createdAt = Self.iso8601.date(from: createdAtText),
+                    let updatedAtText = sqliteString(statement, index: 11),
+                    let updatedAt = Self.iso8601.date(from: updatedAtText)
+                else {
+                    continue
+                }
+
+                collections.append(
+                    SoriaCollection(
+                        id: id,
+                        parentID: sqliteString(statement, index: 1).flatMap(UUID.init(uuidString:)),
+                        name: name,
+                        kind: kind,
+                        origin: origin,
+                        folderPath: sqliteString(statement, index: 5),
+                        genreFamilyID: sqliteString(statement, index: 6),
+                        clusterID: sqliteString(statement, index: 7),
+                        promptText: sqliteString(statement, index: 8),
+                        sortIndex: Int(sqlite3_column_int64(statement, 9)),
+                        createdAt: createdAt,
+                        updatedAt: updatedAt,
+                        lastExportedAt: sqliteString(statement, index: 12).flatMap(Self.iso8601.date(from:))
+                    )
+                )
+            }
+            return collections
+        }
+    }
+
+    func replaceCollectionTracks(collectionID: UUID, trackIDs: [UUID]) throws {
+        let addedAt = Self.iso8601.string(from: Date())
+        try withTransaction {
+            try withStatement("DELETE FROM soria_collection_tracks WHERE collection_id = ?;") { statement in
+                bind(statement, index: 1, text: collectionID.uuidString)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.writeFailed
+                }
+            }
+
+            let insertSQL = """
+            INSERT INTO soria_collection_tracks (collection_id, track_id, position, added_at)
+            VALUES (?, ?, ?, ?);
+            """
+            for (position, trackID) in trackIDs.enumerated() {
+                try withStatement(insertSQL) { statement in
+                    bind(statement, index: 1, text: collectionID.uuidString)
+                    bind(statement, index: 2, text: trackID.uuidString)
+                    bind(statement, index: 3, int: position)
+                    bind(statement, index: 4, text: addedAt)
+                    guard sqlite3_step(statement) == SQLITE_DONE else {
+                        throw DatabaseError.writeFailed
+                    }
+                }
+            }
+        }
+    }
+
+    func fetchCollectionTrackIDs(collectionID: UUID) throws -> [UUID] {
+        let sql = """
+        SELECT track_id
+        FROM soria_collection_tracks
+        WHERE collection_id = ?
+        ORDER BY position;
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, index: 1, text: collectionID.uuidString)
+            var trackIDs: [UUID] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let text = sqliteString(statement, index: 0),
+                    let trackID = UUID(uuidString: text)
+                else {
+                    continue
+                }
+                trackIDs.append(trackID)
+            }
+            return trackIDs
+        }
+    }
+
+    /// Removes a collection and its membership rows.
+    ///
+    /// Child collections are re-parented to this collection's parent rather than
+    /// deleted, so removing a genre folder never silently discards its clusters.
+    func deleteCollection(id: UUID) throws {
+        let parentID = try fetchCollections().first(where: { $0.id == id })?.parentID
+        try withTransaction {
+            try withStatement("UPDATE soria_collections SET parent_id = ? WHERE parent_id = ?;") { statement in
+                bind(statement, index: 1, text: parentID?.uuidString)
+                bind(statement, index: 2, text: id.uuidString)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.writeFailed
+                }
+            }
+            try withStatement("DELETE FROM soria_collection_tracks WHERE collection_id = ?;") { statement in
+                bind(statement, index: 1, text: id.uuidString)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.writeFailed
+                }
+            }
+            try withStatement("DELETE FROM soria_collections WHERE id = ?;") { statement in
+                bind(statement, index: 1, text: id.uuidString)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.writeFailed
+                }
+            }
+        }
+    }
+
+    func markCollectionExported(id: UUID, at date: Date = Date()) throws {
+        try withStatement("UPDATE soria_collections SET last_exported_at = ? WHERE id = ?;") { statement in
+            bind(statement, index: 1, text: Self.iso8601.string(from: date))
+            bind(statement, index: 2, text: id.uuidString)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
+        }
+    }
+
+    // MARK: - Quarantine
+
+    func insertQuarantineRecord(_ record: TrackQuarantineRecord) throws {
+        let sql = """
+        INSERT INTO track_quarantine (
+            track_id, original_path, quarantine_path, original_last_seen_in_local_scan_at,
+            reason, batch_id, quarantined_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(track_id) DO UPDATE SET
+            original_path = excluded.original_path,
+            quarantine_path = excluded.quarantine_path,
+            original_last_seen_in_local_scan_at = excluded.original_last_seen_in_local_scan_at,
+            reason = excluded.reason,
+            batch_id = excluded.batch_id,
+            quarantined_at = excluded.quarantined_at;
+        """
+        try withStatement(sql) { statement in
+            bind(statement, index: 1, text: record.trackID.uuidString)
+            bind(statement, index: 2, text: record.originalPath)
+            bind(statement, index: 3, text: record.quarantinePath)
+            bind(
+                statement,
+                index: 4,
+                text: record.originalLastSeenInLocalScanAt.map { Self.iso8601.string(from: $0) }
+            )
+            bind(statement, index: 5, text: record.reason.rawValue)
+            bind(statement, index: 6, text: record.batchID?.uuidString)
+            bind(statement, index: 7, text: Self.iso8601.string(from: record.quarantinedAt))
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
+        }
+    }
+
+    func fetchQuarantineRecords() throws -> [TrackQuarantineRecord] {
+        let sql = """
+        SELECT track_id, original_path, quarantine_path, original_last_seen_in_local_scan_at,
+               reason, batch_id, quarantined_at
+        FROM track_quarantine
+        ORDER BY quarantined_at DESC;
+        """
+        return try withStatement(sql) { statement in
+            var records: [TrackQuarantineRecord] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let trackIDText = sqliteString(statement, index: 0),
+                    let trackID = UUID(uuidString: trackIDText),
+                    let originalPath = sqliteString(statement, index: 1),
+                    let quarantinePath = sqliteString(statement, index: 2),
+                    let reasonText = sqliteString(statement, index: 4),
+                    let reason = TrackQuarantineRecord.Reason(rawValue: reasonText),
+                    let quarantinedAtText = sqliteString(statement, index: 6),
+                    let quarantinedAt = Self.iso8601.date(from: quarantinedAtText)
+                else {
+                    continue
+                }
+
+                records.append(
+                    TrackQuarantineRecord(
+                        trackID: trackID,
+                        originalPath: originalPath,
+                        quarantinePath: quarantinePath,
+                        originalLastSeenInLocalScanAt: sqliteString(statement, index: 3)
+                            .flatMap(Self.iso8601.date(from:)),
+                        reason: reason,
+                        batchID: sqliteString(statement, index: 5).flatMap(UUID.init(uuidString:)),
+                        quarantinedAt: quarantinedAt
+                    )
+                )
+            }
+            return records
+        }
+    }
+
+    func deleteQuarantineRecord(trackID: UUID) throws {
+        try withStatement("DELETE FROM track_quarantine WHERE track_id = ?;") { statement in
+            bind(statement, index: 1, text: trackID.uuidString)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
+        }
+    }
+
+    // MARK: - Organization history
+
+    func insertOrganizationBatch(
+        _ batch: OrganizationBatchRecord,
+        moves: [OrganizationMoveRecord]
+    ) throws {
+        try withTransaction {
+            let batchSQL = """
+            INSERT INTO organization_batches (
+                id, kind, destination_root, embedding_profile_id, config_json, summary_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?);
+            """
+            try withStatement(batchSQL) { statement in
+                bind(statement, index: 1, text: batch.id.uuidString)
+                bind(statement, index: 2, text: batch.kind.rawValue)
+                bind(statement, index: 3, text: batch.destinationRoot)
+                bind(statement, index: 4, text: batch.embeddingProfileID)
+                bind(statement, index: 5, text: batch.configJSON)
+                bind(statement, index: 6, text: batch.summaryJSON)
+                bind(statement, index: 7, text: Self.iso8601.string(from: batch.createdAt))
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DatabaseError.writeFailed
+                }
+            }
+
+            let moveSQL = """
+            INSERT INTO organization_moves (
+                id, batch_id, track_id, source_path, target_path, collection_id, state, applied_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            """
+            for move in moves {
+                try withStatement(moveSQL) { statement in
+                    bind(statement, index: 1, text: move.id.uuidString)
+                    bind(statement, index: 2, text: move.batchID.uuidString)
+                    bind(statement, index: 3, text: move.trackID.uuidString)
+                    bind(statement, index: 4, text: move.sourcePath)
+                    bind(statement, index: 5, text: move.targetPath)
+                    bind(statement, index: 6, text: move.collectionID?.uuidString)
+                    bind(statement, index: 7, text: move.state.rawValue)
+                    bind(statement, index: 8, text: Self.iso8601.string(from: move.appliedAt))
+                    guard sqlite3_step(statement) == SQLITE_DONE else {
+                        throw DatabaseError.writeFailed
+                    }
+                }
+            }
+        }
+    }
+
+    func fetchOrganizationBatches(limit: Int = 20) throws -> [OrganizationBatchRecord] {
+        let sql = """
+        SELECT id, kind, destination_root, embedding_profile_id, config_json, summary_json, created_at
+        FROM organization_batches
+        ORDER BY created_at DESC
+        LIMIT ?;
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, index: 1, int: limit)
+            var batches: [OrganizationBatchRecord] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let idText = sqliteString(statement, index: 0),
+                    let id = UUID(uuidString: idText),
+                    let kindText = sqliteString(statement, index: 1),
+                    let kind = OrganizationBatchRecord.Kind(rawValue: kindText),
+                    let embeddingProfileID = sqliteString(statement, index: 3),
+                    let createdAtText = sqliteString(statement, index: 6),
+                    let createdAt = Self.iso8601.date(from: createdAtText)
+                else {
+                    continue
+                }
+
+                batches.append(
+                    OrganizationBatchRecord(
+                        id: id,
+                        kind: kind,
+                        destinationRoot: sqliteString(statement, index: 2),
+                        embeddingProfileID: embeddingProfileID,
+                        configJSON: sqliteString(statement, index: 4) ?? "{}",
+                        summaryJSON: sqliteString(statement, index: 5) ?? "{}",
+                        createdAt: createdAt
+                    )
+                )
+            }
+            return batches
+        }
+    }
+
+    func fetchOrganizationMoves(batchID: UUID) throws -> [OrganizationMoveRecord] {
+        let sql = """
+        SELECT id, batch_id, track_id, source_path, target_path, collection_id, state, applied_at
+        FROM organization_moves
+        WHERE batch_id = ?
+        ORDER BY applied_at;
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, index: 1, text: batchID.uuidString)
+            var moves: [OrganizationMoveRecord] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let idText = sqliteString(statement, index: 0),
+                    let id = UUID(uuidString: idText),
+                    let batchIDText = sqliteString(statement, index: 1),
+                    let recordBatchID = UUID(uuidString: batchIDText),
+                    let trackIDText = sqliteString(statement, index: 2),
+                    let trackID = UUID(uuidString: trackIDText),
+                    let sourcePath = sqliteString(statement, index: 3),
+                    let targetPath = sqliteString(statement, index: 4),
+                    let stateText = sqliteString(statement, index: 6),
+                    let state = OrganizationMoveRecord.State(rawValue: stateText),
+                    let appliedAtText = sqliteString(statement, index: 7),
+                    let appliedAt = Self.iso8601.date(from: appliedAtText)
+                else {
+                    continue
+                }
+
+                moves.append(
+                    OrganizationMoveRecord(
+                        id: id,
+                        batchID: recordBatchID,
+                        trackID: trackID,
+                        sourcePath: sourcePath,
+                        targetPath: targetPath,
+                        collectionID: sqliteString(statement, index: 5).flatMap(UUID.init(uuidString:)),
+                        state: state,
+                        appliedAt: appliedAt
+                    )
+                )
+            }
+            return moves
+        }
     }
 
     func replaceSegments(
@@ -1301,6 +1710,75 @@ final class LibraryDatabase {
         );
         """)
 
+        // 한국어: Soria가 직접 만든 컬렉션입니다. membership_catalog / track_memberships는
+        // 벤더에서 매번 재생성되는 캐시라 여기에 둘 수 없습니다.
+        // (rebuildNormalizedMembershipTables 참고)
+        try exec("""
+        CREATE TABLE IF NOT EXISTS soria_collections (
+            id TEXT PRIMARY KEY,
+            parent_id TEXT,
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'organized_folder',
+            origin TEXT NOT NULL DEFAULT 'organizer',
+            folder_path TEXT,
+            genre_family_id TEXT,
+            cluster_id TEXT,
+            prompt_text TEXT,
+            sort_index INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(parent_id) REFERENCES soria_collections(id)
+        );
+        """)
+        try exec("""
+        CREATE TABLE IF NOT EXISTS soria_collection_tracks (
+            collection_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            added_at TEXT NOT NULL,
+            PRIMARY KEY (collection_id, track_id),
+            FOREIGN KEY(collection_id) REFERENCES soria_collections(id),
+            FOREIGN KEY(track_id) REFERENCES tracks(id)
+        );
+        """)
+        try exec("""
+        CREATE TABLE IF NOT EXISTS track_quarantine (
+            track_id TEXT PRIMARY KEY,
+            original_path TEXT NOT NULL,
+            quarantine_path TEXT NOT NULL UNIQUE,
+            original_last_seen_in_local_scan_at TEXT,
+            reason TEXT NOT NULL DEFAULT 'user_discard',
+            batch_id TEXT,
+            quarantined_at TEXT NOT NULL,
+            FOREIGN KEY(track_id) REFERENCES tracks(id)
+        );
+        """)
+        try exec("""
+        CREATE TABLE IF NOT EXISTS organization_batches (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            destination_root TEXT,
+            embedding_profile_id TEXT NOT NULL,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+        """)
+        try exec("""
+        CREATE TABLE IF NOT EXISTS organization_moves (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL,
+            track_id TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            target_path TEXT NOT NULL,
+            collection_id TEXT,
+            state TEXT NOT NULL DEFAULT 'applied',
+            applied_at TEXT NOT NULL,
+            FOREIGN KEY(batch_id) REFERENCES organization_batches(id),
+            FOREIGN KEY(track_id) REFERENCES tracks(id)
+        );
+        """)
+
         if try !columnExists(table: "tracks", column: "track_embedding_json") {
             try exec("ALTER TABLE tracks ADD COLUMN track_embedding_json TEXT;")
         }
@@ -1352,6 +1830,9 @@ final class LibraryDatabase {
         if try !columnExists(table: "external_metadata", column: "cue_points_json") {
             try exec("ALTER TABLE external_metadata ADD COLUMN cue_points_json TEXT NOT NULL DEFAULT '[]';")
         }
+        if try !columnExists(table: "soria_collections", column: "last_exported_at") {
+            try exec("ALTER TABLE soria_collections ADD COLUMN last_exported_at TEXT;")
+        }
 
         try exec("CREATE INDEX IF NOT EXISTS idx_tracks_hash ON tracks(content_hash);")
         try exec("CREATE INDEX IF NOT EXISTS idx_segments_track ON segments(track_id);")
@@ -1364,6 +1845,11 @@ final class LibraryDatabase {
         try exec("CREATE INDEX IF NOT EXISTS idx_track_path_aliases_track ON track_path_aliases(track_id);")
         try exec("CREATE INDEX IF NOT EXISTS idx_score_sessions_kind_profile_created ON score_sessions(kind, embedding_profile_id, created_at DESC);")
         try exec("CREATE INDEX IF NOT EXISTS idx_score_session_candidates_session ON score_session_candidates(session_id);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_soria_collections_parent ON soria_collections(parent_id, sort_index);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_soria_collection_tracks_track ON soria_collection_tracks(track_id);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_track_quarantine_batch ON track_quarantine(batch_id);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_organization_moves_batch ON organization_moves(batch_id);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_organization_moves_track ON organization_moves(track_id);")
         try migrateLegacyEmbeddingProfileState()
         try invalidateIncompleteEmbeddingState()
         try rebuildNormalizedMembershipTables()
@@ -1702,6 +2188,14 @@ final class LibraryDatabase {
         }
     }
 
+    /// Rebuilds the vendor-derived membership cache from `external_metadata`.
+    ///
+    /// WARNING: this deletes `track_memberships` and `membership_catalog` wholesale
+    /// and runs on every launch (from `createSchema`) and after every scan (from
+    /// `refreshMembershipIndexes`). Both tables are caches with a vendor source of
+    /// truth. Never store Soria-authored data here — collections created by the
+    /// organizer live in `soria_collections` / `soria_collection_tracks`, which
+    /// nothing re-derives, precisely because they would be wiped here.
     private func rebuildNormalizedMembershipTables() throws {
         try withTransaction {
             try exec("DELETE FROM track_memberships;")
