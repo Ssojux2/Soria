@@ -8,11 +8,28 @@ APP_NAME="${APP_NAME:-Soria}"
 CONFIGURATION="${CONFIGURATION:-Release}"
 DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-${ROOT_DIR}/.build/ReleaseDerivedData}"
 DIST_DIR="${DIST_DIR:-${ROOT_DIR}/dist}"
-MACOS_DESTINATION="${SORIA_MACOS_DESTINATION:-platform=macOS,arch=$(uname -m)}"
 VOLUME_NAME="${VOLUME_NAME:-Soria}"
 VERSION="${VERSION:-}"
 CLEAN_FIRST="${CLEAN_FIRST:-0}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
+RELEASE_ARCH="${SORIA_RELEASE_ARCH:-$(uname -m)}"
+
+case "${RELEASE_ARCH}" in
+  arm64|aarch64)
+    RELEASE_ARCH="arm64"
+    ;;
+  x86_64|amd64)
+    RELEASE_ARCH="x86_64"
+    ;;
+  *)
+    printf 'Unsupported release architecture: %s\n' "${RELEASE_ARCH}" >&2
+    exit 64
+    ;;
+esac
+
+MACOS_DESTINATION="${SORIA_MACOS_DESTINATION:-platform=macOS,arch=${RELEASE_ARCH}}"
+WORKER_RUNTIME_DIR="${SORIA_WORKER_RUNTIME_DIR:-${ROOT_DIR}/.build/worker-runtime/${RELEASE_ARCH}/python}"
+RELEASE_ENTITLEMENTS="${RELEASE_ENTITLEMENTS:-${ROOT_DIR}/Soria/SoriaRelease.entitlements}"
 
 usage() {
   cat <<EOF
@@ -26,8 +43,11 @@ Environment overrides:
   CONFIGURATION          Xcode configuration. Defaults to Release.
   DERIVED_DATA_PATH      Build output path. Defaults to .build/ReleaseDerivedData.
   DIST_DIR               Artifact output path. Defaults to dist.
+  SORIA_RELEASE_ARCH     arm64 or x86_64. Defaults to host arch.
+  SORIA_WORKER_RUNTIME_DIR
+                         Prepared worker runtime. Defaults to .build/worker-runtime/<arch>/python.
   SORIA_MACOS_DESTINATION
-                         Xcode destination. Defaults to platform=macOS,arch=<host arch>.
+                         Xcode destination. Defaults to platform=macOS,arch=<release arch>.
 EOF
 }
 
@@ -73,6 +93,7 @@ require_tool codesign
 require_tool ditto
 require_tool shasum
 require_tool xattr
+require_tool file
 
 if [ -z "${VERSION}" ]; then
   VERSION="$(
@@ -94,16 +115,36 @@ SAFE_VERSION="$(printf '%s' "${VERSION}" | tr -c 'A-Za-z0-9._-' '-')"
 APP_PATH="${DERIVED_DATA_PATH}/Build/Products/${CONFIGURATION}/${APP_NAME}.app"
 STAGING_DIR=""
 STAGING_APP=""
-DMG_PATH="${DIST_DIR}/${APP_NAME}-${SAFE_VERSION}-macOS-unnotarized.dmg"
+DMG_PATH="${DIST_DIR}/${APP_NAME}-${SAFE_VERSION}-macOS-${RELEASE_ARCH}-unnotarized.dmg"
 CHECKSUM_PATH="${DMG_PATH}.sha256"
-ZIP_PATH="${DIST_DIR}/${APP_NAME}-${SAFE_VERSION}-macOS-unnotarized.zip"
+ZIP_PATH="${DIST_DIR}/${APP_NAME}-${SAFE_VERSION}-macOS-${RELEASE_ARCH}-unnotarized.zip"
 ZIP_CHECKSUM_PATH="${ZIP_PATH}.sha256"
 MOUNT_DIR=""
 ZIP_VERIFY_DIR=""
 
+detach_mount() {
+  mount_dir="$1"
+  if [ -z "${mount_dir}" ] || [ ! -d "${mount_dir}" ]; then
+    return 0
+  fi
+
+  attempts=0
+  while [ "${attempts}" -lt 5 ]; do
+    if hdiutil detach "${mount_dir}" -quiet >/dev/null 2>&1; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 1
+  done
+
+  if ! hdiutil detach "${mount_dir}" -force -quiet >/dev/null 2>&1; then
+    printf 'Warning: failed to detach mounted DMG at %s after verification.\n' "${mount_dir}" >&2
+  fi
+}
+
 cleanup() {
   if [ -n "${MOUNT_DIR}" ] && [ -d "${MOUNT_DIR}" ]; then
-    hdiutil detach "${MOUNT_DIR}" -quiet >/dev/null 2>&1 || true
+    detach_mount "${MOUNT_DIR}"
     rm -rf "${MOUNT_DIR}"
   fi
   if [ -n "${ZIP_VERIFY_DIR}" ] && [ -d "${ZIP_VERIFY_DIR}" ]; then
@@ -119,6 +160,11 @@ mkdir -p "${DIST_DIR}"
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/soria-dmg-root.XXXXXX")"
 STAGING_APP="${STAGING_DIR}/${APP_NAME}.app"
 
+if [ "${CONFIGURATION}" = "Release" ] && [ "${SKIP_BUILD}" -ne 1 ]; then
+  SORIA_RELEASE_ARCH="${RELEASE_ARCH}" \
+    "${ROOT_DIR}/Scripts/build_worker_runtime.sh"
+fi
+
 if [ "${CLEAN_FIRST}" -eq 1 ]; then
   xcodebuild clean \
     -scheme "${SCHEME}" \
@@ -131,7 +177,9 @@ if [ "${CLEAN_FIRST}" -eq 1 ]; then
 fi
 
 if [ "${SKIP_BUILD}" -ne 1 ]; then
-  xcodebuild build \
+  SORIA_RELEASE_ARCH="${RELEASE_ARCH}" \
+  SORIA_WORKER_RUNTIME_DIR="${WORKER_RUNTIME_DIR}" \
+    xcodebuild build \
     -scheme "${SCHEME}" \
     -project "${PROJECT_PATH}" \
     -configuration "${CONFIGURATION}" \
@@ -162,8 +210,29 @@ or build the app from source with Xcode.
 Soria source code is distributed under the MIT License.
 EOF
 
+sign_mach_o_files() {
+  root="$1"
+  if [ ! -d "${root}" ]; then
+    return
+  fi
+
+  find "${root}" -type f -print | while IFS= read -r item; do
+    if file "${item}" | grep -q 'Mach-O'; then
+      chmod u+w "${item}" 2>/dev/null || true
+      codesign --force --sign - --timestamp=none "${item}"
+    fi
+  done
+}
+
+if [ ! -x "${STAGING_APP}/Contents/Resources/analysis-worker/python/bin/python3" ]; then
+  printf 'Bundled worker Python was not found in release app: %s\n' \
+    "${STAGING_APP}/Contents/Resources/analysis-worker/python/bin/python3" >&2
+  exit 1
+fi
+
 xattr -cr "${STAGING_APP}"
-codesign --force --deep --sign - "${STAGING_APP}"
+sign_mach_o_files "${STAGING_APP}/Contents/Resources/analysis-worker/python"
+codesign --force --sign - --timestamp=none --entitlements "${RELEASE_ENTITLEMENTS}" "${STAGING_APP}"
 codesign --verify --deep --strict --verbose=2 "${STAGING_APP}"
 
 rm -f "${DMG_PATH}" "${CHECKSUM_PATH}" "${ZIP_PATH}" "${ZIP_CHECKSUM_PATH}"
@@ -197,7 +266,7 @@ if [ ! -d "${MOUNT_DIR}/${APP_NAME}.app" ]; then
   printf 'DMG verification failed: app bundle not found in mounted image.\n' >&2
   exit 1
 fi
-hdiutil detach "${MOUNT_DIR}" -quiet
+detach_mount "${MOUNT_DIR}"
 rm -rf "${MOUNT_DIR}"
 MOUNT_DIR=""
 rm -rf "${STAGING_DIR}"

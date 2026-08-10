@@ -20,6 +20,10 @@ enum AppSettingsStore {
     private static let mixsetVectorWeightsKey = "settings.mixsetVectorWeights"
     private static let recommendationConstraintsKey = "settings.recommendationConstraints"
     private static let analysisWorkerBundleMarker = "/Contents/Resources/analysis-worker/"
+    private static let bundledPythonRelativePath = "analysis-worker/python/bin/python3"
+    private static let legacyBundledPythonRelativePath = "analysis-worker/.venv/bin/python"
+    private static let projectPythonRelativePath = "analysis-worker/.venv/bin/python"
+    private static let workerScriptRelativePath = "analysis-worker/main.py"
 
     private struct WorkerRuntimeResolution {
         let path: String
@@ -33,7 +37,7 @@ enum AppSettingsStore {
         let bundledPath = bundledPythonExecutablePath()
         let detectedProjectPath = projectPythonExecutableCandidatePath()
         if let storedValue = UserDefaults.standard.string(forKey: pythonExecutableKey), !storedValue.isEmpty {
-            let resolution = resolvedWorkerRuntimeSelection(
+            let resolution = resolvedPythonRuntimeSelection(
                 storedValue: storedValue,
                 bundledPath: bundledPath,
                 detectedProjectPath: detectedProjectPath
@@ -50,7 +54,7 @@ enum AppSettingsStore {
             }
             return resolved
         }
-        if let detected = detectedProjectPath ?? bundledPath {
+        if let detected = bundledPath ?? detectedProjectPath {
             return detected
         }
         return "/usr/bin/python3"
@@ -58,7 +62,7 @@ enum AppSettingsStore {
 
     @discardableResult
     static func savePythonExecutablePath(_ path: String) -> String {
-        let resolved = resolvedWorkerRuntimePath(
+        let resolved = resolvedPythonExecutablePath(
             storedValue: path,
             bundledPath: bundledPythonExecutablePath(),
             detectedProjectPath: projectPythonExecutableCandidatePath()
@@ -93,8 +97,8 @@ enum AppSettingsStore {
             }
             return resolved
         }
-        return detectedProjectPath
-            ?? bundledPath
+        return bundledPath
+            ?? detectedProjectPath
             ?? "\(FileManager.default.currentDirectoryPath)/analysis-worker/main.py"
     }
 
@@ -165,8 +169,7 @@ enum AppSettingsStore {
 
     static func loadEmbeddingProfile() -> EmbeddingProfile {
         let storedID = UserDefaults.standard.string(forKey: embeddingProfileIDKey)
-        if storedID == EmbeddingProfile.legacyGoogleTextEmbedding004ID ||
-            storedID == EmbeddingProfile.legacyGeminiEmbedding001ID ||
+        if storedID == EmbeddingProfile.legacyGeminiEmbedding001ID ||
             storedID == EmbeddingProfile.retiredCLAPHTSATUnfusedID
         {
             UserDefaults.standard.set(EmbeddingProfile.googleGeminiEmbedding2Preview.id, forKey: embeddingProfileIDKey)
@@ -295,11 +298,11 @@ enum AppSettingsStore {
     }
 
     static func detectedPythonExecutablePath() -> String? {
-        detectedProjectPythonExecutablePath() ?? bundledPythonExecutablePath()
+        bundledPythonExecutablePath() ?? detectedProjectPythonExecutablePath()
     }
 
     static func detectedWorkerScriptPath() -> String? {
-        detectedProjectWorkerScriptPath() ?? bundledWorkerScriptPath()
+        bundledWorkerScriptPath() ?? detectedProjectWorkerScriptPath()
     }
 
     private static func googleAIAPIKeyOverride(in environment: [String: String]) -> String? {
@@ -316,13 +319,18 @@ enum AppSettingsStore {
 
     static func bundledPythonExecutablePath(bundle: Bundle = .main) -> String? {
         guard let resourcesURL = bundle.resourceURL else { return nil }
-        let candidate = resourcesURL.appendingPathComponent("analysis-worker/.venv/bin/python").path
-        return FileManager.default.isExecutableFile(atPath: candidate) ? candidate : nil
+        for relativePath in [bundledPythonRelativePath, legacyBundledPythonRelativePath] {
+            let candidate = resourcesURL.appendingPathComponent(relativePath).path
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        return nil
     }
 
     static func bundledWorkerScriptPath(bundle: Bundle = .main) -> String? {
         guard let resourcesURL = bundle.resourceURL else { return nil }
-        let candidate = resourcesURL.appendingPathComponent("analysis-worker/main.py").path
+        let candidate = resourcesURL.appendingPathComponent(workerScriptRelativePath).path
         return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
     }
 
@@ -348,17 +356,32 @@ enum AppSettingsStore {
         ).path
     }
 
+    static func resolvedPythonExecutablePath(
+        storedValue: String,
+        bundledPath: String?,
+        detectedProjectPath: String?
+    ) -> String {
+        resolvedPythonRuntimeSelection(
+            storedValue: storedValue,
+            bundledPath: bundledPath,
+            detectedProjectPath: detectedProjectPath
+        ).path
+    }
+
     nonisolated static var projectRoot: URL? {
         let fileManager = FileManager.default
-        let startingPoints = [
+        var startingPoints = [
             URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true),
             URL(fileURLWithPath: Bundle.main.bundleURL.deletingLastPathComponent().path, isDirectory: true)
         ]
+        if let bundledProjectRootPath = bundledDebugProjectRootPath() {
+            startingPoints.insert(URL(fileURLWithPath: bundledProjectRootPath, isDirectory: true), at: 0)
+        }
 
         for start in startingPoints {
             var current = start
             for _ in 0..<8 {
-                let workerPath = current.appendingPathComponent("analysis-worker/main.py").path
+                let workerPath = current.appendingPathComponent(workerScriptRelativePath).path
                 if fileManager.fileExists(atPath: workerPath) {
                     return current
                 }
@@ -366,6 +389,27 @@ enum AppSettingsStore {
             }
         }
         return nil
+    }
+
+    private static func bundledDebugProjectRootPath(bundle: Bundle = .main) -> String? {
+        guard let resourcesURL = bundle.resourceURL else { return nil }
+        let markerURL = resourcesURL.appendingPathComponent("analysis-worker/project-root.txt")
+        guard
+            let rawValue = try? String(contentsOf: markerURL, encoding: .utf8)
+        else {
+            return nil
+        }
+        let projectRootPath = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !projectRootPath.isEmpty else { return nil }
+        let workerPath = URL(fileURLWithPath: projectRootPath, isDirectory: true)
+            .appendingPathComponent(workerScriptRelativePath)
+            .path
+        return FileManager.default.fileExists(atPath: workerPath) ? projectRootPath : nil
+    }
+
+    static func isUnsupportedAppleSystemPythonExecutable(_ path: String) -> Bool {
+        let standardizedPath = standardizedWorkerRuntimePath(path)
+        return standardizedPath == "/usr/bin/python3" || standardizedPath == "/usr/bin/python"
     }
 
     private static func lastValidatedAt() -> Date? {
@@ -382,11 +426,11 @@ enum AppSettingsStore {
     }
 
     nonisolated static func projectPythonExecutableCandidatePath() -> String? {
-        projectRoot?.appendingPathComponent("analysis-worker/.venv/bin/python").path
+        projectRoot?.appendingPathComponent(projectPythonRelativePath).path
     }
 
     nonisolated static func projectWorkerScriptCandidatePath() -> String? {
-        projectRoot?.appendingPathComponent("analysis-worker/main.py").path
+        projectRoot?.appendingPathComponent(workerScriptRelativePath).path
     }
 
     private static func resolvedWorkerRuntimeSelection(
@@ -435,6 +479,48 @@ enum AppSettingsStore {
         }
 
         return WorkerRuntimeResolution(path: standardizedBundled ?? "", reason: "discard_missing_runtime")
+    }
+
+    private static func resolvedPythonRuntimeSelection(
+        storedValue: String,
+        bundledPath: String?,
+        detectedProjectPath: String?
+    ) -> WorkerRuntimeResolution {
+        let trimmed = storedValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let standardizedStored = standardizedWorkerRuntimePath(trimmed)
+        let standardizedBundled = bundledPath.map(standardizedWorkerRuntimePath)
+        let standardizedProject = detectedProjectPath.map(standardizedWorkerRuntimePath)
+
+        if let standardizedBundled {
+            if standardizedStored.isEmpty {
+                return WorkerRuntimeResolution(path: standardizedBundled, reason: "prefer_bundled_python_runtime")
+            }
+            return WorkerRuntimeResolution(
+                path: standardizedBundled,
+                reason: standardizedStored == standardizedBundled
+                    ? "keep_bundled_python_runtime"
+                    : "prefer_bundled_python_runtime"
+            )
+        }
+
+        if isUnsupportedAppleSystemPythonExecutable(standardizedStored) {
+            if let standardizedProject {
+                return WorkerRuntimeResolution(
+                    path: standardizedProject,
+                    reason: "replace_apple_system_python_with_detected_project"
+                )
+            }
+            return WorkerRuntimeResolution(
+                path: standardizedStored,
+                reason: "keep_apple_system_python_until_runtime_validation"
+            )
+        }
+
+        return resolvedWorkerRuntimeSelection(
+            storedValue: storedValue,
+            bundledPath: bundledPath,
+            detectedProjectPath: detectedProjectPath
+        )
     }
 
     nonisolated private static func standardizedWorkerRuntimePath(_ path: String) -> String {

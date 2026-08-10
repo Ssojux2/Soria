@@ -178,6 +178,7 @@ final class LibraryDatabase {
     ) throws -> Track {
         let normalizedURL = fileURL.standardizedFileURL
         let normalizedPath = TrackPathNormalizer.normalizedAbsolutePath(normalizedURL)
+        let previousPath = try fetchTrack(id: trackID)?.filePath
         let sql = """
         UPDATE tracks
         SET file_path = ?,
@@ -187,15 +188,34 @@ final class LibraryDatabase {
             last_seen_in_local_scan_at = ?
         WHERE id = ?;
         """
-        try withStatement(sql) { statement in
-            bind(statement, index: 1, text: normalizedPath)
-            bind(statement, index: 2, text: normalizedURL.lastPathComponent)
-            bind(statement, index: 3, text: Self.iso8601.string(from: modifiedTime))
-            bind(statement, index: 4, text: contentHash)
-            bind(statement, index: 5, text: lastSeenInLocalScanAt.map { Self.iso8601.string(from: $0) })
-            bind(statement, index: 6, text: trackID.uuidString)
-            guard sqlite3_step(statement) == SQLITE_DONE, sqlite3_changes(db) == 1 else {
-                throw DatabaseError.writeFailed
+        try withTransaction {
+            if let previousPath, previousPath != normalizedPath {
+                try deleteTrackPathAlias(path: normalizedPath)
+                try upsertTrackPathAlias(
+                    trackID: trackID,
+                    path: previousPath,
+                    source: "folder_organization_move"
+                )
+            }
+
+            try withStatement(sql) { statement in
+                bind(statement, index: 1, text: normalizedPath)
+                bind(statement, index: 2, text: normalizedURL.lastPathComponent)
+                bind(statement, index: 3, text: Self.iso8601.string(from: modifiedTime))
+                bind(statement, index: 4, text: contentHash)
+                bind(statement, index: 5, text: lastSeenInLocalScanAt.map { Self.iso8601.string(from: $0) })
+                bind(statement, index: 6, text: trackID.uuidString)
+                guard sqlite3_step(statement) == SQLITE_DONE, sqlite3_changes(db) == 1 else {
+                    throw DatabaseError.writeFailed
+                }
+            }
+
+            if let previousPath, previousPath != normalizedPath {
+                try updateExternalMetadataTrackPath(
+                    trackID: trackID,
+                    oldPath: previousPath,
+                    newPath: normalizedPath
+                )
             }
         }
 
@@ -203,6 +223,49 @@ final class LibraryDatabase {
             throw DatabaseError.writeFailed
         }
         return updatedTrack
+    }
+
+    func fetchTrackPathAliases(requireLocalScan: Bool = false) throws -> [String: UUID] {
+        let localPredicate = requireLocalScan ? "WHERE tracks.last_seen_in_local_scan_at IS NOT NULL" : ""
+        let sql = """
+        SELECT track_path_aliases.path, track_path_aliases.track_id
+        FROM track_path_aliases
+        INNER JOIN tracks ON tracks.id = track_path_aliases.track_id
+        \(localPredicate)
+        ORDER BY track_path_aliases.created_at DESC;
+        """
+        return try withStatement(sql) { statement in
+            var aliases: [String: UUID] = [:]
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard
+                    let path = sqliteString(statement, index: 0),
+                    let trackIDText = sqliteString(statement, index: 1),
+                    let trackID = UUID(uuidString: trackIDText)
+                else {
+                    continue
+                }
+                aliases[path] = trackID
+            }
+            return aliases
+        }
+    }
+
+    func fetchTrackPathAliases(trackID: UUID) throws -> [String] {
+        let sql = """
+        SELECT path
+        FROM track_path_aliases
+        WHERE track_id = ?
+        ORDER BY created_at DESC;
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, index: 1, text: trackID.uuidString)
+            var aliases: [String] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let path = sqliteString(statement, index: 0) else { continue }
+                aliases.append(path)
+            }
+            return aliases
+        }
     }
 
     func lookupTrack(path: String) throws -> Track? {
@@ -1188,6 +1251,15 @@ final class LibraryDatabase {
         );
         """)
         try exec("""
+        CREATE TABLE IF NOT EXISTS track_path_aliases (
+            path TEXT PRIMARY KEY,
+            track_id TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'folder_organization_move',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(track_id) REFERENCES tracks(id)
+        );
+        """)
+        try exec("""
         CREATE TABLE IF NOT EXISTS score_sessions (
             id TEXT PRIMARY KEY,
             kind TEXT NOT NULL,
@@ -1289,6 +1361,7 @@ final class LibraryDatabase {
         try exec("CREATE INDEX IF NOT EXISTS idx_library_sources_kind ON library_sources(kind);")
         try exec("CREATE INDEX IF NOT EXISTS idx_track_memberships_source_path ON track_memberships(source, membership_path);")
         try exec("CREATE INDEX IF NOT EXISTS idx_track_memberships_track ON track_memberships(track_id);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_track_path_aliases_track ON track_path_aliases(track_id);")
         try exec("CREATE INDEX IF NOT EXISTS idx_score_sessions_kind_profile_created ON score_sessions(kind, embedding_profile_id, created_at DESC);")
         try exec("CREATE INDEX IF NOT EXISTS idx_score_session_candidates_session ON score_session_candidates(session_id);")
         try migrateLegacyEmbeddingProfileState()
@@ -1480,7 +1553,6 @@ final class LibraryDatabase {
                 SELECT id
                 FROM tracks
                 WHERE embedding_profile_id IN (
-                    '\(EmbeddingProfile.legacyGoogleTextEmbedding004ID)',
                     '\(EmbeddingProfile.legacyGeminiEmbedding001ID)'
                 )
             );
@@ -1492,7 +1564,6 @@ final class LibraryDatabase {
                 embedding_pipeline_id = NULL,
                 embedding_updated_at = NULL
             WHERE embedding_profile_id IN (
-                '\(EmbeddingProfile.legacyGoogleTextEmbedding004ID)',
                 '\(EmbeddingProfile.legacyGeminiEmbedding001ID)'
             );
             """)
@@ -1568,6 +1639,66 @@ final class LibraryDatabase {
         return try withStatement(sql) { statement in
             bind(statement, index: 1, text: trackID.uuidString)
             return sqlite3_step(statement) == SQLITE_ROW
+        }
+    }
+
+    private func upsertTrackPathAlias(trackID: UUID, path: String, source: String) throws {
+        let normalizedPath = TrackPathNormalizer.normalizedAbsolutePath(path)
+        guard !normalizedPath.isEmpty else { return }
+
+        let sql = """
+        INSERT INTO track_path_aliases (path, track_id, source, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(path) DO UPDATE SET
+            track_id = excluded.track_id,
+            source = excluded.source,
+            created_at = excluded.created_at;
+        """
+        try withStatement(sql) { statement in
+            bind(statement, index: 1, text: normalizedPath)
+            bind(statement, index: 2, text: trackID.uuidString)
+            bind(statement, index: 3, text: source)
+            bind(statement, index: 4, text: Self.iso8601.string(from: Date()))
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
+        }
+    }
+
+    private func deleteTrackPathAlias(path: String) throws {
+        let normalizedPath = TrackPathNormalizer.normalizedAbsolutePath(path)
+        guard !normalizedPath.isEmpty else { return }
+
+        try withStatement("DELETE FROM track_path_aliases WHERE path = ?;") { statement in
+            bind(statement, index: 1, text: normalizedPath)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
+        }
+    }
+
+    private func updateExternalMetadataTrackPath(
+        trackID: UUID,
+        oldPath: String,
+        newPath: String
+    ) throws {
+        let normalizedOldPath = TrackPathNormalizer.normalizedAbsolutePath(oldPath)
+        let normalizedNewPath = TrackPathNormalizer.normalizedAbsolutePath(newPath)
+        guard !normalizedOldPath.isEmpty, !normalizedNewPath.isEmpty else { return }
+
+        let sql = """
+        UPDATE external_metadata
+        SET track_path = ?
+        WHERE track_id = ?
+          AND track_path = ?;
+        """
+        try withStatement(sql) { statement in
+            bind(statement, index: 1, text: normalizedNewPath)
+            bind(statement, index: 2, text: trackID.uuidString)
+            bind(statement, index: 3, text: normalizedOldPath)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.writeFailed
+            }
         }
     }
 

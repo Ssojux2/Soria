@@ -946,7 +946,6 @@ struct EmbeddingPipeline: Codable, Hashable, Identifiable {
 }
 
 struct EmbeddingProfile: Codable, Hashable, Identifiable {
-    static let legacyGoogleTextEmbedding004ID = "google/text-embedding-004"
     static let legacyGeminiEmbedding001ID = "google/gemini-embedding-001"
     static let retiredCLAPHTSATUnfusedID = "local/clap-htsat-unfused"
     static let googleGeminiEmbedding2PreviewID = "google/gemini-embedding-2-preview"
@@ -975,8 +974,7 @@ struct EmbeddingProfile: Codable, Hashable, Identifiable {
 
     static func resolve(id: String?) -> EmbeddingProfile {
         guard let id else { return .googleGeminiEmbedding2Preview }
-        if id == legacyGoogleTextEmbedding004ID ||
-            id == legacyGeminiEmbedding001ID ||
+        if id == legacyGeminiEmbedding001ID ||
             id == retiredCLAPHTSATUnfusedID
         {
             return .googleGeminiEmbedding2Preview

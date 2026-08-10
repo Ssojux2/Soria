@@ -20,6 +20,8 @@ struct SoriaApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var fallbackMainWindow: NSWindow?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         scheduleMainWindowRecovery()
     }
@@ -53,6 +55,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return true
         }
 
-        return false
+        if NSApp.sendAction(#selector(NSResponder.newWindowForTab(_:)), to: nil, from: nil) ||
+            NSApp.sendAction(Selector(("newWindow:")), to: nil, from: nil) {
+            return true
+        }
+
+        createFallbackMainWindow()
+        return true
+    }
+
+    private func createFallbackMainWindow() {
+        if let fallbackMainWindow {
+            fallbackMainWindow.makeKeyAndOrderFront(nil)
+            fallbackMainWindow.orderFrontRegardless()
+            return
+        }
+
+        let visibleFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 80, y: 80, width: 1440, height: 900)
+        let width = min(max(1280, visibleFrame.width * 0.82), visibleFrame.width)
+        let height = min(max(800, visibleFrame.height * 0.82), visibleFrame.height)
+        let frame = NSRect(
+            x: visibleFrame.midX - width / 2,
+            y: visibleFrame.midY - height / 2,
+            width: width,
+            height: height
+        ).integral
+
+        let window = NSWindow(
+            contentRect: frame,
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Soria"
+        window.minSize = NSSize(width: 1280, height: 800)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = NSHostingController(rootView: ContentView())
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        fallbackMainWindow = window
     }
 }

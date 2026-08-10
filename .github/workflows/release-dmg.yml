@@ -16,8 +16,16 @@ permissions:
 
 jobs:
   build-release-assets:
-    name: Build ad-hoc signed macOS assets
-    runs-on: macos-latest
+    name: Build ad-hoc signed macOS assets (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-26
+          - arch: x86_64
+            runner: macos-26-intel
 
     steps:
       - name: Check out repository
@@ -29,6 +37,7 @@ jobs:
       - name: Build DMG and ZIP
         env:
           TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          SORIA_RELEASE_ARCH: ${{ matrix.arch }}
         run: |
           VERSION="${TAG_NAME#v}" make release-dmg
 
@@ -42,6 +51,8 @@ jobs:
 
           The app is ad-hoc signed, but it is not Developer ID signed or notarized by Apple. macOS will show a security warning. If you trust this source, open System Settings > Privacy & Security and choose Open Anyway, or build the app from source with Xcode.
 
+          DMG/ZIP app assets include an arch-specific bundled Python worker runtime for analysis.
+
           Soria source code is distributed under the MIT License.
           EOF
 
@@ -53,7 +64,8 @@ jobs:
               --target "${GITHUB_SHA}" \
               --latest=false \
               --title "Soria ${TAG_NAME}" \
-              --notes-file dist/release-notes.md
+              --notes-file dist/release-notes.md \
+            || gh release edit "${TAG_NAME}" --draft --latest=false --notes-file dist/release-notes.md
           fi
 
       - name: Upload macOS artifacts

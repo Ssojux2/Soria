@@ -547,6 +547,7 @@ final class SoriaUITests: XCTestCase {
             forceInitialSetup: forceInitialSetup
         )
         app.launch()
+        app.activate()
         return app
     }
 

@@ -39,18 +39,14 @@ if [ "${CLEAN_FIRST}" -eq 1 ]; then
     -scheme Soria \
     -project "${ROOT_DIR}/Soria.xcodeproj" \
     -derivedDataPath "${DERIVED_DATA_PATH}" \
-    -destination "${MACOS_DESTINATION}" \
-    CODE_SIGNING_ALLOWED=NO \
-    CODE_SIGNING_REQUIRED=NO
+    -destination "${MACOS_DESTINATION}"
 fi
 
 xcodebuild build \
   -scheme Soria \
   -project "${ROOT_DIR}/Soria.xcodeproj" \
   -derivedDataPath "${DERIVED_DATA_PATH}" \
-  -destination "${MACOS_DESTINATION}" \
-  CODE_SIGNING_ALLOWED=NO \
-  CODE_SIGNING_REQUIRED=NO
+  -destination "${MACOS_DESTINATION}"
 
 if [ ! -d "${APP_PATH}" ]; then
   printf 'Expected app bundle was not produced: %s\n' "${APP_PATH}" >&2

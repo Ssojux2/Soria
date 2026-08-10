@@ -734,6 +734,7 @@ final class DJLibrarySyncService: @unchecked Sendable {
         let localTracks = try database.fetchScannedTracks()
         let localTracksByPath = Dictionary(uniqueKeysWithValues: localTracks.map { ($0.filePath, $0) })
         var localTracksByID = Dictionary(uniqueKeysWithValues: localTracks.map { ($0.id, $0) })
+        let localTrackAliasesByPath = try database.fetchTrackPathAliases(requireLocalScan: true)
         let localTracksByHash = Dictionary(
             grouping: localTracks,
             by: \.contentHash
@@ -764,11 +765,15 @@ final class DJLibrarySyncService: @unchecked Sendable {
             if let target = resolveEnrichmentTarget(
                 for: importedTrack,
                 localTracksByPath: localTracksByPath,
+                localTracksByID: localTracksByID,
+                localTrackAliasesByPath: localTrackAliasesByPath,
                 localTracksByHash: localTracksByHash,
                 importedHashCache: &importedHashCache
             ) {
                 groupedRecordsByTrackID[target.trackID, default: []].append(importedTrack)
-                groupedMetadataByTarget[target, default: []].append(importedTrack.metadata)
+                groupedMetadataByTarget[target, default: []].append(
+                    metadata(importedTrack.metadata, resolvingTrackPath: target.localTrackPath)
+                )
                 matchedTrackIDs.insert(target.trackID)
                 matchedEntryCount += 1
                 referenceAttachmentCount += importedTrack.metadata.playlistMemberships.count
@@ -789,7 +794,11 @@ final class DJLibrarySyncService: @unchecked Sendable {
             localTracksByID[trackID] = updatedTrack
 
             for source in ExternalDJMetadata.Source.allCases {
-                let target = VendorEnrichmentTarget(trackID: trackID, source: source)
+                let target = VendorEnrichmentTarget(
+                    trackID: trackID,
+                    source: source,
+                    localTrackPath: updatedTrack.filePath
+                )
                 guard let incomingMetadata = groupedMetadataByTarget[target], !incomingMetadata.isEmpty else {
                     continue
                 }
@@ -819,11 +828,26 @@ final class DJLibrarySyncService: @unchecked Sendable {
     private func resolveEnrichmentTarget(
         for importedTrack: VendorLibraryTrackRecord,
         localTracksByPath: [String: Track],
+        localTracksByID: [UUID: Track],
+        localTrackAliasesByPath: [String: UUID],
         localTracksByHash: [String: Track],
         importedHashCache: inout [String: String?]
     ) -> VendorEnrichmentTarget? {
         if let exactTrack = localTracksByPath[importedTrack.normalizedPath] {
-            return VendorEnrichmentTarget(trackID: exactTrack.id, source: importedTrack.source)
+            return VendorEnrichmentTarget(
+                trackID: exactTrack.id,
+                source: importedTrack.source,
+                localTrackPath: exactTrack.filePath
+            )
+        }
+
+        if let aliasTrackID = localTrackAliasesByPath[importedTrack.normalizedPath],
+           let aliasTrack = localTracksByID[aliasTrackID] {
+            return VendorEnrichmentTarget(
+                trackID: aliasTrackID,
+                source: importedTrack.source,
+                localTrackPath: aliasTrack.filePath
+            )
         }
 
         let hash = importedHashCache[importedTrack.normalizedPath] ?? {
@@ -841,7 +865,11 @@ final class DJLibrarySyncService: @unchecked Sendable {
         guard let hash, let hashedTrack = localTracksByHash[hash] else {
             return nil
         }
-        return VendorEnrichmentTarget(trackID: hashedTrack.id, source: importedTrack.source)
+        return VendorEnrichmentTarget(
+            trackID: hashedTrack.id,
+            source: importedTrack.source,
+            localTrackPath: hashedTrack.filePath
+        )
     }
 
     private func enrich(
@@ -1004,6 +1032,32 @@ final class DJLibrarySyncService: @unchecked Sendable {
         )
     }
 
+    private func metadata(
+        _ metadata: ExternalDJMetadata,
+        resolvingTrackPath trackPath: String
+    ) -> ExternalDJMetadata {
+        ExternalDJMetadata(
+            id: metadata.id,
+            trackPath: trackPath,
+            source: metadata.source,
+            bpm: metadata.bpm,
+            musicalKey: metadata.musicalKey,
+            rating: metadata.rating,
+            color: metadata.color,
+            tags: metadata.tags,
+            playCount: metadata.playCount,
+            lastPlayed: metadata.lastPlayed,
+            playlistMemberships: metadata.playlistMemberships,
+            cueCount: metadata.cueCount,
+            cuePoints: metadata.cuePoints,
+            comment: metadata.comment,
+            vendorTrackID: metadata.vendorTrackID,
+            analysisState: metadata.analysisState,
+            analysisCachePath: metadata.analysisCachePath,
+            syncVersion: metadata.syncVersion
+        )
+    }
+
     private func fillIfBlank(_ currentValue: String, candidates: [String?]) -> String {
         normalizedText(currentValue) ?? firstNonEmpty(candidates)
     }
@@ -1129,6 +1183,7 @@ struct VendorEnrichmentSyncSummary {
 private struct VendorEnrichmentTarget: Hashable {
     let trackID: UUID
     let source: ExternalDJMetadata.Source
+    let localTrackPath: String
 }
 
 private struct SQLiteCuePointTableSpec {

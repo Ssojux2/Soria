@@ -48,14 +48,13 @@ inside DMG and ZIP assets. The release workflow is in:
 - `.github/workflows/release-dmg.yml`
 - `docs/RELEASING.md`
 
-The app bundle includes the `analysis-worker` source scripts, but
-`Scripts/copy_analysis_worker.sh` intentionally excludes `.venv`. That means
-the current zero-cost package is not a fully self-contained Python runtime. The
-app can launch without `SORIA_PYTHON` or `SORIA_WORKER_SCRIPT`, but analysis
-features still need a compatible Python environment with the worker
-dependencies installed.
+The app bundle includes the `analysis-worker` source scripts and an
+arch-specific bundled Python worker runtime under
+`Contents/Resources/analysis-worker/python`. Release installs do not require
+`SORIA_PYTHON` or `SORIA_WORKER_SCRIPT`; those variables remain developer
+overrides.
 
-When validation fails, use Settings to select or detect:
+When source-build validation fails, use Settings to select or detect:
 
 - Python executable path
 - `analysis-worker/main.py`
@@ -375,7 +374,8 @@ Relevant coverage found in the repo:
 ## Current Gaps and Guardrails
 
 - Early release artifacts are not notarized.
-- The DMG/ZIP path does not yet ship a portable Python runtime.
+- The DMG/ZIP path ships arch-specific Python worker runtimes, not a universal
+  merged Python runtime.
 - Recommendation quality depends on scanned metadata, analysis quality, and
   valid embeddings.
 - Rekordbox and Serato formats can vary by version; the code targets common

@@ -35,6 +35,43 @@ struct SoriaTests {
         #expect(resolved == detectedProjectPath)
     }
 
+    @Test func appSettingsReplaceAppleSystemPythonWithBundledRuntime() {
+        let bundledPath = "/tmp/Soria.app/Contents/Resources/analysis-worker/python/bin/python3"
+        let detectedProjectPath = "\(NSHomeDirectory())/Documents/BluePenguin/Soriga/Soria/analysis-worker/.venv/bin/python"
+
+        let resolved = AppSettingsStore.resolvedPythonExecutablePath(
+            storedValue: "/usr/bin/python3",
+            bundledPath: bundledPath,
+            detectedProjectPath: detectedProjectPath
+        )
+
+        #expect(resolved == bundledPath)
+    }
+
+    @Test func appSettingsPreferBundledPythonOverStoredProjectRuntime() {
+        let bundledPath = "/tmp/Soria.app/Contents/Resources/analysis-worker/python/bin/python3"
+        let detectedProjectPath = "\(NSHomeDirectory())/Documents/BluePenguin/Soriga/Soria/analysis-worker/.venv/bin/python"
+
+        let resolved = AppSettingsStore.resolvedPythonExecutablePath(
+            storedValue: detectedProjectPath,
+            bundledPath: bundledPath,
+            detectedProjectPath: detectedProjectPath
+        )
+
+        #expect(resolved == bundledPath)
+    }
+
+    @Test func workerFailureSummaryExplainsSandboxedXcrunPythonShim() {
+        let summary = PythonWorkerClient.failureSummary(
+            for: "validate_embedding_profile",
+            error: WorkerError.executionFailed("xcrun: error: cannot be used within an App Sandbox.")
+        )
+
+        #expect(summary.contains("App Sandbox"))
+        #expect(summary.contains("/usr/bin/python3"))
+        #expect(summary.contains("analysis-worker/.venv/bin/python"))
+    }
+
     @Test func appSettingsKeepCustomWorkerRuntimeOutsideProtectedFolders() throws {
         let bundledPath = "/tmp/Soria.app/Contents/Resources/analysis-worker/main.py"
         let customDirectory = FileManager.default.temporaryDirectory
@@ -1329,6 +1366,86 @@ struct SoriaTests {
         #expect(Set(metadata.map(\.source)) == Set([.serato, .rekordbox]))
         #expect(metadata.first(where: { $0.source == .serato })?.comment == "serato")
         #expect(metadata.first(where: { $0.source == .rekordbox })?.analysisCachePath == "/Users/test/ANLZ0000.DAT")
+    }
+
+    @Test func syncMatchesMovedTrackByPathAliasAndPreservesEmbeddingState() async throws {
+        let directory = try makeTemporaryDirectory()
+        let databaseURL = directory.appendingPathComponent("library.sqlite")
+        let database = try LibraryDatabase(databaseURL: databaseURL)
+        let syncService = DJLibrarySyncService(database: database)
+
+        let oldPath = directory.appendingPathComponent("Old/Club Tool.mp3").path
+        let newURL = directory.appendingPathComponent("New/Club Tool.mp3")
+        let readyTrack = try makeReadyTrack(
+            in: database,
+            path: oldPath,
+            title: "Club Tool",
+            profileID: "profile"
+        )
+        _ = try database.updateTrackFileLocation(
+            trackID: readyTrack.id,
+            fileURL: newURL,
+            modifiedTime: Date(),
+            contentHash: readyTrack.contentHash,
+            lastSeenInLocalScanAt: Date()
+        )
+
+        let movedTrack = try #require(try database.fetchTrack(id: readyTrack.id))
+        let aliasMap = try database.fetchTrackPathAliases(requireLocalScan: true)
+        let seratoRecord = VendorLibraryTrackRecord(
+            source: .serato,
+            normalizedPath: oldPath,
+            fileName: "Club Tool.mp3",
+            title: "Serato Club Tool",
+            artist: "DJ Alias",
+            album: "Moved",
+            genre: "House",
+            duration: 300,
+            bpm: 124,
+            musicalKey: "8A",
+            metadata: ExternalDJMetadata(
+                id: UUID(),
+                trackPath: oldPath,
+                source: .serato,
+                bpm: 124,
+                musicalKey: "8A",
+                rating: nil,
+                color: nil,
+                tags: ["House"],
+                playCount: nil,
+                lastPlayed: nil,
+                playlistMemberships: ["Moved Playlist"],
+                cueCount: nil,
+                comment: "alias matched",
+                vendorTrackID: "serato-alias",
+                analysisState: nil,
+                analysisCachePath: nil,
+                syncVersion: "master.sqlite"
+            )
+        )
+
+        let summary = try await syncService.syncImportedTracks([seratoRecord])
+        let updatedTrack = try #require(try database.fetchTrack(id: readyTrack.id))
+        let metadata = try database.fetchExternalMetadata(trackID: readyTrack.id)
+        let embeddingState = try database.verifyPersistedEmbeddingState(
+            trackID: readyTrack.id,
+            expectedEmbeddingProfileID: "profile",
+            expectedEmbeddingPipelineID: EmbeddingPipeline.audioSegmentsV1.id,
+            context: "syncMatchesMovedTrackByPathAliasAndPreservesEmbeddingState"
+        )
+
+        #expect(aliasMap[oldPath] == readyTrack.id)
+        #expect(movedTrack.filePath == newURL.standardizedFileURL.path)
+        #expect(summary.matchedTrackCount == 1)
+        #expect(summary.matchedEntryCount == 1)
+        #expect(summary.unmatchedEntryCount == 0)
+        #expect(updatedTrack.id == readyTrack.id)
+        #expect(updatedTrack.filePath == movedTrack.filePath)
+        #expect(updatedTrack.hasSeratoMetadata)
+        #expect(updatedTrack.hasCurrentEmbedding(profileID: "profile", pipelineID: EmbeddingPipeline.audioSegmentsV1.id))
+        #expect(embeddingState.embeddedSegmentCount > 0)
+        #expect(metadata.first?.trackPath == movedTrack.filePath)
+        #expect(metadata.first?.comment == "alias matched")
     }
 
     @Test func vendorMergeOrderIsDeterministicForGenreAndComment() async throws {

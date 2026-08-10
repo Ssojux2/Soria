@@ -49,10 +49,6 @@ extension SoriaTests {
     @Test
     func legacyProfileIDsResolveToGeminiPreview() {
         #expect(
-            EmbeddingProfile.resolve(id: EmbeddingProfile.legacyGoogleTextEmbedding004ID)
-                == .googleGeminiEmbedding2Preview
-        )
-        #expect(
             EmbeddingProfile.resolve(id: EmbeddingProfile.legacyGeminiEmbedding001ID)
                 == .googleGeminiEmbedding2Preview
         )

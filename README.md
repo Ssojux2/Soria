@@ -70,16 +70,16 @@ under the same license unless a contributor explicitly states otherwise.
 
 1. Open the [Releases](https://github.com/Ssojux2/Soria/releases) page.
 2. Download one of the release assets:
-   - `Soria-<version>-macOS-unnotarized.dmg` for the drag-and-drop installer.
-   - `Soria-<version>-macOS-unnotarized.zip` for a direct app archive.
+   - `Soria-<version>-macOS-<arch>-unnotarized.dmg` for the drag-and-drop installer.
+   - `Soria-<version>-macOS-<arch>-unnotarized.zip` for a direct app archive.
 3. Optionally verify the downloaded file with the matching `.sha256` file.
 
    ```bash
-   shasum -a 256 Soria-0.1.0-macOS-unnotarized.dmg
-   cat Soria-0.1.0-macOS-unnotarized.dmg.sha256
+   shasum -a 256 Soria-0.1.0-macOS-arm64-unnotarized.dmg
+   cat Soria-0.1.0-macOS-arm64-unnotarized.dmg.sha256
 
-   shasum -a 256 Soria-0.1.0-macOS-unnotarized.zip
-   cat Soria-0.1.0-macOS-unnotarized.zip.sha256
+   shasum -a 256 Soria-0.1.0-macOS-arm64-unnotarized.zip
+   cat Soria-0.1.0-macOS-arm64-unnotarized.zip.sha256
    ```
 
 4. For the DMG, open it and drag `Soria.app` to `Applications`.
@@ -92,14 +92,11 @@ GitHub also shows a **Source code (zip)** download for every release. That file
 is source code only; use the app ZIP or DMG above if you want to install Soria
 without building it yourself.
 
-DMG and app ZIP installs include the app and the bundled analysis-worker source
-scripts, so `SORIA_WORKER_SCRIPT` is not part of normal user setup. The current
-zero-cost package does not vendor a portable Python virtual environment. If
-worker validation fails in an installed app, use **Settings > Analysis Worker**
-to point Soria at a compatible Python environment, or build from source and use
-the repo `analysis-worker/.venv`. `SORIA_PYTHON` and `SORIA_WORKER_SCRIPT` are
-developer/runtime overrides. Set or paste a Gemini API key only if you want
-embedding-based recommendations.
+DMG and app ZIP installs include the app, the analysis-worker source scripts,
+and an arch-specific bundled Python worker runtime. `SORIA_PYTHON` and
+`SORIA_WORKER_SCRIPT` are developer/runtime overrides, not part of normal user
+setup. Set or paste a Gemini API key only if you want embedding-based
+recommendations.
 
 ### Build From Source
 
@@ -170,10 +167,10 @@ VERSION=0.1.0 make release-dmg
 Generated release artifacts are written to `dist/`:
 
 ```text
-dist/Soria-0.1.0-macOS-unnotarized.dmg
-dist/Soria-0.1.0-macOS-unnotarized.dmg.sha256
-dist/Soria-0.1.0-macOS-unnotarized.zip
-dist/Soria-0.1.0-macOS-unnotarized.zip.sha256
+dist/Soria-0.1.0-macOS-arm64-unnotarized.dmg
+dist/Soria-0.1.0-macOS-arm64-unnotarized.dmg.sha256
+dist/Soria-0.1.0-macOS-arm64-unnotarized.zip
+dist/Soria-0.1.0-macOS-arm64-unnotarized.zip.sha256
 ```
 
 See [docs/RELEASING.md](docs/RELEASING.md) for the GitHub Releases workflow.
@@ -186,9 +183,10 @@ See [docs/RELEASING.md](docs/RELEASING.md) for the GitHub Releases workflow.
    Studio. You can paste it in Soria Settings or provide it as `GEMINI_API_KEY`.
 
 2. **Validate analysis settings.** In release builds, open Settings and validate
-   the active embedding profile. In source builds, install
-   `analysis-worker/requirements.txt` into `analysis-worker/.venv`, then set or
-   detect `SORIA_PYTHON` and `SORIA_WORKER_SCRIPT` if needed.
+   the active embedding profile with the bundled worker runtime. In source
+   builds, install `analysis-worker/requirements.txt` into
+   `analysis-worker/.venv`, then set or detect `SORIA_PYTHON` and
+   `SORIA_WORKER_SCRIPT` if needed.
 
 3. **Add music folders.** Open Soria, go to Settings or Library, and add one or
    more root folders that contain your tracks.
@@ -270,8 +268,7 @@ not available in every sandboxed environment.
 ### Known Limitations
 
 - Early DMGs are not notarized, so Gatekeeper warnings are expected.
-- Direct DMG/ZIP builds currently bundle worker scripts, not a portable Python
-  virtual environment.
+- Direct DMG/ZIP builds bundle an arch-specific Python worker runtime.
 - Audio feature extraction depends on local Python packages.
 - The waveform preview is derived analysis data, not a sample-accurate editor.
 - Rekordbox XML import/export targets common XML structures; unusual vendor
@@ -367,16 +364,16 @@ Soria는 [MIT License](LICENSE)로 배포됩니다. 기여자가 명시적으로
 
 1. [Releases](https://github.com/Ssojux2/Soria/releases) 페이지를 엽니다.
 2. 다음 릴리스 asset 중 하나를 다운로드합니다.
-   - drag-and-drop 설치용 `Soria-<version>-macOS-unnotarized.dmg`
-   - 직접 앱 archive용 `Soria-<version>-macOS-unnotarized.zip`
+   - drag-and-drop 설치용 `Soria-<version>-macOS-<arch>-unnotarized.dmg`
+   - 직접 앱 archive용 `Soria-<version>-macOS-<arch>-unnotarized.zip`
 3. 필요하면 matching `.sha256` 파일로 다운로드한 파일을 검증합니다.
 
    ```bash
-   shasum -a 256 Soria-0.1.0-macOS-unnotarized.dmg
-   cat Soria-0.1.0-macOS-unnotarized.dmg.sha256
+   shasum -a 256 Soria-0.1.0-macOS-arm64-unnotarized.dmg
+   cat Soria-0.1.0-macOS-arm64-unnotarized.dmg.sha256
 
-   shasum -a 256 Soria-0.1.0-macOS-unnotarized.zip
-   cat Soria-0.1.0-macOS-unnotarized.zip.sha256
+   shasum -a 256 Soria-0.1.0-macOS-arm64-unnotarized.zip
+   cat Soria-0.1.0-macOS-arm64-unnotarized.zip.sha256
    ```
 
 4. DMG는 파일을 열고 `Soria.app`을 `Applications`로 드래그합니다.
@@ -389,13 +386,10 @@ GitHub는 모든 릴리스에 **Source code (zip)** 다운로드도 표시합니
 DMG를 사용하세요.
 
 DMG 또는 앱 ZIP은 실행 자체를 위해 `SORIA_PYTHON`과 `SORIA_WORKER_SCRIPT`를
-직접 설정할 필요가 없습니다. 앱과 bundled analysis-worker source scripts가 함께
-포함되기 때문입니다. 현재 zero-cost package는 portable Python virtual environment를
-vendor하지 않습니다. 설치된 앱에서 worker validation이 실패하면 **Settings >
-Analysis Worker**에서 호환되는 Python 환경을 지정하거나, 소스에서 빌드하고 repo의
-`analysis-worker/.venv`를 사용하세요. `SORIA_PYTHON`과 `SORIA_WORKER_SCRIPT`는
-developer/runtime override입니다. 임베딩 기반 추천을 사용하려는 경우에만 Gemini API
-key를 설정하거나 붙여 넣으면 됩니다.
+직접 설정할 필요가 없습니다. 앱, analysis-worker source scripts, 아키텍처별 bundled
+Python worker runtime이 함께 포함되기 때문입니다. `SORIA_PYTHON`과
+`SORIA_WORKER_SCRIPT`는 developer/runtime override입니다. 임베딩 기반 추천을
+사용하려는 경우에만 Gemini API key를 설정하거나 붙여 넣으면 됩니다.
 
 ### 소스에서 빌드
 
@@ -466,10 +460,10 @@ VERSION=0.1.0 make release-dmg
 생성된 릴리스 산출물은 `dist/`에 기록됩니다.
 
 ```text
-dist/Soria-0.1.0-macOS-unnotarized.dmg
-dist/Soria-0.1.0-macOS-unnotarized.dmg.sha256
-dist/Soria-0.1.0-macOS-unnotarized.zip
-dist/Soria-0.1.0-macOS-unnotarized.zip.sha256
+dist/Soria-0.1.0-macOS-arm64-unnotarized.dmg
+dist/Soria-0.1.0-macOS-arm64-unnotarized.dmg.sha256
+dist/Soria-0.1.0-macOS-arm64-unnotarized.zip
+dist/Soria-0.1.0-macOS-arm64-unnotarized.zip.sha256
 ```
 
 GitHub Releases workflow는 [docs/RELEASING.md](docs/RELEASING.md)를 참고하세요.
@@ -566,8 +560,7 @@ service가 필요할 수 있습니다.
 ### 알려진 제한사항
 
 - 초기 DMG는 notarized 상태가 아니므로 Gatekeeper 경고가 예상됩니다.
-- 직접 만든 DMG/ZIP build는 현재 worker script만 포함하고 portable Python virtual
-  environment는 포함하지 않습니다.
+- 직접 만든 DMG/ZIP build는 아키텍처별 Python worker runtime을 포함합니다.
 - 오디오 feature extraction은 local Python package에 의존합니다.
 - waveform preview는 파생 분석 데이터이며 sample-accurate editor가 아닙니다.
 - Rekordbox XML import/export는 일반적인 XML 구조를 대상으로 합니다. 특이한 vendor
@@ -660,16 +653,16 @@ Soriaは[MIT License](LICENSE)で公開されています。コントリビュ�
 
 1. [Releases](https://github.com/Ssojux2/Soria/releases)ページを開きます。
 2. 次のいずれかのリリースassetをダウンロードします。
-   - drag-and-dropインストーラー用の`Soria-<version>-macOS-unnotarized.dmg`
-   - 直接アプリarchiveとして使う`Soria-<version>-macOS-unnotarized.zip`
+   - drag-and-dropインストーラー用の`Soria-<version>-macOS-<arch>-unnotarized.dmg`
+   - 直接アプリarchiveとして使う`Soria-<version>-macOS-<arch>-unnotarized.zip`
 3. 必要に応じて、対応する`.sha256`ファイルでダウンロードしたファイルを検証します。
 
    ```bash
-   shasum -a 256 Soria-0.1.0-macOS-unnotarized.dmg
-   cat Soria-0.1.0-macOS-unnotarized.dmg.sha256
+   shasum -a 256 Soria-0.1.0-macOS-arm64-unnotarized.dmg
+   cat Soria-0.1.0-macOS-arm64-unnotarized.dmg.sha256
 
-   shasum -a 256 Soria-0.1.0-macOS-unnotarized.zip
-   cat Soria-0.1.0-macOS-unnotarized.zip.sha256
+   shasum -a 256 Soria-0.1.0-macOS-arm64-unnotarized.zip
+   cat Soria-0.1.0-macOS-arm64-unnotarized.zip.sha256
    ```
 
 4. DMGの場合は開いて、`Soria.app`を`Applications`へドラッグします。
@@ -682,12 +675,9 @@ GitHubは各リリースに**Source code (zip)**ダウンロードも表示し�
 アプリZIPまたはDMGを使ってください。
 
 DMGまたはアプリZIPは、起動そのものに`SORIA_PYTHON`と
-`SORIA_WORKER_SCRIPT`の手動設定を必要としません。アプリとbundled
-analysis-worker source scriptsが含まれているためです。現在のzero-cost packageは
-portable Python virtual environmentをvendorしていません。インストール済みアプリで
-worker validationが失敗する場合は、**Settings > Analysis Worker**で互換性のある
-Python環境を指定するか、ソースからビルドしてrepoの`analysis-worker/.venv`を使って
-ください。`SORIA_PYTHON`と`SORIA_WORKER_SCRIPT`はdeveloper/runtime overrideです。
+`SORIA_WORKER_SCRIPT`の手動設定を必要としません。アプリ、analysis-worker source
+scripts、アーキテクチャ別のbundled Python worker runtimeが含まれているためです。
+`SORIA_PYTHON`と`SORIA_WORKER_SCRIPT`はdeveloper/runtime overrideです。
 埋め込みベースの推薦を使う場合にのみGemini API keyを設定または貼り付けてください。
 
 ### ソースからビルド
@@ -759,10 +749,10 @@ VERSION=0.1.0 make release-dmg
 生成されたリリース成果物は`dist/`に書き込まれます。
 
 ```text
-dist/Soria-0.1.0-macOS-unnotarized.dmg
-dist/Soria-0.1.0-macOS-unnotarized.dmg.sha256
-dist/Soria-0.1.0-macOS-unnotarized.zip
-dist/Soria-0.1.0-macOS-unnotarized.zip.sha256
+dist/Soria-0.1.0-macOS-arm64-unnotarized.dmg
+dist/Soria-0.1.0-macOS-arm64-unnotarized.dmg.sha256
+dist/Soria-0.1.0-macOS-arm64-unnotarized.zip
+dist/Soria-0.1.0-macOS-arm64-unnotarized.zip.sha256
 ```
 
 GitHub Releases workflowについては[docs/RELEASING.md](docs/RELEASING.md)を参照してください。
@@ -859,8 +849,7 @@ environmentでは利用できないlocal system servicesを必要とする場合
 ### 既知の制限
 
 - 初期DMGはnotarizedされていないため、Gatekeeper警告が想定されます。
-- 直接作成するDMG/ZIP buildは現在worker scriptsを同梱しますが、portable Python
-  virtual environmentは同梱しません。
+- 直接作成するDMG/ZIP buildはアーキテクチャ別のPython worker runtimeを同梱します。
 - オーディオfeature extractionはlocal Python packagesに依存します。
 - waveform previewは派生解析データであり、sample-accurate editorではありません。
 - Rekordbox XML import/exportは一般的なXML構造を対象にしています。特殊なvendor

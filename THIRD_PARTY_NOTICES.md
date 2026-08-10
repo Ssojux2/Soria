@@ -22,7 +22,7 @@ The Python worker dependencies are declared in
 | --- | --- | --- |
 | `numpy` | `1.26.4` | BSD-style license with bundled component notices |
 | `librosa` | `0.10.2.post1` | ISC |
-| `soundfile` | `0.12.1` | BSD 3-Clause |
+| `soundfile` | `0.14.0` | BSD 3-Clause |
 | `requests` | `2.34.2` | Apache-2.0 |
 | `chromadb` | `1.5.9` | Apache Software License classifier |
 | `pytest` | `9.0.3` | MIT |
@@ -31,13 +31,14 @@ The Python worker dependencies are declared in
 
 ## Release Artifacts
 
-Current DMG/ZIP release artifacts bundle the Soria app and the
-`analysis-worker` source scripts. They do not vendor the repository
-`analysis-worker/.venv` directory or a portable Python runtime.
+Current DMG/ZIP release artifacts bundle the Soria app, the `analysis-worker`
+source scripts, and an arch-specific Python worker runtime assembled by
+`Scripts/build_worker_runtime.sh`. The repository `analysis-worker/.venv`
+directory is still not vendored.
 
-If a future release vendors Python wheels, native libraries, or a portable
-runtime, update this file with the complete transitive license inventory for
-that exact bundle.
+Before publishing a release that vendors Python wheels, native libraries, or a
+portable runtime, regenerate a complete transitive license inventory for that
+exact bundle.
 
 ## Dependency Audit Command
 

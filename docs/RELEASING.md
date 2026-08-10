@@ -11,16 +11,16 @@ The macOS app produced by this repo is:
 - Ad-hoc signed with `codesign --sign -`.
 - Not signed with an Apple Developer ID certificate.
 - Not notarized by Apple.
-- Bundled with the `analysis-worker` source scripts, but not a portable Python
-  virtual environment.
+- Bundled with the `analysis-worker` source scripts and an arch-specific
+  portable Python worker runtime.
 
 That means macOS Gatekeeper warnings are expected. This avoids Apple Developer
 Program cost for the early phase, but it is less friendly for non-technical
 users than a Developer ID signed and notarized release.
 
-Analysis features still need a compatible Python runtime with
-`analysis-worker/requirements.txt` installed. Installed users can point Soria at
-that runtime from Settings; source users can use `analysis-worker/.venv`.
+Analysis features in DMG/ZIP installs use the bundled worker runtime. Source
+builds should use `analysis-worker/.venv` with `analysis-worker/requirements.txt`
+installed.
 
 ## Local Release Build
 
@@ -45,11 +45,15 @@ Clean first if you want a fully fresh package:
 Artifacts are written to `dist/`:
 
 ```text
-dist/Soria-0.1.0-macOS-unnotarized.dmg
-dist/Soria-0.1.0-macOS-unnotarized.dmg.sha256
-dist/Soria-0.1.0-macOS-unnotarized.zip
-dist/Soria-0.1.0-macOS-unnotarized.zip.sha256
+dist/Soria-0.1.0-macOS-arm64-unnotarized.dmg
+dist/Soria-0.1.0-macOS-arm64-unnotarized.dmg.sha256
+dist/Soria-0.1.0-macOS-arm64-unnotarized.zip
+dist/Soria-0.1.0-macOS-arm64-unnotarized.zip.sha256
 ```
+
+Set `SORIA_RELEASE_ARCH=x86_64` to build the Intel artifact on an Intel runner.
+Universal Python runtime merging is intentionally out of scope for the early
+release path.
 
 ## GitHub Releases
 
@@ -86,8 +90,8 @@ Soria source code is distributed under the MIT License.
 - Confirm `CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `PRIVACY.md`, issue
   templates, and the pull request template are present.
 - Run `make release-dmg` and verify the DMG mounts and ZIP extracts.
-- Verify analysis runtime messaging in Settings, because the early DMG/ZIP does
-  not yet ship a portable Python venv.
+- Verify the bundled worker runtime with Settings validation or a worker
+  healthcheck from inside the app bundle.
 - Check `THIRD_PARTY_NOTICES.md` before changing bundled dependencies.
 - Upload the DMG, ZIP, and matching `.sha256` checksums.
 - Keep the release marked as draft until the README and install warning are clear.

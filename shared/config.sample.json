@@ -5,7 +5,7 @@
   },
   "embedding": {
     "provider": "gemini",
-    "model": "text-embedding-004",
+    "model": "gemini-embedding-2-preview",
     "batch_size": 8,
     "retry_count": 4,
     "timeout_sec": 30

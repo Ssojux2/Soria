@@ -837,6 +837,17 @@ nonisolated final class PythonWorkerClient {
         return String(normalized[..<endIndex]) + "..."
     }
 
+    private static func userFacingExecutionDetail(_ detail: String) -> String {
+        if detail.localizedCaseInsensitiveContains("xcrun: error: cannot be used within an App Sandbox") {
+            return appleSystemPythonRuntimeMessage()
+        }
+        return detail
+    }
+
+    private static func appleSystemPythonRuntimeMessage() -> String {
+        "The selected Python executable is Apple's /usr/bin/python3 developer-tool shim, which can invoke xcrun and be blocked inside App Sandbox. Use bundled release Python or analysis-worker/.venv/bin/python with requirements installed."
+    }
+
     static func failureSummary(for commandName: String, error: Error) -> String {
         guard let workerError = error as? WorkerError else {
             return "Worker \(commandName) failed: \(error.localizedDescription)"
@@ -844,7 +855,7 @@ nonisolated final class PythonWorkerClient {
 
         switch workerError {
         case .executionFailed(let detail):
-            let suffix = diagnosticPreview(detail)
+            let suffix = diagnosticPreview(userFacingExecutionDetail(detail))
             return suffix.isEmpty
                 ? "Worker \(commandName) execution failed."
                 : "Worker \(commandName) execution failed: \(suffix)"
@@ -952,6 +963,9 @@ nonisolated final class PythonWorkerClient {
         if pythonExecutable.isEmpty {
             return "Python executable path is empty."
         }
+        if AppSettingsStore.isUnsupportedAppleSystemPythonExecutable(pythonExecutable) {
+            return appleSystemPythonRuntimeMessage()
+        }
         if !fileManager.fileExists(atPath: pythonExecutable) {
             return missingWorkerRuntimeMessage(
                 configuredPath: pythonExecutable,
@@ -991,9 +1005,11 @@ nonisolated final class PythonWorkerClient {
     ) -> String {
         if matchesExpectedProjectRuntime(configuredPath, expectedProjectPath: expectedProjectPath) {
             return "Development runs currently require an executable repo \(projectRelativePath) at \(configuredPath). " +
-                "Recreate analysis-worker/.venv and install analysis-worker/requirements.txt."
+                "Recreate analysis-worker/.venv and install analysis-worker/requirements.txt. " +
+                pythonRuntimeDiagnostics(configuredPath: configuredPath)
         }
-        return "Configured python executable is not executable at \(configuredPath). Update Analysis Settings or use detected defaults."
+        return "Configured python executable is not executable at \(configuredPath). Update Analysis Settings or use detected defaults. " +
+            pythonRuntimeDiagnostics(configuredPath: configuredPath)
     }
 
     private static func matchesExpectedProjectRuntime(_ configuredPath: String, expectedProjectPath: String?) -> Bool {
@@ -1001,6 +1017,30 @@ nonisolated final class PythonWorkerClient {
         let standardizedConfigured = URL(fileURLWithPath: configuredPath).standardizedFileURL.path
         let standardizedExpected = URL(fileURLWithPath: expectedProjectPath).standardizedFileURL.path
         return standardizedConfigured == standardizedExpected
+    }
+
+    private static func pythonRuntimeDiagnostics(configuredPath: String) -> String {
+        var details: [String] = []
+        let configuredURL = URL(fileURLWithPath: configuredPath)
+        let resolvedPath = configuredURL.resolvingSymlinksInPath().path
+        if resolvedPath != configuredPath {
+            details.append("Resolved target: \(resolvedPath).")
+        }
+
+        let pyvenvURL = configuredURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("pyvenv.cfg")
+        if
+            let contents = try? String(contentsOf: pyvenvURL, encoding: .utf8),
+            let homeLine = contents
+                .split(separator: "\n")
+                .first(where: { String($0).trimmingCharacters(in: .whitespaces).hasPrefix("home =") })
+        {
+            details.append("Virtualenv \(String(homeLine).trimmingCharacters(in: .whitespaces)).")
+        }
+
+        return details.joined(separator: " ")
     }
 }
 

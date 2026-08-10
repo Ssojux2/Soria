@@ -34,8 +34,8 @@ library database.
   move the original to macOS Trash when possible.
 - Rekordbox and Serato export files are written to destinations chosen by the
   user or to detected vendor-safe package locations.
-- Early release builds bundle the worker source scripts, not a portable Python
-  virtual environment.
+- Release builds bundle the worker source scripts and an arch-specific Python
+  worker runtime so installed analysis does not require a separate Python setup.
 
 ## Issue Reports and Logs
 

@@ -10,26 +10,13 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            List {
+            List(selection: sidebarSelection) {
                 ForEach(SidebarSection.allCases) { section in
-                    Button {
-                        viewModel.selectedSection = section
-                    } label: {
-                        HStack {
-                            Label(section.rawValue, systemImage: icon(for: section))
-                            Spacer()
-                            if section == viewModel.selectedSection {
-                                Image(systemName: "checkmark")
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier(
-                        "sidebar-\(section.rawValue.replacingOccurrences(of: " ", with: "-").lowercased())"
-                    )
+                    SidebarRow(section: section, systemImage: icon(for: section))
+                        .tag(section)
                 }
             }
+            .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 200, ideal: 220)
         } detail: {
             selectedDetailPane
@@ -56,6 +43,17 @@ struct ContentView: View {
             LibrarySyncSheet(viewModel: viewModel)
                 .interactiveDismissDisabled(viewModel.librarySyncPresentationState?.phase == .running)
         }
+    }
+
+    private var sidebarSelection: Binding<SidebarSection?> {
+        Binding(
+            get: { viewModel.selectedSection },
+            set: { section in
+                if let section {
+                    viewModel.selectedSection = section
+                }
+            }
+        )
     }
 
     private var scopeInspectorBinding: Binding<Bool> {
@@ -192,6 +190,24 @@ struct ContentView: View {
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("right-pane-settings")
         }
+    }
+}
+
+private struct SidebarRow: View {
+    let section: SidebarSection
+    let systemImage: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .imageScale(.medium)
+            Text(section.rawValue)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(section.rawValue)
+        .accessibilityIdentifier("sidebar-\(section.rawValue.replacingOccurrences(of: " ", with: "-").lowercased())")
     }
 }
 

@@ -29,7 +29,6 @@ RETIRED_VECTOR_PROFILE_IDS = (
     "local/clap-htsat-unfused",
 )
 LEGACY_VECTOR_PROFILE_IDS = (
-    "google/text-embedding-004",
     "google/gemini-embedding-001",
 )
 ALL_VECTOR_PROFILE_IDS = tuple(EMBEDDING_PROFILES.keys()) + RETIRED_VECTOR_PROFILE_IDS + LEGACY_VECTOR_PROFILE_IDS
